@@ -1,0 +1,104 @@
+# SESSION SUMMARY 001 — smb-rs project state & continuation guide
+
+## Project
+- Repo: https://github.com/farazshaikh/smb-rs (local: ~/wrk/smb-rs which symlinks to /wrk/smb-rs)
+- Goal: SMB1 done; implement full SMB2 + SMB3 per docs/protocol/smb2_3/MS-SMB2.pdf (499 pages)
+- User requirements: async transport, cargo workspace, modular independently-testable crates,
+  Wire trait zero-copy codecs, Vfs trait + Posix backend, IoContext w/ refcounted state,
+  deny(missing_docs), forbid(unsafe_code), doc comments citing spec sections,
+  work in phases: implement -> unit tests -> system tests (smbclient/impacket) -> commit.
+
+## Build / test / run commands
+- cd ~/wrk/smb-rs && cargo build --release --workspace   # NOTE: plain `cargo build` only builds meta pkg!
+- Binary: target/release/rustsmb
+- Run: ./target/release/rustsmb -p 4450 -s public=$PWD/share [-u user:pass]
+- Kill old instances first: pkill -9 -x rustsmb
+- Regression: smbclient //127.0.0.1/public -p 4450 -U guest% -N \
+    --option='client min protocol=NT1' --option='client max protocol=NT1' -c 'ls'
+- Auth suite: same with -U alice%secret123 (server started WITHOUT -u = guest mode;
+  WITH -u alice:secret123 = users mode, allow_guest=false)
+- Impacket: python3 (miniconda has impacket) SMB('*SMBSERVER','127.0.0.1',sess_port=4450)
+- Spec text extracted: /tmp/smb.txt (regenerate: pdftotext docs/protocol/smb1/MS-SMB.pdf /tmp/smb.txt)
+- MS-SMB2 text: pdftotext docs/protocol/smb2_3/MS-SMB2.pdf /tmp/smb2.txt
+
+## Architecture (post pass-1 refactor)
+Workspace members (crates/):
+- smb-proto          : Wire trait, DecodeCtx{base,unicode}, Status codes, FileTime,
+                       AttrFlags, Disposition, buf::Reader/Writer (zstring handles unicode
+                       parity via base+pos — callers pass ABSOLUTE offset of buf[0], never pre-add pos!)
+- smb-proto-smb1     : header.rs(Header/RespBody/build_response AndX assembly),
+                       consts.rs(opcodes/caps/flags), negotiate.rs(byte-packed WC17 words,
+                       ChallengeLength INSIDE word area at byte[33]), session_setup.rs(WC=13 legacy +
+                       WC=12 extended parse; blob len @bytes14-15!), create.rs, rw.rs(both WRITE_ANDX
+                       variants; DataLen@vwv8/DOff@vwv10 impacket fallback), misc.rs, legacy.rs,
+                       trans2.rs(envelope: subcmd via Setup[0] OR params[0]+pad; g() closure pattern),
+                       find.rs(FindEntry encoder, chain stride >=94 for BOTH level),
+                       query.rs(QueryMeta + encode_payload incl. composite 0x107)
+- smb-transport      : async Transport trait(recv/send/peer), tcp.rs(NBSS: 0x81 answered 0x82,
+                       keepalive skip), mem.rs(duplex for tests)
+- smb-vfs            : Vfs async trait, OpenFile(path/is_dir/can_read/can_write/delete flags/
+                       inner Box<dyn Any>), FileMeta{times[4],attrs,eof,alloc,is_dir}, Entry, SetOp enum
+- smb-backend-posix  : PosixVfs(root containment, case-insensitive resolve, wildcards)
+- smb-auth           : crypto/{md4,md5,hmac,des}.rs (MD4 RFC-vectors tested), ntlm.rs(type1/2/3,
+                       SPNEGO DER wrap_negtoken_targ/wrap_accept_complete, is_spnego, unwrap_blob)
+- smb-server         : main.rs(tokio accept loop), dispatch.rs(async serve_client/process_frame/
+                       IoContext/ReqView incl .frame field), cmds/{mod,file_cmds,dir_cmds,
+                       trans2_cmds,session}.rs, auth.rs(NTLMv2 verify: identity=UPPER(user)+domain),
+                       state.rs(ServerShared/Share{name,root,vfs,is_ipc}/ConnState/Session/SearchCtx,
+                       next_uid/tid/fid/sid atomics)
+
+## CRITICAL LESSONS (do not re-learn)
+1. CAP_LARGE_READX=0x4000, CAP_LARGE_WRITEX=0x8000 (NOT 0x40000000/0x80000000 — bit31=EXT_SEC!)
+2. Negotiate response: WordCount=17, 34 bytes byte-packed, ChallengeLength byte at [33],
+   challenge bytes in data area at frame[69..77]
+3. EXTENDED_SECURITY (bit31) MUST be advertised or modern clients reject sessions;
+   negotiate data then = 16-byte GUID only (no challenge); setup does SPNEGO legs
+4. Reader::zstring(base) adds cursor pos internally — never pre-add rd.pos to base arg
+5. WRITE_ANDX has TWO wire variants (MS-CIFS vs Impacket); rw::pick_layout tries both
+6. TRANS2 request: subcmd either in Setup[0] (Impacket) or params[0]+pad (classic);
+   param offsets vwv9/10, data offsets vwv12/13
+7. READ_ANDX response needs full WC=12 (24B params, 6B reserved tail)
+8. Session setup responses: OEM strings always (impacket mis-parses UTF16 there)
+9. cargo test --workspace for all tests; smb-auth has MD4/MD5/HMAC vectors (all green)
+10. QFILEINFO composite level 0x107 layout verified vs smbd capture (92B form)
+
+## CURRENT STATE (end of session 1 of pass 2)
+- Pass 1 committed d91093b; scaffold commit 2c3f1f2
+- SMB1: everything green EXCEPT FIND_FIRST2 level-0x104 entry name parse regression
+  (smbclient "unable to parse name from info level 260"; impacket list shows one empty entry).
+  Suspect: LastNameOffset semantics or entry stride; debug via MITM (mitm2.py pattern in /tmp/opencode)
+- SMB2: only Header2::parse + Dialect enum exist in smb-proto-smb2/src/lib.rs
+
+## PASS 2 PLAN — phased groups (each: impl -> unit tests -> harness test -> commit)
+P2.1 NEGOTIATE (§2.2.3): SMB2 NEGOTIATE req/resp, dialect selection, capabilities,
+     client GUID, security mode. Test: impacket SMB() connects (it speaks SMB2 natively!).
+     Dispatcher: sniff magic \xFE at transport layer -> route to smb2 dispatch.
+P2.2 SESSION_SETUP (§2.2.5): SPNEGO reuse from smb-auth; guest + NTLMv2 verify
+     (reuse authenticate_ntlmssp). Test: impacket login alice/secret123.
+P2.3 TREE_CONNECT (§2.2.9) + LOGOFF (§2.2.7): share resolution via ServerShared.
+P2.4 CREATE/CLOSE (§2.2.13/15): FileId=u64 replaces FID; handle table keyed u64.
+P2.5 READ (§2.2.19) / WRITE (§2.2.21): offset-based like ANDX versions.
+P2.6 QUERY_DIRECTORY (§2.2.33): reuse smb-proto-smb1 find encoders? NO — SMB2 uses
+     FILE_*_INFORMATION formats (same as passthrough levels!) — write smb2/query_dir.rs.
+P2.7 QUERY_INFO (§2.2.37) + SET_INFO (§2.2.38): FILE_INFORMATION_CLASS passthrough
+     (maps 1:1 to our QueryMeta/SetOp).
+P2.8 ECHO (§2.2.28), CANCEL (§2.2.30), FLUSH (§2.2.17), LOCK (§2.2.26), IOCTL stub.
+P2.9 TREE_DISCONNECT (§2.2.11), compound request support (next_command walking).
+P2.10 Signing (HMAC-SHA256, §3.3.5.2) + SMB3 encryption (AES-GCM via hand-rolled AES).
+P2.11 SMB3 dialect specifics: pre-auth integrity hash SHA-512, negotiate contexts.
+Harness loop after each phase: smbclient -m SMB2/SMB3 + impacket + commit.
+
+## KEY [MS-SMB2] SECTIONS (from pdf TOC)
+2.2.1 SMB2 Header · 2.2.3 Negotiate · 2.2.5 Session Setup · 2.2.7 Logoff ·
+2.2.9 Tree Connect · 2.2.11 Tree Disconnect · 2.2.13 Create · 2.2.15 Close ·
+2.2.16 Flush · 2.2.17 Read · 2.2.19 Write · 2.2.23 Echo · 2.2.26 Lock ·
+2.2.28 Cancel · 2.2.33 Find · 2.2.35 Query Info · 2.2.37 Set Info ·
+3.3.5.2 server behaviors per command
+
+## GOTCHAS
+- gh CLI is snap-confined: cannot access /wrk paths; run gh api from $HOME or /tmp
+- git push works fine from /wrk (credential helper /snap/bin/gh configured globally)
+- Write tool fails on >~12KB payloads: split big files into multiple writes
+- tokio task panics print to stderr captured in server.log ✓
+- smbclient needs BOTH --option flags min/max NT1 (or -m SMB2 for pass 2 testing)
+- impacket SMB() defaults to trying SMB2 first — perfect SMB2 harness!
