@@ -200,6 +200,47 @@ pub(crate) fn process_frame(
                 }
             }
         }
+        ss::cmd::TREE_CONNECT => {
+            let body = buf.get(64..)?;
+            let path_len = g16(body, 4) as usize;
+            let path_off = g16(body, 6) as usize;
+            let path = String::from_utf8_lossy(
+                buf.get(path_off..path_off + path_len).unwrap_or(&[])
+            ).trim_end_matches('\0').to_string();
+            let name = path.rsplit(['/', '\\'])
+                .find(|s| !s.is_empty())
+                .unwrap_or("")
+                .to_lowercase();
+            if name != "ipc$" && !server.shares.contains_key(&name) {
+                (Status::BAD_NETWORK_NAME, Vec::new())
+            } else {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static TID: AtomicU64 = AtomicU64::new(1);
+                let tid = TID.fetch_add(1, Ordering::Relaxed);
+                conn.trees.insert(tid, name);
+                (Status::SUCCESS, vec![16u8, 0].to_vec())
+            }
+        }
+        ss::cmd::TREE_DISCONNECT => {
+            let tid = buf.get(60..68)
+                .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+                .unwrap_or(0);
+            conn.trees.remove(&tid);
+            (Status::SUCCESS, vec![16u8, 0].to_vec())
+        }
+        ss::cmd::CREATE => {
+            // Minimal CREATE for testing — full impl in next phase.
+            (Status::NOT_IMPLEMENTED, Vec::new())
+        }
+        ss::cmd::READ => {
+            (Status::NOT_IMPLEMENTED, Vec::new())
+        }
+        ss::cmd::WRITE => {
+            (Status::NOT_IMPLEMENTED, Vec::new())
+        }
+        ss::cmd::ECHO => {
+            (Status::SUCCESS, buf.get(64..).unwrap_or(&[]).to_vec())
+        }
         _ => (Status::NOT_IMPLEMENTED, Vec::new()),
     };
 
@@ -207,6 +248,10 @@ pub(crate) fn process_frame(
     let sid = if last_status_is_error(status) { 0 } else { conn.session_id };
     let _ = sid;
     Some(build_smb2_response(hdr, status, 1, body, conn.session_id, *mid))
+}
+
+fn g16(b: &[u8], o: usize) -> u16 {
+    b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]])).unwrap_or(0)
 }
 
 fn last_status_is_error(_s: Status) -> bool {
