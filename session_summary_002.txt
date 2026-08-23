@@ -1,0 +1,50 @@
+# SESSION SUMMARY 002 — SMB2 progress + remaining work
+
+## What's DONE and WORKING
+- Pass 1 async workspace refactor: complete (see session_summary_001.txt)
+- SMB1: negotiate/auth/tcon/create/read/write/close/delete all green
+- SMB2 via impacket: negotiate, auth (NTLMSSP both legs), tree connect,
+  create, read — all working end-to-end
+- Multi-protocol upgrade: \xFESMB marker in SMB1 NEGOTIATE detected,
+  server responds with SMB2 negotiate response
+- Per-frame dialect routing in dispatch loop (0xFE=SMB2, 0xFF=SMB1)
+- Commit 50a80b1
+
+## REMAINING BUGS (blocking)
+1. FIND_FIRST2/FIND_NEXT2 entry encoding regression:
+   smbclient: "unable to parse name from info level 260" (=0x104 BOTH_DIRECTORY_INFO)
+   impacket list_path shows one empty-name/zero-size entry
+   Root cause: FindEntry/QueryMeta types in proto crate may have field mismatch
+   with what the encoder writes vs what clients expect. The old monolith code
+   worked. Compare old trans2.rs encode_entries logic against new find.rs.
+   KEY: old code used `m.times` array of FileTime structs; new QueryMeta has plain u64s.
+
+2. Impacket list_path returns entries but get_longname() is empty → same root cause as #1
+
+## NEXT STEPS (in order)
+1. Fix FIND encoding: compare old vs new encode_entries byte-for-byte.
+   The old file was at git commit 769f355 path src/trans2.rs function encode_entries.
+   Key diff: old used `m.times[..3]` for DOS times and `m.times` (all 4) for NT levels;
+   new uses `m.times` from QueryMeta which is [u64;4] not [FileTime;4].
+   Also check NextEntryOffset padding math.
+2. After FIND works: full regression (smbclient ls + impacket list_path)
+3. Add TREE_DISCONNECT + LOGOFF + more commands to smb2 dispatch
+4. SMB2 signing (HMAC-SHA256), encryption (AES-GCM) if time permits
+5. Update README.md with new architecture diagram + SMB2 support status
+
+## KEY ARCHITECTURE NOTES
+- dispatch.rs serve_client(): per-frame routing by magic byte (0xFE=SMB2, else SMB1)
+- conn.upgraded_smb2 flag tracks multi-protocol upgrade
+- cmds/mod.rs dispatch_one() is now async, routes per command opcode
+- cmds/trans2_cmds.rs handles all TRANS2 subcommands
+- VfsError→Status mapping in vfs_err() helper (each cmds module has its own copy)
+
+## FILE LOCATIONS
+- SMB1 codecs: crates/smb-proto-smb1/src/{header,negotiate,session_setup,tree_connect,create,rw,misc,legacy,trans2,find,query}.rs
+- SMB2 codecs: crates/smb-proto-smb2/src/{lib,negotiate,session_setup}.rs
+- Server dispatch: crates/smb-server/src/dispatch.rs
+- SMB2 loop: crates/smb-server/src/smb2.rs
+- Command handlers: crates/smb-server/src/cmds/{mod,session,file_cmds,dir_cmds,trans2_cmds}.rs
+- Auth: crates/smb-server/src/auth.rs + crates/smb-auth/src/
+- VFS trait: crates/smb-vfs/src/lib.rs + vfs.rs
+- POSIX backend: crates/smb-backend-posix/src/lib.rs
