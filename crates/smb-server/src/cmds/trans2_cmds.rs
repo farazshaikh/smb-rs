@@ -33,7 +33,7 @@ pub async fn dispatch_trans2(
         t2::subcmd::FIND_NEXT2 => find_next2(io, &t).await?,
         t2::subcmd::QUERY_FS_INFO => query_fs(io, req.hdr.tid, &t)?,
         t2::subcmd::QUERY_PATH_INFO => query_path(io, req.hdr.tid, &t).await?,
-        t2::subcmd::QUERY_FILE_INFO => query_file(io, &t).await?,
+        t2::subcmd::QUERY_FILE_INFO => query_file(io, req.hdr.tid, &t).await?,
         t2::subcmd::SET_FILE_INFO => set_file(io, &t).await?,
         t2::subcmd::SET_PATH_INFO => set_path(io, req.hdr.tid, &t).await?,
         other => {
@@ -273,13 +273,18 @@ async fn query_path(
     let m = vfs.stat(&name).await.map_err(vfs_err)?;
     let short = name.rsplit(['\\', '/']).next().unwrap_or("").to_string();
     let qm = qmeta_from(&m);
+    eprintln!("query_path: name={:?} level={:#06x} eof={}", name, level, qm.eof);
     query::encode_payload(level, &qm, &short)
         .map(|d| (Vec::new(), d))
         .map_err(|_| Status::INVALID_PARAMETER)
 }
 
 /// QUERY_FILE_INFORMATION by FID.
-async fn query_file(io: &IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, Vec<u8>), Status> {
+pub(crate) async fn query_file(
+    io: &IoCtx<'_>,
+    tid: u16,
+    t: &t2::Trans2Req,
+) -> Result<(Vec<u8>, Vec<u8>), Status> {
     if t.params.len() < 4 {
         return Err(Status::INVALID_PARAMETER);
     }
@@ -289,22 +294,21 @@ async fn query_file(io: &IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, Vec<u
         return Err(Status::INVALID_HANDLE);
     };
     let name = h.path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-    let qm = qmeta_from(&stat_open_meta(h));
+    let vfs = share_vfs(io, tid);
+    let m = vfs.stat(&h.path).await.unwrap_or_default();
+    let qm = smb_proto_smb1::query::QueryMeta {
+        times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
+        attrs: m.attrs,
+        eof: m.eof,
+        alloc: m.alloc,
+        is_dir: m.is_dir,
+    };
     query::encode_payload(level, &qm, &name)
         .map(|d| (Vec::new(), d))
         .map_err(|_| Status::INVALID_PARAMETER)
 }
 
 /// Metadata snapshot of an open handle (path re-statted when possible).
-fn stat_open_meta(h: &smb_vfs::OpenFile) -> smb_vfs::FileMeta {
-    smb_vfs::FileMeta {
-        times: Default::default(),
-        attrs: smb_proto::types::AttrFlags(if h.is_dir { 0x10 } else { 0x20 }),
-        alloc: 0,
-        eof: 0,
-        is_dir: h.is_dir,
-    }
-}
 
 // ---------------- SET_FILE / SET_PATH ----------------
 
