@@ -1,0 +1,20 @@
+[package]
+name = "smb-server"
+description = "rustsmb — SMB1 file server binary wiring transport, protocol and POSIX backend"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rustsmb"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+smb-proto = { path = "../smb-proto" }
+smb-proto-smb1 = { path = "../smb-proto-smb1" }
+smb-transport = { path = "../smb-transport" }
+smb-vfs = { path = "../smb-vfs" }
+smb-backend-posix = { path = "../smb-backend-posix" }
+smb-auth = { path = "../smb-auth" }

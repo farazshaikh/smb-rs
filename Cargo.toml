@@ -1,9 +1,31 @@
 [package]
-name = "rustsmb"
-version = "0.1.0"
-edition = "2021"
+name = "rustsmb-meta"
+description = "Workspace meta-package for the smb-rs project"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
 
-[dependencies]
+[workspace]
+resolver = "2"
+members = [
+    "crates/smb-proto",
+    "crates/smb-proto-smb1",
+    "crates/smb-transport",
+    "crates/smb-vfs",
+    "crates/smb-backend-posix",
+    "crates/smb-auth",
+    "crates/smb-server",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.2.0"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "fs", "time"] }
+async-trait = "0.1"
+thiserror = "2"
 
 [profile.release]
 opt-level = 2

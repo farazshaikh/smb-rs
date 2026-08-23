@@ -1,0 +1,9 @@
+[package]
+name = "smb-auth"
+description = "SMB authentication primitives: NTLMSSP messages, SPNEGO wrapping, MD4/MD5/HMAC-MD5/DES"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+smb-proto = { path = "../smb-proto" }

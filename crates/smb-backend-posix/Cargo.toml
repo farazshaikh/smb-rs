@@ -1,0 +1,11 @@
+[package]
+name = "smb-backend-posix"
+description = "Default POSIX/std-fs storage backend for the smb-rs virtual filesystem"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+smb-proto = { path = "../smb-proto" }
+smb-vfs = { path = "../smb-vfs" }

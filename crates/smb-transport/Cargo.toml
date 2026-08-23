@@ -1,0 +1,11 @@
+[package]
+name = "smb-transport"
+description = "Async SMB message transport abstraction with TCP/NBSS and in-memory implementations"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

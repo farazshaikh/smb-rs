@@ -1,0 +1,9 @@
+[package]
+name = "smb-proto-smb1"
+description = "SMB1 (MS-SMB/MS-CIFS) wire structures: headers, commands, TRANS2 information levels"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+smb-proto = { path = "../smb-proto" }
