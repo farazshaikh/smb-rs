@@ -16,6 +16,9 @@
 /// SMB2 header magic `\xFESMB`.
 pub const SMB2_MAGIC: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
+pub mod negotiate;
+pub mod session_setup;
+
 /// Known SMB2/3 dialect numbers (§2.2.3.1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
@@ -29,6 +32,19 @@ pub enum Dialect {
     V302,
     /// 3.1.1
     V311,
+}
+
+impl Dialect {
+    /// Wire dialect revision number.
+    pub fn rev(self) -> u16 {
+        match self {
+            Dialect::V202 => 0x0202,
+            Dialect::V210 => 0x0210,
+            Dialect::V300 => 0x0300,
+            Dialect::V302 => 0x0302,
+            Dialect::V311 => 0x0311,
+        }
+    }
 }
 
 /// Fixed 64-byte SMB2 header (§2.2.1) — decoded view.

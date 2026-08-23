@@ -13,6 +13,7 @@ path = "src/main.rs"
 async-trait.workspace = true
 tokio.workspace = true
 smb-proto = { path = "../smb-proto" }
+smb-proto-smb2 = { path = "../smb-proto-smb2" }
 smb-proto-smb1 = { path = "../smb-proto-smb1" }
 smb-transport = { path = "../smb-transport" }
 smb-vfs = { path = "../smb-vfs" }

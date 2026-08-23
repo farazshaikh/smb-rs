@@ -6,6 +6,7 @@
 mod auth;
 pub mod cmds;
 pub mod dispatch;
+pub mod smb2;
 pub mod state;
 
 use std::collections::HashMap;

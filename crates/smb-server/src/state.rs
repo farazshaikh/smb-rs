@@ -77,6 +77,8 @@ pub struct ConnState {
     pub uid: u16,
     /// Multi-leg authentication in progress.
     pub auth_pending: bool,
+    /// Client upgraded from SMB1 multi-protocol negotiate to SMB2.
+    pub upgraded_smb2: bool,
     /// Client initiated SPNEGO-wrapped NTLMSSP.
     pub spnego: bool,
     /// Session once authenticated (None during null-session setup).
@@ -97,6 +99,7 @@ impl ConnState {
             negotiated: false,
             uid: 0,
             auth_pending: false,
+            upgraded_smb2: false,
             spnego: false,
             session: None,
             trees: HashMap::new(),

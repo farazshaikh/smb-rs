@@ -13,7 +13,7 @@ use smb_proto_smb1::header::{build_response, parse_header, Header, RespBody, HDR
 use smb_transport::Transport;
 use smb_proto_smb1::consts::flags2;
 
-use crate::state::{next_uid, ServerShared, ConnState};
+use crate::state::{next_uid, ServerShared, ConnState, Session};
 
 /// Short alias used by command handlers.
 pub type IoCtx<'a> = IoContext<'a>;
@@ -75,6 +75,9 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, mut transport
     let challenge = rand_challenge();
     let mut conn = ConnState::new(challenge);
 
+    let mut smb2_conn: Option<crate::smb2::Smb2Conn> = None;
+    let mut mid: u64 = 1;
+
     loop {
         let Some(frame) = (match transport.recv().await {
             Ok(Some(f)) => Some(f),
@@ -82,15 +85,38 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, mut transport
         }) else {
             return;
         };
-        if frame.0.is_empty() {
+        if frame.0.len() < 4 {
             continue;
         }
+
+        // SMB2/3 frames (\xFESMB magic).
+        if frame.0[0] == 0xFE || conn.upgraded_smb2 {
+            if smb2_conn.is_none() {
+                smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge()));
+            }
+            let c2 = smb2_conn.as_mut().unwrap();
+            if let Some(resp) =
+                crate::smb2::process_frame(&server, c2, &mut mid, &frame.0)
+            {
+                if transport.send(&resp).await.is_err() {
+                    return;
+                }
+            }
+            continue;
+        }
+
+        // SMB1 frames.
         if let Some(resp) = process_frame(&server, &mut conn, &frame.0).await {
             if transport.send(&resp).await.is_err() {
                 return;
             }
         }
     }
+}
+
+/// Cryptographically random per-connection NTLM challenge.
+pub fn rand_challenge_pub() -> [u8; 8] {
+    rand_challenge()
 }
 
 /// Cryptographically random per-connection NTLM challenge.
@@ -112,7 +138,7 @@ fn rand_challenge() -> [u8; 8] {
 }
 
 /// Execute one frame and build its response (`None` to stay silent).
-async fn process_frame(
+pub(crate) async fn process_frame(
     server: &Arc<crate::state::ServerShared>,
     conn: &mut ConnState,
     buf: &[u8],
@@ -122,6 +148,34 @@ async fn process_frame(
     // NT_CANCEL never produces a normal body exchange.
     if hdr.command == consts::COM_NT_CANCEL {
         return Some(build_response(&hdr, Status::CANCELLED, Vec::new()));
+    }
+
+    // Multi-protocol upgrade: only when client offers \xFESMB dialects.
+    if hdr.command == consts::COM_NEGOTIATE
+        && !conn.upgraded_smb2
+        && buf.windows(4).any(|w| w == [0xFE, b'S', b'M', b'B'])
+    {
+        if let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {
+            conn.upgraded_smb2 = true;
+            eprintln!("upgraded to SMB2 via multi-protocol negotiate");
+            return Some(resp);
+        }
+    }
+
+    // Route all subsequent frames through the SMB2 processor once upgraded.
+    if conn.upgraded_smb2 {
+        let mut mid: u64 = 2;
+        let mut c2 = crate::smb2::Smb2Conn::new(conn.challenge);
+        c2.session_id = conn.uid as u64;
+        c2.guest = true;
+        if let Some(resp) = crate::smb2::process_frame(server, &mut c2, &mut mid, buf) {
+            // Sync auth outcome back into the SMB1-side state.
+            if c2.user != String::new() && !c2.guest {
+                io_conn_set_session(conn, c2.user.clone(), c2.guest);
+            }
+            return Some(resp);
+        }
+        return None;
     }
 
     let wct = buf[wc_off] as usize;
@@ -180,3 +234,8 @@ async fn process_frame(
     Some(build_response(&final_hdr, last_status, bodies))
 }
 
+
+/// Record the authenticated session on the SMB1-side connection state.
+fn io_conn_set_session(conn: &mut ConnState, user: String, guest: bool) {
+    conn.session = Some(Session { user, guest, trees: Vec::new() });
+}

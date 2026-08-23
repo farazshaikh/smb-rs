@@ -12,6 +12,8 @@ smb-server = { path = "crates/smb-server" }
 resolver = "2"
 members = [
     "crates/smb-proto",
+    "crates/smb-proto-smb2",
+    "crates/smb-proto-smb3",
     "crates/smb-proto-smb1",
     "crates/smb-transport",
     "crates/smb-vfs",

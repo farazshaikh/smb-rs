@@ -98,6 +98,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smb-proto-smb2"
+version = "0.2.0"
+dependencies = [
+ "smb-proto",
+]
+
+[[package]]
+name = "smb-proto-smb3"
+version = "0.2.0"
+dependencies = [
+ "smb-proto",
+]
+
+[[package]]
 name = "smb-server"
 version = "0.2.0"
 dependencies = [
@@ -106,6 +120,7 @@ dependencies = [
  "smb-backend-posix",
  "smb-proto",
  "smb-proto-smb1",
+ "smb-proto-smb2",
  "smb-transport",
  "smb-vfs",
  "tokio",
