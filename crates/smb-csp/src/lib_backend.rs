@@ -153,3 +153,115 @@ pub fn aes128_cmac(key: &[u8; 16], data: &[u8]) -> [u8; 16] {
     c.update(data);
     c.finalize().into_bytes().into()
 }
+
+// ---------------- SMB3 encryption transform AEAD ([MS-SMB2] §3.1.4.2) ----
+
+/// AES-128-GCM seal: appends the 16-byte tag to the ciphertext.
+/// `nonce` = 12 bytes from the transform header's Nonce field;
+/// `aad`   = the 32-byte header tail (MsgSize..SessionId end).
+pub fn aes128gcm_seal(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    use aes_gcm::aead::AeadInPlace;
+    let c = <aes_gcm::Aes128Gcm as aes_gcm::KeyInit>::new_from_slice(key)
+        .expect("AES-GCM key is exactly 16 bytes");
+    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let mut buf = plaintext.to_vec();
+    c.encrypt_in_place(nonce, aad, &mut buf).expect("GCM seal");
+    buf
+}
+
+/// AES-128-GCM open; `ciphertext` carries the trailing 16-byte tag.
+pub fn aes128gcm_open(
+    key: &[u8; 16],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Option<Vec<u8>> {
+    use aes_gcm::aead::AeadInPlace;
+    if ciphertext.len() < 16 {
+        return None;
+    }
+    let c = <aes_gcm::Aes128Gcm as aes_gcm::KeyInit>::new_from_slice(key).ok()?;
+    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let mut buf = ciphertext.to_vec();
+    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    Some(buf)
+}
+
+/// AES-128-CCM seal with an 11-byte nonce ([MS-SMB2] CCM variant).
+pub fn aes128ccm_seal(key: &[u8; 16], nonce: &[u8; 11], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    use ccm::aead::AeadInPlace;
+    type AesCcm = ccm::Ccm<aes::Aes128, typenum::U16, typenum::U11>;
+    let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).expect("key is 16 bytes");
+    let nonce = ccm::Nonce::from_slice(nonce);
+    let mut buf = plaintext.to_vec();
+    c.encrypt_in_place(nonce, aad, &mut buf).expect("CCM seal");
+    buf
+}
+
+/// AES-128-CCM open; `ciphertext` carries the trailing 16-byte tag.
+pub fn aes128ccm_open(
+    key: &[u8; 16],
+    nonce: &[u8; 11],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Option<Vec<u8>> {
+    use ccm::aead::AeadInPlace;
+    if ciphertext.len() < 16 {
+        return None;
+    }
+    type AesCcm = ccm::Ccm<aes::Aes128, typenum::U16, typenum::U11>;
+    let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).ok()?;
+    let nonce = ccm::Nonce::from_slice(nonce);
+    let mut buf = ciphertext.to_vec();
+    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    Some(buf)
+}
+
+/// NTLMSSP MIC for the SPNEGO mechListMIC ([RFC 4178] / [MS-NLMP] §3.4.6),
+/// matching samba's calc_ntlmv2_key + ntlmssp_make_packet_signature:
+///
+///   SignKey = MD5(SessionKey || SIGN_MAGIC_NUL)
+///   digest  = HMAC-MD5(SignKey, SeqNum_le || message)[0..8]
+///   Checksum= RC4(SendSealKey, digest)   // only when KEY_EXCH negotiated
+///   MAC     = 01000000 || Checksum || SeqNum_le
+pub fn ntlm_mech_list_mic(
+    session_key: &[u8; 16],
+    server_role: bool,
+    key_exch: bool,
+    seq: u32,
+    message: &[u8],
+) -> [u8; 16] {
+    const SRV_SIGN: &[u8] = b"session key to server-to-client signing key magic constant";
+    const CLI_SIGN: &[u8] = b"session key to client-to-server signing key magic constant";
+    const SRV_SEAL: &[u8] = b"session key to server-to-client sealing key magic constant";
+    const CLI_SEAL: &[u8] = b"session key to client-to-server sealing key magic constant";
+
+    let (sign_const, seal_const) =
+        if server_role { (SRV_SIGN, SRV_SEAL) } else { (CLI_SIGN, CLI_SEAL) };
+
+    let mut sk_in = session_key.to_vec();
+    sk_in.extend_from_slice(sign_const);
+    sk_in.push(0);
+    let send_sign_key = md5(&sk_in);
+
+    let mut input = Vec::with_capacity(4 + message.len());
+    input.extend_from_slice(&seq.to_le_bytes());
+    input.extend_from_slice(message);
+    let mut digest = hmac_md5(&send_sign_key, &input);
+
+    if key_exch {
+        let mut seal_in = session_key.to_vec();
+        seal_in.extend_from_slice(seal_const);
+        seal_in.push(0);
+        let send_seal_key = md5(&seal_in);
+        let first8: Vec<u8> = digest[..8].to_vec();
+        let enc = rc4(&send_seal_key, &first8);
+        digest[..8].copy_from_slice(&enc);
+    }
+
+    let mut out = [0u8; 16];
+    out[0..4].copy_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+    out[4..12].copy_from_slice(&digest[..8]);
+    out[12..16].copy_from_slice(&seq.to_le_bytes());
+    out
+}

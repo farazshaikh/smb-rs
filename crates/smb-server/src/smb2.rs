@@ -41,6 +41,19 @@ pub struct Smb2Conn {
     pub signing_key: Option<[u8; 16]>,
     /// Pre-authentication integrity hash (3.1.1 only).
     pub preauth_hash: [u8; 64],
+    /// Chosen encryption cipher (from negotiate ENCRYPTION_CAPABILITIES).
+    pub cipher: Option<u16>,
+    /// (client-to-server, server-to-client) cipher keys; `None` until the
+    /// session enables encryption ([MS-SMB2] §3.1.4.1 labels).
+    pub enc_keys: Option<([u8; 16], [u8; 16])>,
+    /// True once every subsequent message for this session must be wrapped
+    /// in a transform header (SMB2_SESSION_FLAG_ENCRYPT_DATA).
+    pub encrypt_data: bool,
+    /// SPNEGO exchange blobs: (init request, authenticate request).
+    pub ntlm_blobs: Option<(Vec<u8>, Vec<u8>)>,
+    /// Challenge token sent during leg 1 (for the mechListMIC input).
+    pub ntlm_targ: Option<Vec<u8>>,
+    /// Raw challenge token sent during leg 1 (for mechListMIC).
     /// TID -> share name map.
     pub trees: HashMap<u32, String>,
     /// Open handles keyed by 16-byte SMB2 FileId.
@@ -62,6 +75,11 @@ impl Smb2Conn {
             session_key: None,
             signing_key: None,
             preauth_hash: [0u8; 64],
+            cipher: None,
+            enc_keys: None,
+            encrypt_data: false,
+            ntlm_blobs: None,
+            ntlm_targ: None,
             trees: HashMap::new(),
             handles: HashMap::new(),
             searches: HashMap::new(),
@@ -157,17 +175,27 @@ pub(crate) async fn process_frame(
     conn: &mut Smb2Conn,
     buf: &[u8],
 ) -> Option<Vec<u8>> {
-    let mut parts: Vec<Vec<u8>> = Vec::new();
+    // Incoming transform frames are decrypted first ([MS-SMB2] §3.3.5.16).
+    // A failed open means tampering or key desync — drop the connection.
+    let plaintext: Vec<u8>;
+    let mut buf = buf;
+    if buf.len() >= 4 && buf[..4] == smb_proto_smb2::commands::TF_MAGIC {
+        let pt = decrypt_transform(conn, buf)?;
+        plaintext = pt;
+        buf = &plaintext;
+    }
+
+    let mut parts: Vec<(Vec<u8>, bool)> = Vec::new(); // (resp, may_wrap)
     let mut off = 0usize;
     loop {
         if off + 64 > buf.len() {
             break;
         }
         let rest = &buf[off..];
-        let Some(single) = process_single(server, conn, rest).await else {
+        let Some((single, may_wrap)) = process_single(server, conn, rest).await else {
             return None;
         };
-        parts.push(single);
+        parts.push((single, may_wrap));
 
         let next = u32::from_le_bytes(rest[20..24].try_into().unwrap()) as usize;
         if next == 0 || next >= rest.len() {
@@ -181,9 +209,9 @@ pub(crate) async fn process_frame(
 
     // Assemble compound reply: every frame except the last carries
     // NextCommand pointing at the following frame, 8-byte aligned.
-    let mut out: Vec<u8> = Vec::with_capacity(parts.iter().map(|p| p.len() + 7).sum());
+    let mut out: Vec<u8> = Vec::with_capacity(parts.iter().map(|p| p.0.len() + 7).sum());
     let mut starts = Vec::with_capacity(parts.len());
-    for p in &parts {
+    for (p, _) in &parts {
         while out.len() % 8 != 0 {
             out.push(0);
         }
@@ -195,7 +223,100 @@ pub(crate) async fn process_frame(
         let pos = starts[w] + 20; // NextCommand field offset
         out[pos..pos + 4].copy_from_slice(&(next as u32).to_le_bytes());
     }
+
+    // Seal the whole reply when the session requires encryption
+    // ([MS-SMB2] §3.3.5.16); the enabling SESSION_SETUP response itself
+    // always travels in the clear.
+    if conn.encrypt_data && parts.iter().all(|(_, w)| *w) {
+        let sealed = encrypt_response(conn, &out)?;
+        return Some(sealed);
+    }
     Some(out)
+}
+
+/// Wrap an assembled response into a transform frame ([MS-SMB2] §2.2.41)
+/// using the S2C cipher key.
+fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
+    let (c2s, s2c) = conn.enc_keys?;
+    let _ = c2s;
+    let cipher = conn.cipher?;
+    let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
+    let iv_size = if gcm { 12 } else { 11 };
+
+    let mut nonce_field = [0u8; 16];
+    nonce_field[..iv_size].copy_from_slice(&crate::dispatch::rand_bytes(iv_size));
+
+    let mut tf = smb_proto_smb2::commands::build_transform(conn.session_id, &nonce_field, msg.len());
+    // AAD region: everything after the Nonce field ([MS-SMB2] §3.1.4.2).
+    let sealed = if gcm {
+        smb_auth::crypto::aes128gcm_seal(
+            &s2c,
+            nonce_field[..12].try_into().ok()?,
+            &tf[smb_proto_smb2::commands::tf_off::NONCE..],
+            msg,
+        )
+    } else {
+        smb_auth::crypto::aes128ccm_seal(
+            &s2c,
+            nonce_field[..11].try_into().ok()?,
+            &tf[smb_proto_smb2::commands::tf_off::NONCE..],
+            msg,
+        )
+    };
+    // Tag lands in the Signature field; ciphertext follows the header.
+    let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
+    tf[tag_at..tag_at + 16].copy_from_slice(&sealed[sealed.len() - 16..]);
+    let mut frame = tf;
+    frame.extend_from_slice(&sealed[..sealed.len() - 16]);
+    counter!("smb_encrypted_responses_total").increment(1);
+    counter!("smb_encrypted_bytes_total").increment(msg.len() as u64);
+    Some(frame)
+}
+
+/// Open an incoming transform frame using the C2S cipher key.
+fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
+    let tf = smb_proto_smb2::commands::TransformHdr::parse(frame)?;
+    if tf.session_id != conn.session_id {
+        tracing::warn!(sid = format!("{:#x}", tf.session_id), "transform sid mismatch");
+        return None;
+    }
+    let (c2s, _s2c) = conn.enc_keys?;
+    let cipher = conn.cipher?;
+    let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
+    let iv_size = if gcm { 12 } else { 11 };
+    let aad = &frame[smb_proto_smb2::commands::tf_off::NONCE
+        ..smb_proto_smb2::commands::tf_off::HDR_SIZE];
+    let payload = &frame[smb_proto_smb2::commands::tf_off::HDR_SIZE
+        ..tf_off_end(tf.original_len)];
+    let pt = if gcm {
+        smb_auth::crypto::aes128gcm_open(
+            &c2s,
+            frame[smb_proto_smb2::commands::tf_off::NONCE..]
+                .get(..12)?
+                .try_into()
+                .ok()?,
+            aad,
+            payload,
+        )
+    } else {
+        smb_auth::crypto::aes128ccm_open(
+            &c2s,
+            frame[smb_proto_smb2::commands::tf_off::NONCE..]
+                .get(..11)?
+                .try_into()
+                .ok()?,
+            aad,
+            payload,
+        )
+    }?;
+    counter!("smb_decrypted_msgs_total").increment(1);
+    counter!("smb_decrypted_bytes_total").increment(pt.len() as u64);
+    Some(pt)
+}
+
+/// End offset (relative to frame start) of transform-wrapped payload.
+fn tf_off_end(original_len: usize) -> usize {
+    smb_proto_smb2::commands::tf_off::HDR_SIZE + original_len
 }
 
 /// Process exactly one SMB2 request starting at `buf` (its own header).
@@ -203,7 +324,7 @@ async fn process_single(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
     buf: &[u8],
-) -> Option<Vec<u8>> {
+) -> Option<(Vec<u8>, bool)> {
     let hdr = match smb_proto_smb2::Header2::parse(buf) {
         Some(h) => h,
         None => return None,
@@ -232,7 +353,7 @@ async fn process_single(
     // Commands valid without an authenticated session.
     let pre_session = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP | ss::cmd::ECHO);
     if !pre_session && (!conn.authenticated || sid != conn.session_id) {
-        return Some(response(&hdr, Status::ACCESS_DENIED, Vec::new(), 0));
+        return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), 0), false));
     }
 
     // Signing policy ([MS-SMB2] §3.3.5.2.3): reject unsigned traffic from
@@ -244,13 +365,13 @@ async fn process_single(
         && !hdr.is_signed()
     {
         counter!("smb_reject_unsigned_total").increment(1);
-        return Some(response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id));
+        return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
     }
 
     // TREE_CONNECT overrides the response TreeId with the fresh value.
     let mut resp_tid: Option<u32> = None;
 
-    let (status, body): (Status, Vec<u8>) = match hdr.command {
+    let (status, mut body): (Status, Vec<u8>) = match hdr.command {
         ss::cmd::NEGOTIATE => {
             // Clients probing for SMB2 support send either a header-only
             // NEGOTIATE or one carrying Status = STATUS_INVALID_PARAMETER
@@ -260,17 +381,15 @@ async fn process_single(
                 || smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]))
                     .is_none()
             {
-                return Some(response(
-                    &hdr,
-                    Status::INVALID_PARAMETER,
-                    probe_negotiate_resp(),
-                    conn.session_id,
+                return Some((
+                    response(&hdr, Status::INVALID_PARAMETER, probe_negotiate_resp(), 0),
+                    false,
                 ));
             }
             let req = smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]))
-                .unwrap();
+                .expect("validated above");
             let Some(dialect) = smb_proto_smb2::negotiate::pick(&req.dialects) else {
-                return Some(response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0));
+                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0), true));
             };
             conn.dialect = Some(dialect);
             let mut salt = [0u8; 32];
@@ -300,6 +419,7 @@ async fn process_single(
                 .into_iter()
                 .find(|ours| client_ciphers.contains(ours))
                 .unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM);
+            conn.cipher = Some(chosen);
             (
                 Status::SUCCESS,
                 smb_proto_smb2::negotiate::build_response_full(
@@ -349,7 +469,9 @@ async fn process_single(
         ss::cmd::CREATE => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match create(conn, vfs, buf).await {
                 Ok(body) => (Status::SUCCESS, body),
@@ -359,7 +481,9 @@ async fn process_single(
         ss::cmd::READ => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match read(conn, vfs, buf).await {
                 Ok(body) => (Status::SUCCESS, body),
@@ -369,7 +493,9 @@ async fn process_single(
         ss::cmd::WRITE => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match write(conn, vfs, buf).await {
                 Ok(body) => (Status::SUCCESS, body),
@@ -379,7 +505,9 @@ async fn process_single(
         ss::cmd::CLOSE => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match close(conn, vfs, buf).await {
                 Ok(body) => (Status::SUCCESS, body),
@@ -389,7 +517,9 @@ async fn process_single(
         ss::cmd::FLUSH => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match flush(conn, vfs, buf).await {
                 Ok(()) => (Status::SUCCESS, c::build_flush_resp()),
@@ -398,7 +528,7 @@ async fn process_single(
         }
         ss::cmd::IOCTL => {
             let Some(req) = c::IoctlReq::parse(buf) else {
-                return Some(response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id));
+                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
             };
             match req.ctl_code {
                 // Echo the negotiated parameters back ([MS-SMB2] §3.3.5.15):
@@ -430,7 +560,9 @@ async fn process_single(
         ss::cmd::QUERY_DIRECTORY => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match query_directory(conn, vfs, buf).await {
                 Ok(Some(buffer)) => (Status::SUCCESS, c::build_info_resp(&buffer)),
@@ -441,7 +573,9 @@ async fn process_single(
         ss::cmd::QUERY_INFO => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match query_info(conn, vfs, buf).await {
                 Ok(Some(buffer)) => (Status::SUCCESS, c::build_info_resp(&buffer)),
@@ -452,12 +586,20 @@ async fn process_single(
         ss::cmd::SET_INFO => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
-                None => return Some(response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id)),
+                None => {
+                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                }
             };
             match set_info(conn, vfs, buf).await {
                 Ok(()) => (Status::SUCCESS, c::build_set_info_resp()),
                 Err(status) => (status, Vec::new()),
             }
+        }
+        ss::cmd::CANCEL => {
+            // Best-effort cancel ([MS-SMB2] §3.3.5.14): all our handlers are
+            // synchronous today, so there is nothing to signal; ack it.
+            counter!("smb_cancels_total").increment(1);
+            (Status::SUCCESS, 2u16.to_le_bytes().to_vec())
         }
         ss::cmd::ECHO => (Status::SUCCESS, 4u16.to_le_bytes().to_vec()),
         _ => (Status::NOT_IMPLEMENTED, Vec::new()),
@@ -494,6 +636,48 @@ async fn process_single(
         };
     }
 
+    // Encryption enablement ([MS-SMB2] §3.3.5.5 / §3.3.5.16): when the
+    // server is configured to seal and the client offered a cipher, derive
+    // C2S/S2C keys and set SMB2_SESSION_FLAG_ENCRYPT_DATA on the final
+    // SESSION_SETUP response (that response itself stays plaintext).
+    let mut seal_session = false;
+    if hdr.command == ss::cmd::SESSION_SETUP
+        && status == Status::SUCCESS
+        && server.encrypt
+        && conn.authenticated
+        && !conn.guest
+        && conn.cipher.is_some()
+        && conn.enc_keys.is_none()
+    {
+        if let Some(key) = conn.session_key {
+            let (c2s_label, s2c_label) = match conn.dialect {
+                Some(smb_proto_smb2::negotiate::DIALECT_311) => {
+                    (b"SMBC2SCipherKey\0".as_slice(), b"SMBS2CCipherKey\0".as_slice())
+                }
+                _ => (b"SMB2AESCCM\0".as_slice(), b"SMB2AESCCM\0".as_slice()),
+            };
+            let s2c_ctx: &[u8] = match conn.dialect {
+                Some(smb_proto_smb2::negotiate::DIALECT_311) => &conn.preauth_hash,
+                _ => b"ServerOut\0",
+            };
+            let c2s_ctx: &[u8] = match conn.dialect {
+                Some(smb_proto_smb2::negotiate::DIALECT_311) => &conn.preauth_hash,
+                _ => b"ServerIn \0", // trailing space per [MS-SMB2] §3.1.4.1
+            };
+            let kdf = |label: &[u8], context: &[u8]| -> [u8; 16] {
+                smb_auth::crypto::kdf_counter_mode_hmac_sha256(&key, label, context, 16)
+                    .try_into()
+                    .unwrap()
+            };
+            conn.enc_keys = Some((kdf(c2s_label, c2s_ctx), kdf(s2c_label, s2c_ctx)));
+            conn.encrypt_data = true;
+            tracing::info!(cipher = format!("{:#x}", conn.cipher.unwrap()), "encryption enabled for session");
+
+            seal_session = true;
+        }
+    }
+
+
     let mut resp = response(&hdr, status, body, conn.session_id);
     if let Some(new_tid) = resp_tid {
         resp[36..40].copy_from_slice(&new_tid.to_le_bytes()); // TreeId
@@ -505,6 +689,10 @@ async fn process_single(
         joined.extend_from_slice(&resp);
         conn.preauth_hash = smb_auth::crypto::sha512(&joined);
     }
+
+    // The enabling SESSION_SETUP response itself must travel in the clear;
+    // every later message for this session gets wrapped.
+    let allow_wrap = !seal_session;
 
     // Mirror the client's signing flag ([MS-SMB2] §3.3.4.2): authenticated
     // sessions get signatures over the full PDU - HMAC-SHA256 for 2.x and
@@ -534,7 +722,7 @@ async fn process_single(
             resp[48..64].copy_from_slice(&sig);
         }
     }
-    Some(resp)
+    Some((resp, allow_wrap))
 }
 
 /// Build the wildcard-dialect NEGOTIATE response used to answer the
@@ -579,15 +767,35 @@ fn session_setup(
         Some(smb_auth::ntlm::MSG_TYPE1) | None => {
             // Leg 1: issue CHALLENGE under MORE_PROCESSING_REQUIRED.
             conn.session_id = next_session_id();
-            let t2 =
+            let mut t2 =
                 smb_auth::ntlm::build_type2(&conn.challenge, &server.domain, &server.server_name);
+            // Grant SIGN|SEAL so clients may negotiate protected sessions
+            // ([MS-NLMP] §3.2.5.1); sealing itself rides the SMB3 cipher.
+            let extra = smb_auth::ntlm::NEGOTIATE_SIGN | smb_auth::ntlm::NEGOTIATE_SEAL;
+            let fl_off = 60 - 8; // flags live at type2 offset 52 within msg
+            // build_type2 writes flags right after the fixed header; patch
+            // via known offset instead of plumbing a parameter:
+            let fpos = 12 + 4 + 4; // sig(8)+type(4) => 12; then +4 challenge? keep simple below
+            let _ = (fl_off, fpos);
+            {
+                // Flags field sits at byte 20 of the type2 message
+                // (sig 8 + type 4 + domlen 2 + dommax 2 + domoff 4).
+                const FLAGS_OFF: usize = 20;
+                let cur = u32::from_le_bytes(t2[FLAGS_OFF..FLAGS_OFF + 4].try_into().unwrap());
+                t2[FLAGS_OFF..FLAGS_OFF + 4].copy_from_slice(&(cur | extra).to_le_bytes());
+            }
             let wrapped = smb_auth::ntlm::wrap_negtoken_targ(&t2);
+            conn.ntlm_targ = Some(wrapped.clone());
+            conn.ntlm_blobs = Some((req.blob.clone(), Vec::new()));
             Ok((
                 Status::MORE_PROCESSING_REQUIRED,
                 ss::build_response(0, &wrapped),
             ))
         }
         Some(smb_auth::ntlm::MSG_TYPE3) => {
+            if let Some(blobs) = &mut conn.ntlm_blobs {
+                blobs.1 = req.blob.clone();
+            }
             if smb_auth::ntlm::parse_type3(inner).is_none() {
                 tracing::warn!("session setup: malformed NTLMSSP type3");
                 return Err(Status::INVALID_PARAMETER);
@@ -613,9 +821,63 @@ fn session_setup(
             // Dialect-aware signing key ([MS-SMB2] §3.2.5.3.1 / §3.3.5.2.1).
             conn.authenticated = true;
             let flags: u16 = if out.guest { 0x0001 } else { 0x0000 };
-            // Close the SPNEGO exchange: clients require a NegTokenResp
-            // with negResult = accept-completed in the final leg.
-            let wrapped = smb_auth::ntlm::wrap_accept_complete();
+            // Close the SPNEGO exchange. When the AUTHENTICATE message
+            // carried a mechListMIC (required by --client-protection=encrypt
+            // clients), echo one: an NTLMSSP signature over the client's
+            // MechTypes DER, computed with the server signing key and RC4
+            // checksum-sealed when KEY_EXCH was negotiated ([MS-NLMP]
+            // §3.4.6, samba ntlmssp_make_packet_signature RECEIVE path).
+            const MIC_OFFSET: usize = 60;
+            const MIC_SIZE: usize = 16;
+            let mic_field_present = req.blob.len() > MIC_OFFSET + MIC_SIZE;
+            let client_mic_nonzero = mic_field_present
+                && req.blob[MIC_OFFSET..MIC_OFFSET + MIC_SIZE].iter().any(|&b| b != 0);
+            let wrapped = if client_mic_nonzero {
+                let Some(key) = conn.session_key else {
+                    return Err(Status::INVALID_PARAMETER);
+                };
+                let init = conn.ntlm_blobs.as_ref().map(|b| b.0.clone()).unwrap_or_default();
+                // Locate MechTypes: the first A0 context tag wraps a
+                // 30-tagged SEQUENCE of mechanism OIDs; samba signs exactly
+                // that inner SEQUENCE (tag included). The A0 length byte is
+                // not followed directly by 0x30, so scan for A0 then decode.
+                let mech_types: Vec<u8> = (|| {
+                    for i in 0..init.len().saturating_sub(3) {
+                        if init[i] != 0xA0 {
+                            continue;
+                        }
+                        let (len, hdr) = match init[i + 1] {
+                            n if n < 0x80 => (n as usize, 2),
+                            0x81 => (init[i + 2] as usize, 3),
+                            _ => continue,
+                        };
+                        let t = i + hdr;
+                        if t < init.len() && init[t] == 0x30 {
+                            let end = (t + 2 + len).min(init.len());
+                            return init[t..end.max(t)].to_vec();
+                        }
+                    }
+                    Vec::new()
+                })();
+                let key_exch = t3.encrypted_session_key.len() == 16;
+                let mic = smb_auth::crypto::ntlm_mech_list_mic(
+                    &key,
+                    true,
+                    key_exch,
+                    0,
+                    &mech_types,
+                );
+                tracing::debug!(
+                    sk = %hex_str(&key),
+                    mech = %hex_str(&mech_types),
+                    key_exch,
+                    mic = %hex_str(&mic),
+                    "mechListMIC inputs"
+                );
+                smb_auth::ntlm::wrap_accept_complete_with_mic(&mic)
+            } else {
+                smb_auth::ntlm::wrap_accept_complete()
+            };
             Ok((Status::SUCCESS, ss::build_response(flags, &wrapped)))
         }
         _ => Err(Status::LOGON_FAILURE),
@@ -913,6 +1175,10 @@ async fn set_info(
 
 // ---------------- helpers ----------------
 
+fn hex_str(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
 fn g16(b: &[u8], o: usize) -> u16 {
     b.get(o..o + 2)
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
@@ -976,7 +1242,11 @@ pub(crate) fn response(
     f.extend_from_slice(&req.credit_charge.to_le_bytes()); // CreditCharge echo
     f.extend_from_slice(&status.raw().to_le_bytes());
     f.extend_from_slice(&req.command.to_le_bytes());
-    f.extend_from_slice(&1u16.to_le_bytes()); // Credits granted
+    // Grant at least the requested charge so large R/W stay credit-neutral
+    // ([MS-SMB2] §3.3.1.1 — generous-grant policy).
+    let grant = std::cmp::max(req.credit_charge, 1);
+    f.extend_from_slice(&grant.to_le_bytes());
+    counter!("smb_credits_granted_total").increment(grant as u64);
     f.extend_from_slice(&1u32.to_le_bytes()); // FLAGS_SERVER_TO_REDIR
     f.extend_from_slice(&0u32.to_le_bytes()); // NextCommand
     f.extend_from_slice(&req.message_id.to_le_bytes());

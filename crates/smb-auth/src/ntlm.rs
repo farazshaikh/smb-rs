@@ -37,6 +37,10 @@ pub const NEGOTIATE_128: u32 = 0x2000_0000;
 pub const NEGOTIATE_VERSION: u32 = 0x0200_0000;
 /// Target type is a domain.
 pub const TARGET_TYPE_DOMAIN: u32 = 0x0001_0000;
+/// Message signing is supported.
+pub const NEGOTIATE_SIGN: u32 = 0x0000_0010;
+/// Sealing (encryption) is supported.
+pub const NEGOTIATE_SEAL: u32 = 0x0000_0020;
 
 /// Parsed AUTHENTICATE (type 3) message.
 #[derive(Debug, Default)]
@@ -249,4 +253,18 @@ pub fn wrap_negtoken_targ(token: &[u8]) -> Vec<u8> {
 pub fn wrap_accept_complete() -> Vec<u8> {
     let result = der_tlv(0xA0, &der_tlv(0x0A, &[0x00]));
     der_tlv(0xA1, &der_tlv(0x30, &result))
+}
+
+/// SPNEGO NegTokenResp with `accept-completed` plus a mechListMIC
+/// ([RFC 4178] §4.2.2): the client validates it against the exported
+/// session key whenever it sent a MIC in its AUTHENTICATE message.
+///
+/// `mic` is HMAC-MD5(ExportedSessionKey, init || targ || auth) computed by
+/// the caller over the exact exchanged SPNEGO blobs.
+pub fn wrap_accept_complete_with_mic(mic: &[u8]) -> Vec<u8> {
+    let result = der_tlv(0xA0, &der_tlv(0x0A, &[0x00]));
+    let mic_field = der_tlv(0xA3, &der_tlv(0x04, mic));
+    let mut seq = result;
+    seq.extend_from_slice(&mic_field);
+    der_tlv(0xA1, &der_tlv(0x30, &seq))
 }

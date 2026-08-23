@@ -823,3 +823,84 @@ pub fn build_ioctl_resp(file_id: FileId, ctl_code: u32, output: &[u8]) -> Vec<u8
     debug_assert_eq!(b.len(), FIXED + output.len());
     b
 }
+
+// ---------------- Encryption transform header ([MS-SMB2] §2.2.41) ----------------
+
+/// Transform-header field offsets.
+pub mod tf_off {
+    /// ProtocolId = `\xFD 'S' 'M' 'B'`.
+    pub const PROTOCOL_ID: usize = 0;
+    /// AEAD tag (16 bytes) — zeroed inside the AAD region.
+    pub const SIGNATURE: usize = 4;
+    /// Nonce (16 bytes; GCM consumes 12, CCM 11, remainder zeroed).
+    pub const NONCE: usize = 20;
+    /// OriginalMessageSize.
+    pub const MSG_SIZE: usize = 36;
+    /// Reserved.
+    pub const RESERVED: usize = 40;
+    /// Flags (bit 0 = SMB2_TF_FLAGS_ENCRYPTED).
+    pub const FLAGS: usize = 42;
+    /// SessionId.
+    pub const SESSION_ID: usize = 44;
+    /// Fixed header size.
+    pub const HDR_SIZE: usize = 52;
+}
+
+/// `\xFD 'S' 'M' 'B'` — transform-frame magic.
+pub const TF_MAGIC: [u8; 4] = [0xFD, b'S', b'M', b'B'];
+/// SMB2_TF_FLAGS_ENCRYPTED.
+pub const TF_FLAGS_ENCRYPTED: u16 = 0x0001;
+
+/// Parsed transform header ([MS-SMB2] §2.2.41).
+#[derive(Debug)]
+pub struct TransformHdr {
+    /// OriginalMessageSize — length of the plaintext SMB2 message.
+    pub original_len: usize,
+    /// SessionId the message belongs to.
+    pub session_id: u64,
+    /// Flags word (ENCRYPTED bit).
+    pub flags: u16,
+}
+
+impl TransformHdr {
+    /// Parse the 52-byte header from the start of `frame`; verifies magic.
+    pub fn parse(frame: &[u8]) -> Option<TransformHdr> {
+        if frame.len() < tf_off::HDR_SIZE || frame[..4] != TF_MAGIC {
+            return None;
+        }
+        Some(TransformHdr {
+            original_len: g32(frame, tf_off::MSG_SIZE) as usize,
+            session_id: g64(frame, tf_off::SESSION_ID),
+            flags: g16(frame, tf_off::FLAGS),
+        })
+    }
+
+    /// Additional-authenticated-data view: header bytes from Nonce to the
+    /// end ([MS-SMB2] §3.1.4.2 — everything after the 16-byte Nonce field,
+    /// with Signature excluded because it precedes the Nonce).
+    pub fn aad<'a>(&self, frame: &'a [u8]) -> &'a [u8] {
+        &frame[tf_off::NONCE..tf_off::HDR_SIZE]
+    }
+
+}
+
+
+/// Build the 52-byte transform header with a zeroed Signature field
+/// (the AEAD tag is copied in after sealing).
+#[allow(clippy::too_many_arguments)]
+pub fn build_transform(
+    session_id: u64,
+    nonce: &[u8; 16],
+    original_len: usize,
+) -> Vec<u8> {
+    let mut t = Vec::with_capacity(tf_off::HDR_SIZE);
+    t.extend_from_slice(&TF_MAGIC);
+    t.extend_from_slice(&[0u8; 16]); // Signature (tag lands here)
+    t.extend_from_slice(nonce);
+    t.extend_from_slice(&(original_len as u32).to_le_bytes());
+    t.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    t.extend_from_slice(&TF_FLAGS_ENCRYPTED.to_le_bytes()); // Flags
+    t.extend_from_slice(&session_id.to_le_bytes());
+    debug_assert_eq!(t.len(), tf_off::HDR_SIZE);
+    t
+}

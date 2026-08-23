@@ -44,6 +44,11 @@ struct Args {
     /// Reject clients that do not sign their traffic.
     #[arg(long = "require-signing")]
     require_signing: bool,
+
+    /// Seal authenticated sessions that offer an encryption cipher
+    /// (SMB2_SESSION_FLAG_ENCRYPT_DATA).
+    #[arg(long = "encrypt")]
+    encrypt: bool,
 }
 
 /// Entry point.
@@ -75,6 +80,7 @@ async fn main() {
         users,
         allow_guest: true,
         require_signing: args.require_signing,
+        encrypt: args.encrypt,
     });
 
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await {

@@ -8,7 +8,7 @@ license.workspace = true
 [features]
 default = ["lib"]
 # Production backend: RustCrypto crates (hardware-accelerated where available).
-lib = ["dep:cipher", "dep:digest", "dep:typenum", "dep:md4", "dep:md-5", "dep:sha2", "dep:hmac", "dep:des", "dep:aes", "dep:cmac", "dep:rc4"]
+lib = ["dep:cipher", "dep:digest", "dep:typenum", "dep:aead", "dep:aes-gcm", "dep:ccm", "dep:md4", "dep:md-5", "dep:sha2", "dep:hmac", "dep:des", "dep:aes", "dep:cmac", "dep:rc4"]
 # Bundled hand-rolled implementations (zero external dependencies).
 handrolled = []
 
@@ -21,6 +21,9 @@ des = { version = "0.9", optional = true }
 aes = { version = "0.9", optional = true }
 cmac = { version = "0.8", optional = true }
 rc4 = { version = "0.1", optional = true }
+aes-gcm = { version = "0.11", optional = true }
+ccm = { version = "0.6", optional = true }
 cipher = { version = "0.5", default-features = false, optional = true }
+aead = { version = "0.6", default-features = false, optional = true }
 digest = { version = "0.11", default-features = false, optional = true }
 typenum = { version = "1", default-features = false, optional = true }

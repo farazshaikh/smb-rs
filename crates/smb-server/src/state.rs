@@ -47,6 +47,9 @@ pub struct ServerShared {
     /// Reject traffic from authenticated sessions that does not carry a
     /// valid signature ([MS-SMB2] §3.3.5.2.3 signing policy).
     pub require_signing: bool,
+    /// Seal sessions when the client supports encryption
+    /// (SMB2_SESSION_FLAG_ENCRYPT_DATA, [MS-SMB2] §2.2.5.2).
+    pub encrypt: bool,
 }
 
 /// An authenticated SMB session (one UID).
