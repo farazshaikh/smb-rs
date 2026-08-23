@@ -1,4 +1,7 @@
 //! HMAC-MD5 ([RFC 2104] with MD5 as the hash function).
+//!
+//! The data is streamed: inner = MD5(ipad ‖ data) — the ipad block must be
+//! hashed *together with* the message, not separately.
 
 use super::md5::md5;
 
@@ -18,17 +21,15 @@ pub fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
     }
 
     // inner = MD5(ipad || data)
-    let mut inner = md5(&ipad);
-    // (streaming not needed for NTLM-sized messages)
     let mut joined = Vec::with_capacity(64 + data.len());
-    joined.extend_from_slice(&inner);
+    joined.extend_from_slice(&ipad);
     joined.extend_from_slice(data);
-    inner = md5(&joined);
+    let ih = md5(&joined);
 
     // outer = MD5(opad || inner)
     let mut both = Vec::with_capacity(64 + 16);
     both.extend_from_slice(&opad);
-    both.extend_from_slice(&inner);
+    both.extend_from_slice(&ih);
     md5(&both)
 }
 
@@ -42,7 +43,6 @@ mod tests {
 
     #[test]
     fn rfc2202_case2() {
-        // Key = "Jefe", data = "what do ya want for nothing?"
         assert_eq!(
             hex(hmac_md5(b"Jefe", b"what do ya want for nothing?")),
             "750c783e6ab0b503eaa86e310a5db738"

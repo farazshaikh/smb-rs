@@ -15,8 +15,6 @@ pub use hmac::hmac_md5;
 pub use md4::md4;
 pub use md5::md5;
 
-use crate::crypto::md4::md4;
-
 /// NT hash = MD4 of the UTF-16LE encoded password ([MS-NLMP] §3.3.1.1).
 pub fn nt_hash(password: &str) -> [u8; 16] {
     let mut bytes = Vec::with_capacity(password.len() * 2);

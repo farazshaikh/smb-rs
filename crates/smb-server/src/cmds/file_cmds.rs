@@ -32,8 +32,13 @@ pub async fn nt_create(
     req: &ReqView<'_>,
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
-    let share = share_of(io, req.hdr.tid)?;
-    if share.is_ipc {
+    let is_ipc = io
+        .conn
+        .trees
+        .get(&req.hdr.tid)
+        .map(|n| n == "ipc$")
+        .unwrap_or(false);
+    if is_ipc {
         return Err(Status::OBJECT_NAME_NOT_FOUND);
     }
     let creq =
@@ -55,7 +60,7 @@ pub async fn nt_create(
     let no_dir = creq.create_options & 0x40 != 0; // FILE_NON_DIRECTORY_FILE
     let delete_on_close = creq.create_options & 0x1000 != 0; // FILE_DELETE_ON_CLOSE
 
-    let vfs = share.vfs.as_ref();
+    let vfs = share_vfs(io, req.hdr.tid);
     let (mut open, meta, action) = vfs
         .create(
             &rel,
@@ -98,7 +103,7 @@ pub async fn read_andx(
     let rr = rw::ReadReq::parse(req.words).map_err(|_| Status::INVALID_PARAMETER)?;
     let vfs = share_vfs(io, req.hdr.tid);
 
-    let Some(h): Option<&mut OpenFile> = io.conn.handles.get_mut(&rr.fid) else {
+    let Some(h) = io.conn.handles.get_mut(&rr.fid).map(|b| &mut **b) else {
         return Err(Status::INVALID_HANDLE);
     };
     if h.is_dir || !h.can_read {
@@ -106,7 +111,7 @@ pub async fn read_andx(
     }
     let data = vfs.read(h, rr.offset, rr.max_count).await.map_err(vfs_err)?;
 
-    let (params, bytes) = rw::read_response(&data[..rr.max_count.min(data.len())]);
+    let (params, bytes) = rw::read_response(&data);
     bodies.push(RespBody::new(consts::COM_READ_ANDX, params, bytes));
     Ok(Status::SUCCESS)
 }
@@ -117,11 +122,11 @@ pub async fn write_andx(
     req: &ReqView<'_>,
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
-    let wr = rw::WriteReq::parse(req.words, req.data.len() + 35 + 24 + 8, req.frame.len())
+    let wr = rw::WriteReq::parse(req.words, req.data.len(), req.frame.len(), req.frame)
         .map_err(|s| s)?;
     let vfs = share_vfs(io, req.hdr.tid);
 
-    let Some(h) = io.conn.handles.get_mut(&wr.fid) else {
+    let Some(h) = io.conn.handles.get_mut(&wr.fid).map(|b| &mut **b) else {
         return Err(Status::INVALID_HANDLE);
     };
     if h.is_dir || !h.can_write {
@@ -153,7 +158,7 @@ pub async fn close(
             .set_info_open(&mut h, &SetOp::Basic { write: Some(ft) })
             .await;
     }
-    vfs.close(h).await?;
+    vfs.close(h).await.map_err(vfs_err)?;
     bodies.push(RespBody::new(consts::COM_CLOSE, Vec::new(), Vec::new()));
     Ok(Status::SUCCESS)
 }
@@ -167,10 +172,10 @@ pub async fn flush(
     let vfs = share_vfs(io, req.hdr.tid);
     match misc::flush_fid(req.words) {
         None => return Err(Status::INVALID_PARAMETER),
-        Some(0xFFFF) => vfs.flush_all().await?,
+        Some(0xFFFF) => vfs.flush_all().await.map_err(vfs_err)?,
         Some(fid) => {
             if let Some(h) = io.conn.handles.get_mut(&fid) {
-                vfs.flush(h).await?;
+                vfs.flush(h).await.map_err(vfs_err)?;
             }
         }
     }
@@ -191,7 +196,7 @@ pub async fn seek(
     let Some(h) = io.conn.handles.get_mut(&sr.fid) else {
         return Err(Status::INVALID_HANDLE);
     };
-    let pos = vfs.seek(h, sr.mode, sr.offset).await?;
+    let pos = vfs.seek(h, sr.mode, sr.offset).await.map_err(vfs_err)?;
     bodies.push(RespBody::new(consts::COM_SEEK, misc::SeekReq::build_response(pos), Vec::new()));
     Ok(Status::SUCCESS)
 }
@@ -209,21 +214,19 @@ pub async fn locking(
 
 // ---- helpers ----
 
-fn share_of(io: &IoCtx<'_>, tid: u16) -> Result<&crate::state::Share, Status> {
-    static IPC: std::sync::OnceLock<crate::state::Share> = std::sync::OnceLock::new();
-    io.conn
-        .trees
-        .get(&tid)
-        .and_then(|n| io.server.shares.get(n))
-        .ok_or(Status::INVALID_HANDLE)
-        .or_else(|_| {
-            Ok(IPC.get_or_init(|| crate::state::Share {
-                name: "ipc$".into(),
-                root: "/nonexistent".into(),
-                is_ipc: true,
-            }))
-        })
+pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
+    use smb_vfs::VfsError as E;
+    match e {
+        E::NotFound => Status::OBJECT_PATH_NOT_FOUND,
+        E::AlreadyExists => Status::OBJECT_NAME_COLLISION,
+        E::AccessDenied => Status::ACCESS_DENIED,
+        E::DirectoryNotEmpty => Status::DIRECTORY_NOT_EMPTY,
+        E::InvalidArgument => Status::INVALID_PARAMETER,
+        E::NotSupported => Status::NOT_IMPLEMENTED,
+        E::Io(_) => Status::UNSUCCESSFUL,
+    }
 }
+
 
 fn join_rel(base: &str, name: &str) -> String {
     let name = name.trim_start_matches(['\\', '/']);

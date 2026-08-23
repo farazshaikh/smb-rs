@@ -33,3 +33,4 @@ pub mod trans2;
 pub mod tree_connect;
 
 pub use header::{parse_header, Header, RespBody};
+pub use trans2::find_level;

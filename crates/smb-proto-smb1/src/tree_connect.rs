@@ -2,6 +2,8 @@
 
 use smb_proto::buf::Reader;
 
+use crate::session_setup::BodyError;
+
 /// Parsed tree connect request (WC=4: AndX triple, Flags, PasswordLength).
 #[derive(Debug)]
 pub struct TreeConnectReq {

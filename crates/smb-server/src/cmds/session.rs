@@ -8,8 +8,12 @@ use smb_proto_smb1::session_setup as ss;
 use smb_proto_smb1::tree_connect as tc;
 
 use crate::auth::authenticate_ntlmssp;
-use crate::dispatch::{IoContext, ReqView};
+use crate::dispatch::{IoCtx, IoContext, ReqView};
 use crate::state::{next_tid, next_uid, Session};
+
+fn crate_ext_sec() -> u32 {
+    smb_proto_smb1::consts::caps::CAP_EXTENDED_SECURITY
+}
 
 /// Our negotiated capability set.
 pub fn our_caps() -> u32 {
@@ -26,13 +30,19 @@ pub fn our_caps() -> u32 {
 }
 
 /// NEGOTIATE: pick dialect, advertise capabilities, hand out the challenge.
-pub fn negotiate(req: &ReqView, bodies: &mut Vec<RespBody>) -> Result<Status, Status> {
+pub fn negotiate(
+    io: &IoCtx<'_>,
+    req: &ReqView,
+    bodies: &mut Vec<RespBody>,
+) -> Result<Status, Status> {
     let parsed = negotiate::NegotiateReq::parse(req.data);
     let idx = parsed.select().ok_or(Status::INVALID_PARAMETER)?;
+    // Extended security: ChallengeLength=0, data = 16-byte server GUID.
+    // (Session setup then runs the SPNEGO/NTLMSSP two-leg exchange.)
     let body = RespBody::new(
         consts::COM_NEGOTIATE,
-        negotiate::build_params(idx as u16, our_caps(), FileTime::now()),
-        Vec::new(), // challenge patched into words by the dispatcher
+        negotiate::build_params(idx as u16, our_caps() | crate_ext_sec(), FileTime::now()),
+        io.server.guid.to_vec(),
     );
     *bodies = vec![body];
     Ok(Status::SUCCESS)
@@ -45,22 +55,33 @@ pub fn setup(
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
     let conn = &mut io.conn;
-    let parsed = ss::SessionSetupReq::parse(
-        req.words,
-        req.data,
-        req.unicode(),
-        req.bc_off_abs + 2,
-    )
-    .map_err(|_| Status::LOGON_FAILURE)?;
+    let wct = req.wct;
+    // WC=12 → extended security (opaque blob); WC=13 → legacy passwords.
+    let ext = wct == 12;
+    let (blob, _legacy) = if ext {
+        let e = ss::SessionSetupExtReq::parse(req.words, &req.data.to_vec())
+            .map_err(|_| Status::LOGON_FAILURE)?;
+        (e.blob, None)
+    } else {
+        let l = ss::SessionSetupLegacyReq::parse(
+            req.words,
+            &req.data.to_vec(),
+            req.unicode(),
+            req.bc_off_abs + 2,
+        )
+        .map_err(|_| Status::LOGON_FAILURE)?;
+        (l.nt_resp.clone(), Some(l))
+    };
 
-    let inner = smb_auth::ntlm::unwrap_blob(&parsed.nt_resp).unwrap_or(&[]);
+    let parsed_nt = blob.clone();
+    let inner = smb_auth::ntlm::unwrap_blob(&parsed_nt).unwrap_or(&[]);
     match smb_auth::ntlm::msg_type(inner) {
         Some(smb_auth::ntlm::MSG_TYPE1) | Some(smb_auth::ntlm::MSG_TYPE2) | None => {
             // Leg 1 — issue the CHALLENGE.
             let uid = if conn.uid != 0 { conn.uid } else { next_uid() };
             conn.uid = uid;
             conn.auth_pending = true;
-            conn.spnego = smb_auth::ntlm::is_spnego(&parsed.nt_resp);
+            conn.spnego = smb_auth::ntlm::is_spnego(&parsed_nt);
 
             let t2 = smb_auth::ntlm::build_type2(
                 &conn.challenge,
@@ -72,7 +93,7 @@ pub fn setup(
             } else {
                 t2.clone()
             };
-            let (params, bytes) = ss::SessionSetupReq::build_response(0, &out_blob);
+            let (params, bytes) = ss::build_session_setup_response(0, &out_blob);
             let mut b = RespBody::new(consts::COM_SESSION_SETUP_ANDX, params, bytes);
             b.uid_override = Some(uid);
             *bodies = vec![b];
@@ -81,6 +102,7 @@ pub fn setup(
         Some(smb_auth::ntlm::MSG_TYPE3) => {
             // Leg 2 — verify the AUTHENTICATE message.
             let t3 = smb_auth::ntlm::parse_type3(inner).ok_or(Status::LOGON_FAILURE)?;
+            let _ = &_legacy;
             let out =
                 authenticate_ntlmssp(&io.server.users, io.server.allow_guest, &conn.challenge, &t3);
             if !out.ok {
@@ -101,12 +123,10 @@ pub fn setup(
             } else {
                 Vec::new()
             };
-            let (params, mut bytes) = ss::SessionSetupReq::build_response(action, &fin);
+            let (params, mut bytes) = ss::build_session_setup_response(action, &fin);
             // Drop OEM strings when a SPNEGO accept-complete token is present:
             // some parsers mis-detect string boundaries after DER blobs.
-            if !fin.is_empty() {
-                bytes.truncate(fin.len());
-            }
+            bytes.truncate(fin.len());
             let mut b = RespBody::new(consts::COM_SESSION_SETUP_ANDX, params, bytes);
             b.uid_override = Some(uid);
             *bodies = vec![b];

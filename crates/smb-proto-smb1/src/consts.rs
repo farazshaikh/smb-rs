@@ -22,6 +22,10 @@ pub const COM_CHECK_DIRECTORY: u8 = 0x10;
 pub const COM_PROCESS_EXIT: u8 = 0x11;
 /// SMB_COM_SEEK.
 pub const COM_SEEK: u8 = 0x12;
+/// SMB_COM_LOCK_BYTE_RANGE.
+pub const COM_LOCK_BYTE_RANGE: u8 = 0x0C;
+/// SMB_COM_UNLOCK_BYTE_RANGE.
+pub const COM_UNLOCK_BYTE_RANGE: u8 = 0x0D;
 /// SMB_COM_LOCKING_ANDX (byte-range locks).
 pub const COM_LOCKING_ANDX: u8 = 0x24;
 /// SMB_COM_ECHO.
@@ -91,7 +95,9 @@ pub mod caps {
     /// Pass-through information levels.
     pub const CAP_INFOLEVEL_PASSTHRU: u32 = 0x0000_2000;
     /// Large reads via READ_ANDX.
-    pub const CAP_LARGE_READX: u32 = 0x4000_0000;
+    pub const CAP_LARGE_READX: u32 = 0x0000_4000;
     /// Large writes via WRITE_ANDX.
-    pub const CAP_LARGE_WRITEX: u32 = 0x8000_0000;
+    pub const CAP_LARGE_WRITEX: u32 = 0x0000_8000;
+    /// Extended security (SPNEGO/NTLMSSP blobs in session setup).
+    pub const CAP_EXTENDED_SECURITY: u32 = 0x8000_0000;
 }

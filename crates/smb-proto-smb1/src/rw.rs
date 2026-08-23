@@ -66,7 +66,9 @@ pub fn read_response(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     params.extend_from_slice(&(data.len() as u16).to_le_bytes()); // DataLength
     params.extend_from_slice(&(doff as u16).to_le_bytes()); // DataOffset
     params.extend_from_slice(&0u32.to_le_bytes()); // DataLengthHigh
-    params.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+    params.extend_from_slice(&[0u8; 6]); // reserved tail (WC=12 => 24 bytes)
+
+    debug_assert_eq!(params.len(), PARAMS_LEN);
 
     // Padding between ByteCount and the first data byte.
     let pad = doff - (32 + 1 + PARAMS_LEN + 2);

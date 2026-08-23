@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use smb_proto::types::{AttrFlags, Disposition, FileTime};
-use smb_vfs::{map_io, Entry, FileMeta, OpenFile, SetOp, Vfs, VfsResult};
+use smb_vfs::{map_io, Entry, FileMeta, OpenFile, SetOp, Vfs, VfsError, VfsResult};
 
 /// POSIX backend rooted at a single directory.
 #[derive(Debug)]
@@ -87,13 +87,13 @@ fn find_case_insensitive(dir: &std::path::Path, name: &str) -> Option<String> {
 
 fn meta_of(md: &std::fs::Metadata) -> FileMeta {
     use std::os::unix::fs::MetadataExt;
-    let attrs = if md.is_dir() {
+    let attrs = AttrFlags::new(if md.is_dir() {
         AttrFlags::DIRECTORY
     } else if md.mode() & 0o222 == 0 {
         AttrFlags::ARCHIVE | AttrFlags::READONLY
     } else {
         AttrFlags::ARCHIVE
-    };
+    });
     let eof = if md.is_dir() { 0 } else { md.len() };
     FileMeta {
         times: [
@@ -115,7 +115,7 @@ fn set_mtime(path: &std::path::Path, ft: u64) -> VfsResult<()> {
         .write(true)
         .open(path)
         .map_err(map_io)?;
-    let (secs, nanos) = smb_proto::types::filetime_to_unix(ft);
+    let (secs, nanos) = FileTime(ft).to_unix();
     let t = std::time::SystemTime::UNIX_EPOCH
         + std::time::Duration::new(secs.max(0) as u64, nanos);
     f.set_times(FileTimes::new().set_modified(t)).map_err(map_io)?;

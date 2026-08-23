@@ -48,6 +48,11 @@ impl OpenFile {
         self.inner.downcast_ref::<T>()
     }
 
+    /// Immutably downcast the backend-private state (alias of [`Self::inner_as`]).
+    pub fn inner_as_ref<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.inner.downcast_ref::<T>()
+    }
+
     /// Mutably downcast the backend-private state to a concrete type.
     pub fn inner_as_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
         self.inner.downcast_mut::<T>()
@@ -83,7 +88,10 @@ pub struct Entry {
 #[derive(Debug, Clone)]
 pub enum SetOp {
     /// Mark the object for deletion (`FILE_DISPOSITION_INFORMATION`).
-    Disposition { delete: bool },
+    Disposition {
+        /// True = delete when the last handle closes.
+        delete: bool,
+    },
     /// Set allocation size.
     Allocation(u64),
     /// Set end-of-file (truncate/extend).

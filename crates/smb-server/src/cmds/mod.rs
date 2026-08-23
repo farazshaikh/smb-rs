@@ -9,16 +9,16 @@ use smb_proto::types::Status;
 use smb_proto_smb1::consts;
 use smb_proto_smb1::header::{Header, RespBody};
 
+pub use crate::dispatch::IoCtx;
 use crate::dispatch::{IoContext, ReqView};
 use crate::state::{next_uid, Session};
 
 /// Route one request: fills `bodies` and returns the response status.
-pub async fn dispatch_one(
-    io: &mut IoContext,
-    req: &ReqView,
+pub async fn dispatch_one<'a>(
+    io: &mut IoContext<'a>,
+    req: &ReqView<'a>,
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
-    let conn = &mut io.conn;
 
     // Pre-session commands: negotiate/setup/echo/exit/cancel.
     let needs_session = !matches!(
@@ -32,43 +32,43 @@ pub async fn dispatch_one(
 
     // Map unauthenticated clients to guest when no user DB is configured
     // (mirrors Samba's "map to guest = bad user").
-    if conn.session.is_none() && !conn.auth_pending && io.server.allow_guest && needs_session {
-        let uid = if conn.uid != 0 { conn.uid } else { next_uid() };
-        conn.uid = uid;
-        conn.session = Some(Session { user: "nobody".into(), guest: true, trees: Vec::new() });
+    if io.conn.session.is_none() && !io.conn.auth_pending && io.server.allow_guest && needs_session {
+        let uid = if io.conn.uid != 0 { io.conn.uid } else { next_uid() };
+        io.conn.uid = uid;
+        io.conn.session = Some(Session { user: "nobody".into(), guest: true, trees: Vec::new() });
     }
-    if needs_session && conn.session.is_none() && !conn.auth_pending {
+    if needs_session && io.conn.session.is_none() && !io.conn.auth_pending {
         return Err(Status::ACCESS_DENIED);
     }
 
     let needs_tree = needs_session
         && !matches!(req.hdr.command, consts::COM_TREE_CONNECT_ANDX | consts::COM_LOGOFF_ANDX);
-    if needs_tree && !conn.trees.contains_key(&req.hdr.tid) {
+    if needs_tree && !io.conn.trees.contains_key(&req.hdr.tid) {
         return Err(Status::INVALID_HANDLE);
     }
 
     match req.hdr.command {
-        consts::COM_NEGOTIATE => session::negotiate(req),
+        consts::COM_NEGOTIATE => session::negotiate(io, req, bodies),
         consts::COM_SESSION_SETUP_ANDX => session::setup(io, req, bodies),
         consts::COM_TREE_CONNECT_ANDX => session::tree_connect(io, req, bodies),
         consts::COM_TREE_DISCONNECT => {
             let tid = req.hdr.tid;
-            conn.trees.remove(&tid);
-            if let Some(s) = conn.session.as_mut() {
+            io.conn.trees.remove(&tid);
+            if let Some(s) = io.conn.session.as_mut() {
                 s.trees.retain(|t| *t != tid);
             }
             *bodies = vec![RespBody::new(consts::COM_TREE_DISCONNECT, Vec::new(), Vec::new())];
             Ok(Status::SUCCESS)
         }
         consts::COM_LOGOFF_ANDX => {
-            for fid in conn.handles.keys().copied().collect::<Vec<_>>() {
-                if let Some(h) = conn.handles.remove(&fid) {
+            for fid in io.conn.handles.keys().copied().collect::<Vec<_>>() {
+                if let Some(h) = io.conn.handles.remove(&fid) {
                     let vfs = share_vfs(io, req.hdr.tid);
                     let _ = vfs.close(h);
                 }
             }
-            conn.session = None;
-            conn.auth_pending = false;
+            io.conn.session = None;
+            io.conn.auth_pending = false;
             *bodies =
                 vec![RespBody::new(consts::COM_LOGOFF_ANDX, vec![0xFF, 0, 0, 0], Vec::new())];
             Ok(Status::SUCCESS)
@@ -93,7 +93,7 @@ pub async fn dispatch_one(
         consts::COM_QUERY_INFORMATION => dir_cmds::query_info_legacy(io, req, bodies).await,
         consts::COM_SET_INFORMATION => dir_cmds::set_info_legacy(io, req, bodies).await,
         consts::COM_PROCESS_EXIT => {
-            for (_, h) in std::mem::take(&mut conn.handles) {
+            for (_, h) in std::mem::take(&mut io.conn.handles) {
                 let vfs = share_vfs_any(io);
                 let _ = vfs.close(h);
             }
@@ -110,19 +110,24 @@ pub fn dir_cmds_split(pattern: &str) -> (String, String) {
     crate::cmds::dir_cmds::split_pattern_pub(pattern)
 }
 
+pub use crate::cmds::dir_cmds::split_pattern_pub as split_pattern;
+
 /// DOS wildcard match.
 pub fn wildcard(name: &str, pat: &str) -> bool {
     smb_backend_posix::wildcard_match(name, pat)
 }
 
 /// Resolve the VFS for the request's tree; IPC$ yields a stub that rejects.
-pub fn share_vfs<'a>(io: &'a IoContext, tid: u16) -> &'a dyn smb_vfs::Vfs {
-    static IPC: std::sync::OnceLock<smb_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
-    match io.conn.trees.get(&tid).and_then(|n| io.server.shares.get(n)) {
-        Some(share) => share.vfs.as_ref(),
-        None => IPC.get_or_init(smb_vfs_stub::IpcVfs::default) as &dyn smb_vfs::Vfs,
+/// Clone the VFS handle for the request's tree (Arc so handlers can hold it
+    /// across mutable connection access).
+    pub fn share_vfs(io: &IoContext<'_>, tid: u16) -> std::sync::Arc<dyn smb_vfs::Vfs> {
+        static IPC: std::sync::OnceLock<smb_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
+        match io.conn.trees.get(&tid).and_then(|n| io.server.shares.get(n)) {
+            Some(share) => share.vfs.clone(),
+            None => std::sync::Arc::new(IPC.get_or_init(smb_vfs_stub::IpcVfs::default).clone())
+                as std::sync::Arc<dyn smb_vfs::Vfs>,
+        }
     }
-}
 
 fn share_vfs_any(_io: &IoContext) -> &'static dyn smb_vfs::Vfs {
     static IPC: std::sync::OnceLock<smb_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
@@ -132,7 +137,7 @@ fn share_vfs_any(_io: &IoContext) -> &'static dyn smb_vfs::Vfs {
 /// Stub namespace so `share_vfs` can always return something.
 mod smb_vfs_stub {
     /// Rejecting backend used for unknown trees.
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct IpcVfs;
 
     #[async_trait::async_trait]

@@ -178,6 +178,21 @@ impl Writer {
         self.buf.push(v);
     }
 
+    /// Append a little-endian `u16`.
+    pub fn push_u16(&mut self, v: u16) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Append a little-endian `u32`.
+    pub fn push_u32(&mut self, v: u32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Append a little-endian `u64`.
+    pub fn push_u64(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
     /// Insert a pad byte so the current position becomes even relative to
     /// [`Self::base`] (Unicode alignment requirement).
     pub fn pad_to_parity(&mut self) {

@@ -4,9 +4,7 @@
 pub fn md4(data: &[u8]) -> [u8; 16] {
     // Round functions per RFC 1320 §3.3.x.
     fn round1(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, x: u32, s: u32) {
-        let t = a
-            .wrapping_add((*b & *c) | (!*b & *d))
-            .wrapping_add(x);
+        let t = a.wrapping_add((*b & *c) | (!*b & *d)).wrapping_add(x);
         *a = t.rotate_left(s);
     }
     /// Round 2: G(X,Y,Z) = (X AND Y) OR (X AND Z) OR (Y AND Z).
@@ -42,31 +40,32 @@ pub fn md4(data: &[u8]) -> [u8; 16] {
         let (mut a, mut b, mut c, mut d) =
             (state[0], state[1], state[2], state[3]);
 
-        for k in [0usize, 8, 4, 12] {
+        // Round 1: words consumed strictly sequentially; the register roles
+        // rotate (A,B,C,D)→(D,A,B,C) after every step.
+        for j in 0..4 {
+            let k = j * 4;
             round1(&mut a, &mut b, &mut c, &mut d, x[k], 3);
             round1(&mut d, &mut a, &mut b, &mut c, x[k + 1], 7);
             round1(&mut c, &mut d, &mut a, &mut b, x[k + 2], 11);
             round1(&mut b, &mut c, &mut d, &mut a, x[k + 3], 19);
         }
+        // Round 2: word order 0,4,8,…,13 with majority function.
         let idx2 = [0usize, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
-        for i in 0..16 {
-            let s = [3u32, 5, 9, 13][i % 4];
-            match i % 4 {
-                0 => round2(&mut a, &mut b, &mut c, &mut d, x[idx2[i]], s),
-                1 => round2(&mut d, &mut a, &mut b, &mut c, x[idx2[i]], s),
-                2 => round2(&mut c, &mut d, &mut a, &mut b, x[idx2[i]], s),
-                _ => round2(&mut b, &mut c, &mut d, &mut a, x[idx2[i]], s),
-            }
+        for g in 0..4 {
+            let k = g * 4;
+            round2(&mut a, &mut b, &mut c, &mut d, x[idx2[k]], 3);
+            round2(&mut d, &mut a, &mut b, &mut c, x[idx2[k + 1]], 5);
+            round2(&mut c, &mut d, &mut a, &mut b, x[idx2[k + 2]], 9);
+            round2(&mut b, &mut c, &mut d, &mut a, x[idx2[k + 3]], 13);
         }
+        // Round 3: word order per RFC with XOR function.
         let idx3 = [0usize, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15];
-        for i in 0..16 {
-            let s = [3u32, 9, 11, 15][i % 4];
-            match i % 4 {
-                0 => round3(&mut a, &mut b, &mut c, &mut d, x[idx3[i]], s),
-                1 => round3(&mut d, &mut a, &mut b, &mut c, x[idx3[i]], s),
-                2 => round3(&mut c, &mut d, &mut a, &mut b, x[idx3[i]], s),
-                _ => round3(&mut b, &mut c, &mut d, &mut a, x[idx3[i]], s),
-            }
+        for g in 0..4 {
+            let k = g * 4;
+            round3(&mut a, &mut b, &mut c, &mut d, x[idx3[k]], 3);
+            round3(&mut d, &mut a, &mut b, &mut c, x[idx3[k + 1]], 9);
+            round3(&mut c, &mut d, &mut a, &mut b, x[idx3[k + 2]], 11);
+            round3(&mut b, &mut c, &mut d, &mut a, x[idx3[k + 3]], 15);
         }
 
         state[0] = state[0].wrapping_add(a);
@@ -86,22 +85,27 @@ pub fn md4(data: &[u8]) -> [u8; 16] {
 mod tests {
     use super::md4;
 
+    fn hex(d: [u8; 16]) -> String {
+        d.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
     #[test]
     fn rfc1320_vectors() {
-        assert_eq!(md4(b"").hex(), "31d6cfe0d16ae931b73c59d7e0c089c0");
-        assert_eq!(md4(b"abc").hex(), "a448017aaf21d8525fc10ae87aa6729d");
+        assert_eq!(hex(md4(b"")), "31d6cfe0d16ae931b73c59d7e0c089c0");
+        assert_eq!(hex(md4(b"abc")), "a448017aaf21d8525fc10ae87aa6729d");
         assert_eq!(
-            md4(b"message digest").hex(),
-            "d9130a207699bdb70108fbb28ec18c55"
+            hex(md4(b"message digest")),
+            "d9130a8164549fe818874806e1c7014b"
         );
     }
 
-    trait HexExt {
-        fn hex(self) -> String;
-    }
-    impl HexExt for [u8; 16] {
-        fn hex(self) -> String {
-            self.iter().map(|b| format!("{:02x}", b)).collect()
+    #[test]
+    fn nt_hash_vector() {
+        // NT hash of "password" — widely published reference value.
+        let mut bytes = Vec::new();
+        for u in "password".encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
         }
+        assert_eq!(hex(md4(&bytes)), "8846f7eaee8fb117ad06bdd830b7586c");
     }
 }

@@ -5,6 +5,9 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[dependencies]
+smb-server = { path = "crates/smb-server" }
+
 [workspace]
 resolver = "2"
 members = [

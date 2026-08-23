@@ -8,9 +8,12 @@ use std::sync::Arc;
 
 use smb_proto::types::Status;
 use smb_proto_smb1::consts;
-use smb_proto_smb1::header::{build_response, parse_header, Header, HDR_LEN};
+use smb_proto_smb1::header::{build_response, parse_header, Header, RespBody, HDR_LEN};
 
-use crate::state::{next_uid, ConnState};
+use smb_transport::Transport;
+use smb_proto_smb1::consts::flags2;
+
+use crate::state::{next_uid, ServerShared, ConnState};
 
 /// Short alias used by command handlers.
 pub type IoCtx<'a> = IoContext<'a>;
@@ -174,25 +177,6 @@ async fn process_frame(
         }
     }
 
-    let mut out = build_response(&final_hdr, last_status, bodies);
-    if final_hdr.command == consts::COM_NEGOTIATE && last_status == Status::SUCCESS {
-        patch_negotiate_challenge(&mut out, io.conn.challenge);
-    }
-    Some(out)
+    Some(build_response(&final_hdr, last_status, bodies))
 }
 
-/// The negotiate response carries our 8-byte challenge at the end of its word
-/// area ([MS-SMB] §2.2.4.5.2); patch the per-connection value in.
-fn patch_negotiate_challenge(frame: &mut [u8], challenge: &[u8; 8]) {
-    const WC_POS: usize = HDR_LEN;
-    if frame.len() < WC_POS + 1 + 34 + 3 + 8 {
-        return;
-    }
-    if frame[WC_POS] != 17 {
-        return;
-    }
-    let chal_pos = HDR_LEN + 1 + 34 + 2;
-    if chal_pos + 8 <= frame.len() {
-        frame[chal_pos..chal_pos + 8].copy_from_slice(challenge);
-    }
-}

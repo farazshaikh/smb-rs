@@ -50,7 +50,7 @@ async fn read_exact_or_none(
     buf: &mut [u8],
 ) -> Result<Option<()>, TransportError> {
     match stream.read_exact(buf).await {
-        Ok(()) => Ok(Some(())),
+        Ok(_) => Ok(Some(())),
         Err(e) if matches!(
             e.kind(),
             io::ErrorKind::UnexpectedEof

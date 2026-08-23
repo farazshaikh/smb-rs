@@ -63,6 +63,9 @@ dependencies = [
 [[package]]
 name = "rustsmb-meta"
 version = "0.2.0"
+dependencies = [
+ "smb-server",
+]
 
 [[package]]
 name = "smb-auth"
@@ -123,6 +126,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "smb-proto",
+ "thiserror",
 ]
 
 [[package]]

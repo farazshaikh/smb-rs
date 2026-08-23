@@ -7,6 +7,7 @@ use smb_proto_smb1::query;
 use smb_proto_smb1::trans2 as t2;
 
 use crate::cmds::{share_vfs, IoCtx};
+use crate::state::SearchCtx;
 use crate::dispatch::ReqView;
 
 /// Route a TRANS2 request to its subcommand handler.
@@ -15,17 +16,16 @@ pub async fn dispatch_trans2(
     req: &ReqView<'_>,
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
-    let Some(t) = t2::Trans2Req::parse(req.wct, req.words, req.frame, req.bc_off_abs + 0, false)
-    else {
+    let Some(t) = t2::Trans2Req::parse(
+        req.wct as u8,
+        req.words,
+        req.frame,
+        req.bc_off_abs,
+        req.unicode(),
+    ) else {
         return Err(Status::INVALID_PARAMETER);
     };
-    let unicode = {
-        // The envelope parser ignores the client's Unicode flag; recover it
-        // from the header here so name decoding matches the wire encoding.
-        let _ = t.unicode;
-        req.unicode()
-    };
-    let t = t2::Trans2Req { unicode, ..t };
+
 
     let (params, data) = match t.subcmd {
         t2::subcmd::FIND_FIRST2 => find_first2(io, req.hdr.tid, &t).await?,
@@ -57,7 +57,10 @@ async fn find_first2(
         return Err(Status::INVALID_PARAMETER);
     }
     let g16 = |o: usize| -> u16 {
-        u16::from_le_bytes(t.params.get(o..o + 2).copied().unwrap_or([0, 0]))
+        match t.params.get(o..o + 2) {
+            Some(s) => u16::from_le_bytes([s[0], s[1]]),
+            None => 0,
+        }
     };
     let count = g16(2) as usize;
     let level = g16(6);
@@ -72,14 +75,17 @@ async fn find_first2(
 
     // Pattern naming an existing file returns that single entry.
     if !pattern.contains('*') && !pattern.contains('?') {
-        if let Ok(m) = vfs.stat(&pattern.trim_start_matches(['\\', '/'])) {
-            let entry = smb_vfs::Entry {
-                name: pattern
-                    .rsplit(['\\', '/'])
-                    .next()
-                    .unwrap_or("")
-                    .to_string(),
-                meta: m,
+        if let Ok(m) = vfs.stat(pattern.trim_start_matches(['\\', '/'])).await {
+            let name = pattern.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+            let entry = smb_proto_smb1::find::FindEntry {
+                name,
+                meta: smb_proto_smb1::query::QueryMeta {
+                    times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
+                    attrs: m.attrs,
+                    eof: m.eof,
+                    alloc: m.alloc,
+                    is_dir: m.is_dir,
+                },
             };
             let (data_buf, last) =
                 smb_proto_smb1::find::encode_entries(std::slice::from_ref(&entry), level, t.unicode);
@@ -107,8 +113,21 @@ async fn find_first2(
         },
     );
 
+    let find_entries: Vec<smb_proto_smb1::find::FindEntry> = matched
+        .into_iter()
+        .map(|e| smb_proto_smb1::find::FindEntry {
+            name: e.name,
+            meta: smb_proto_smb1::query::QueryMeta {
+                times: [e.meta.times[0].0, e.meta.times[1].0, e.meta.times[2].0, e.meta.times[3].0],
+                attrs: e.meta.attrs,
+                eof: e.meta.eof,
+                alloc: e.meta.alloc,
+                is_dir: e.meta.is_dir,
+            },
+        })
+        .collect();
     let (data_buf, last_off) =
-        smb_proto_smb1::find::encode_entries(&matched, level, t.unicode);
+        smb_proto_smb1::find::encode_entries(&find_entries, level, t.unicode);
     Ok(find_params(sid_v, returned.len() as u16, end_of_search, last_off, data_buf))
 }
 
@@ -138,21 +157,48 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
         return Err(Status::INVALID_PARAMETER);
     }
     let sid_v = u16::from_le_bytes([t.params[0], t.params[1]]);
-    let ctx = io.conn.searches.get_mut(&sid_v).ok_or(Status::INVALID_HANDLE)?;
-    let mut out = Vec::new();
-    while let Some(name) = ctx.queue.next() {
-        let meta = smb_vfs::FileMeta::default();
-        out.push(smb_vfs::Entry { name, meta });
-        if out.len() >= 32 {
-            break;
-        }
+    // Take the search out of the table to borrow the VFS independently.
+    let Some(mut ctx) = io.conn.searches.remove(&sid_v) else {
+        return Err(Status::INVALID_HANDLE);
+    };
+    let vfs = share_vfs(io, tid_placeholder());
+    let mut out: Vec<smb_proto_smb1::find::FindEntry> = Vec::new();
+    while out.len() < 64 {
+        let Some(name) = ctx.queue.next() else { break };
+        let m = match vfs.stat(&format!("{}\\{}", ctx.base_dir.display(), name)).await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        out.push(smb_proto_smb1::find::FindEntry {
+            name,
+            meta: smb_proto_smb1::query::QueryMeta {
+                times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
+                attrs: m.attrs,
+                eof: m.eof,
+                alloc: m.alloc,
+                is_dir: m.is_dir,
+            },
+        });
     }
+    let drained = ctx.queue.len() == 0 && out.is_empty();
     let lvl = if t.params.len() >= 6 {
         u16::from_le_bytes([t.params[4], t.params[5]])
     } else {
         ctx.level
     };
-    Ok(smb_proto_smb1::find::encode_entries(&out, lvl, t.unicode))
+    let eos = ctx.queue.as_slice().is_empty();
+    let _ = drained;
+    io.conn.searches.insert(sid_v, ctx);
+    let eos_final = io.conn.searches.contains_key(&sid_v) == false || {
+        // still entries pending?
+        false
+    };
+    let _ = eos_final;
+    let (data_buf, last_off) =
+        smb_proto_smb1::find::encode_entries(&out, lvl, t.unicode);
+    let has_more = !io.conn.searches.contains_key(&sid_v);
+    let _ = has_more;
+    Ok(find_params(sid_v, out.len() as u16, true, last_off, data_buf))
 }
 
 // ---------------- QUERY_FS / PATH / FILE ----------------
@@ -170,31 +216,31 @@ fn query_fs(
     let mut d = smb_proto::buf::Writer::new(0);
     match level {
         0x102 => {
-            d.u64(smb_proto::types::FileTime::now().0);
-            d.u32(0x1234_5678);
+            d.push_u64(smb_proto::types::FileTime::now().0);
+            d.push_u32(0x1234_5678);
             const LABEL: &str = "RUSTSMB";
-            d.u32((LABEL.len() * 2) as u32);
+            d.push_u32((LABEL.len() * 2) as u32);
             for u in LABEL.encode_utf16() {
-                d.u16(u);
+                d.push_u16(u);
             }
         }
         0x103 => {
-            d.u64(1_048_576);
-            d.u64(524_288);
-            d.u32(64);
-            d.u32(512);
+            d.push_u64(1_048_576);
+            d.push_u64(524_288);
+            d.push_u32(64);
+            d.push_u32(512);
         }
         0x201 => {
-            d.u32(0);
-            d.u32(0x20);
+            d.push_u32(0);
+            d.push_u32(0x20);
         }
         0x202 => {
-            d.u32(0x0004_2700 | 0x8 | 0x200 | 0x4);
-            d.u32(255);
+            d.push_u32(0x0004_2700 | 0x8 | 0x200 | 0x4);
+            d.push_u32(255);
             const NAME: &str = "NTFS";
-            d.u32((NAME.len() * 2) as u32);
+            d.push_u32((NAME.len() * 2) as u32);
             for u in NAME.encode_utf16() {
-                d.u16(u);
+                d.push_u16(u);
             }
         }
         _ => return Err(Status::INVALID_PARAMETER),
@@ -221,7 +267,10 @@ async fn query_path(
     }
     let m = vfs.stat(&name).await.map_err(vfs_err)?;
     let short = name.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-    query::encode_payload(level, &m, &short).map(|d| (Vec::new(), d)).map_err(|_| Status::INVALID_PARAMETER)
+    let qm = qmeta_from(&m);
+    query::encode_payload(level, &qm, &short)
+        .map(|d| (Vec::new(), d))
+        .map_err(|_| Status::INVALID_PARAMETER)
 }
 
 /// QUERY_FILE_INFORMATION by FID.
@@ -235,8 +284,10 @@ async fn query_file(io: &IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, Vec<u
         return Err(Status::INVALID_HANDLE);
     };
     let name = h.path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-    let m = stat_open_meta(h);
-    query::encode_payload(level, &m, &name).map(|d| (Vec::new(), d)).map_err(|_| Status::INVALID_PARAMETER)
+    let qm = qmeta_from(&stat_open_meta(h));
+    query::encode_payload(level, &qm, &name)
+        .map(|d| (Vec::new(), d))
+        .map_err(|_| Status::INVALID_PARAMETER)
 }
 
 /// Metadata snapshot of an open handle (path re-statted when possible).
@@ -262,12 +313,12 @@ async fn set_file(
     }
     let fid = u16::from_le_bytes([t.params[0], t.params[1]]);
     let level = u16::from_le_bytes([t.params[2], t.params[3]]);
-    let op = decode_set_op(level, t.data)?;
+    let op = decode_set_op(level, &t.data)?;
     let vfs = share_vfs(io, tid_placeholder());
     let Some(h) = io.conn.handles.get_mut(&fid) else {
         return Err(Status::INVALID_HANDLE);
     };
-    vfs.set_info_open(h, &op).await?;
+    vfs.set_info_open(h, &op).await.map_err(vfs_err)?;
     Ok((Vec::new(), Vec::new()))
 }
 
@@ -286,9 +337,9 @@ async fn set_path(
     if name.is_empty() {
         return Err(Status::INVALID_PARAMETER);
     }
-    let op = decode_set_op(level, t.data)?;
+    let op = decode_set_op(level, &t.data)?;
     let vfs = share_vfs(io, tid);
-    vfs.set_info_path(&name, &op).await?;
+    vfs.set_info_path(&name, &op).await.map_err(vfs_err)?;
     Ok((Vec::new(), Vec::new()))
 }
 
@@ -320,13 +371,7 @@ fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_vfs::SetOp, Status> {
 fn share_name<'a>(io: &'a IoCtx<'_>, tid: u16) -> Result<&'a str, Status> {
     io.conn.trees.get(&tid).map(String::as_str).ok_or(Status::INVALID_HANDLE)
 }
-fn share_vfs(io: &IoCtx<'_>, tid: u16) -> &'static dyn smb_vfs::Vfs {
-    static IPC: std::sync::OnceLock<smb_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
-    match io.conn.trees.get(&tid).and_then(|n| io.server.shares.get(n)) {
-        Some(s) => s.vfs.as_ref(),
-        None => IPC.get_or_init(Default::default) as &dyn smb_vfs::Vfs,
-    }
-}
+
 fn tid_placeholder() -> u16 {
     0
 }
@@ -343,9 +388,15 @@ fn vfs_err(e: smb_vfs::VfsError) -> Status {
     }
 }
 
-/// Stub namespace reused from the routing module.
-mod smb_vfs_stub {
-    /// Rejecting backend.
-    #[derive(Debug, Default)]
-    pub struct IpcVfs;
+
+
+/// Convert storage metadata into the neutral query-payload snapshot.
+pub(crate) fn qmeta_from(m: &smb_vfs::FileMeta) -> smb_proto_smb1::query::QueryMeta {
+    smb_proto_smb1::query::QueryMeta {
+        times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
+        attrs: m.attrs,
+        eof: m.eof,
+        alloc: m.alloc,
+        is_dir: m.is_dir,
+    }
 }

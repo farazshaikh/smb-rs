@@ -87,7 +87,7 @@ pub async fn delete(
 ) -> Result<Status, Status> {
     let vfs = share_vfs(io, req.hdr.tid);
     let pattern = read_path(req);
-    let (dir_rel, name_pat) = split_pattern(&pattern);
+    let (dir_rel, name_pat) = split_pattern_pub(&pattern);
 
     if !name_pat.contains('*') && !name_pat.contains('?') {
         let rel = join_rel(&dir_rel, &name_pat);
@@ -127,7 +127,7 @@ pub async fn query_info_legacy(
     let vfs = share_vfs(io, req.hdr.tid);
     let path = read_path(req);
     let m = vfs.stat(&path).await.map_err(vfs_err)?;
-    let (secs, _) = smb_proto::types::filetime_to_unix(m.times[2].0);
+    let (secs, _) = smb_proto::types::FileTime(m.times[2].0).to_unix();
 
     // DOS date/time packing ([MS-DTYP] §2.3.4/5).
     let secs = secs.max(0);
@@ -177,6 +177,7 @@ pub async fn set_info_legacy(
 
 // ---- helpers ----
 
+/// Split a find pattern into `(directory, filename-pattern)` parts.
 pub fn split_pattern_pub(pattern: &str) -> (String, String) {
     let p = pattern.trim_start_matches(['\\', '/']);
     match p.rfind(['\\', '/']) {

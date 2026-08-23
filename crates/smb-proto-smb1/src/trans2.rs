@@ -110,7 +110,11 @@ impl Trans2Req {
             return None;
         }
         let g = |i: usize| -> u16 {
-            u16::from_le_bytes(words.get(i..i + 2).copied().unwrap_or([0, 0]))
+            if i + 2 <= words.len() {
+                u16::from_le_bytes([words[i], words[i + 1]])
+            } else {
+                0
+            }
         };
         let pcount = g(18) as usize; // vwv9 ParameterCount
         let poff = g(20) as usize; // vwv10 ParameterOffset

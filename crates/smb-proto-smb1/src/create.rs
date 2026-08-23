@@ -2,6 +2,14 @@
 
 use smb_proto::buf::Reader;
 
+use crate::session_setup::BodyError;
+
+impl From<smb_proto::error::ProtoError> for BodyError {
+    fn from(_: smb_proto::error::ProtoError) -> Self {
+        BodyError::TooShort
+    }
+}
+
 /// Parsed client request ([MS-SMB] §2.2.4.9.1, WC=24).
 #[derive(Debug)]
 pub struct NtCreateReq {
@@ -61,7 +69,7 @@ impl NtCreateReq {
         }
         let mut rd = Reader::new(data, start);
         let raw_len = name_len.min(data.len().saturating_sub(start));
-        let raw = rd.take(raw_len).to_vec();
+        let raw = rd.take(raw_len)?.to_vec();
         let name = decode_name(&raw, unicode);
 
         Ok(NtCreateReq {

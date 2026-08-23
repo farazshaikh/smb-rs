@@ -127,9 +127,7 @@ impl SeekReq {
         Some(SeekReq {
             fid: u16le(words, 0),
             mode: u16le(words, 2),
-            offset: i32::from_le_bytes(
-                *words.get(4..8)?.try_into().ok()?,
-            ) as i64,
+            offset: i32::from_le_bytes(words.get(4..8)?.try_into().ok()?) as i64,
         })
     }
 

@@ -70,6 +70,7 @@ async fn main() {
 
     let guid = random_guid();
     let shared = Arc::new(state::ServerShared {
+        shares: share_map,
         guid,
         domain: "WORKGROUP".into(),
         server_name: "RUSTSMB".into(),
