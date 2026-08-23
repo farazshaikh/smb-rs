@@ -6,7 +6,7 @@ use smb_proto_smb1::consts;
 use smb_proto_smb1::create as create_codec;
 use smb_proto_smb1::header::RespBody;
 use smb_proto_smb1::misc;
-use smb_proto_smb1::rw;
+use smb_proto_smb1::rw::{self, WriteReq, ReadReq};
 use smb_vfs::{OpenFile, SetOp};
 
 use crate::cmds::{share_vfs, IoCtx};
@@ -100,7 +100,7 @@ pub async fn read_andx(
     req: &ReqView<'_>,
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
-    let rr = rw::ReadReq::parse(req.words).map_err(|_| Status::INVALID_PARAMETER)?;
+    let rr = ReadReq::parse(req.words).map_err(|_| Status::INVALID_PARAMETER)?;
     let vfs = share_vfs(io, req.hdr.tid);
 
     let Some(h) = io.conn.handles.get_mut(&rr.fid).map(|b| &mut **b) else {
@@ -122,8 +122,7 @@ pub async fn write_andx(
     req: &ReqView<'_>,
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
-    let wr = rw::WriteReq::parse(req.words, req.data.len(), req.frame.len(), req.frame)
-        .map_err(|s| s)?;
+    let wr = WriteReq::parse(req.words, req.frame).map_err(|s| s)?;
     let vfs = share_vfs(io, req.hdr.tid);
 
     let Some(h) = io.conn.handles.get_mut(&wr.fid).map(|b| &mut **b) else {

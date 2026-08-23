@@ -27,6 +27,7 @@ pub async fn dispatch_trans2(
     };
 
 
+    eprintln!("TRANS2 dispatch called subcmd={:#06x}", t.subcmd);
     let (params, data) = match t.subcmd {
         t2::subcmd::FIND_FIRST2 => find_first2(io, req.hdr.tid, &t).await?,
         t2::subcmd::FIND_NEXT2 => find_next2(io, &t).await?,
@@ -53,6 +54,8 @@ async fn find_first2(
     tid: u16,
     t: &t2::Trans2Req,
 ) -> Result<(Vec<u8>, Vec<u8>), Status> {
+    eprintln!("find_first2: params={:02x?} unicode={} param_base={} data={:02x?} data_base={}",
+        t.params, t.unicode, t.param_base, t.data_base, t.data_base);
     if t.params.len() < 12 {
         return Err(Status::INVALID_PARAMETER);
     }
@@ -65,9 +68,11 @@ async fn find_first2(
     let count = g16(2) as usize;
     let level = g16(6);
 
-    // Fixed params end at byte 10; the pattern follows (parity-aligned).
-    let mut rd = smb_proto::buf::Reader::new(&t.params, 10);
+    // Fixed params: SearchAttributes(2) SearchCount(2) OpenFlags(2)
+    // InformationLevel(2) SearchStorageType(4) = 12 bytes; name follows.
+    let mut rd = smb_proto::buf::Reader::new(&t.params, 12);
     let pattern = rd.zstring(t.unicode, t.param_base);
+    eprintln!("find_first2: level={:#06x} pattern={:?}", level, pattern);
 
     let share = share_name(io, tid)?;
     let vfs = share_vfs(io, tid);
