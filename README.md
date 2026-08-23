@@ -5,7 +5,7 @@
 <h1 align="center">smb-rs</h1>
 
 <p align="center">
-  <strong>An SMB1 file server written in pure Rust — zero external dependencies.</strong>
+  <strong>An SMB1/SMB2/SMB3 file server written in pure Rust.</strong>
 </p>
 
 ---
