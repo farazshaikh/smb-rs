@@ -1,0 +1,9 @@
+[package]
+name = "smb-proto-smb2"
+description = "SMB2 wire structures ([MS-SMB2]) — pass 2 scaffold"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+smb-proto = { path = "../smb-proto" }
