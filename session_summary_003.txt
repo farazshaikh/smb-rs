@@ -45,16 +45,23 @@ encryption) is the remaining work.
 11. FileAllInformation: embedded FSCC structs are 8-byte aligned inside the
     composite (Basic occupies 40 bytes incl. pad).
 
-## NEXT STEPS (SMB3)
-1. Negotiate contexts: parse PREAUTH_INTEGRITY_CAPABILITIES +
-   ENCRYPTION_CAPABILITIES from client; include contexts in our response
-   when dialect >= 3.1.1; accept dialects 0x300/0x302/0x311 in pick().
-2. Preauth integrity hash: SHA-512 chaining over negotiate/session-setup
-   frames ([MS-SMB2] §3.3.4.1.1).
-3. Signing keys for 3.x: KDF counter mode HMAC-SHA256(label "SMBSigningKey\0"
-   [3.1.1] w/ preauth hash context, or "SMB2AESCMAC\0"/"SmbSign\0" [3.0]).
-4. AES-CMAC-AES128 signatures for 3.x (needs AES-128 core; CMAC on top).
-5. Encryption transform (AES-GCM/CCM, 52-byte transform header) last.
+## SMB3 — LANDED THIS SESSION (commit fa2cb97)
+1. Dialects 0x300/0x302/0x311 accepted; negotiate response carries contexts
+   when 3.1.1: PREAUTH_INTEGRITY (SHA-512 + random salt), ENCRYPTION
+   (exactly ONE chosen cipher — samba rejects count != 1), SIGNING
+   (AES-128-CMAC).
+2. Preauth integrity hash: SHA-512 chaining over every NEGOTIATE and
+   SESSION_SETUP request AND response frame.
+3. Signing keys via SP800-108 CTR-HMAC-SHA256: "SMBSigningKey\0" +
+   preauth-hash context (3.1.1), "SMB2AESCMAC\0"/"SmbSign\0" (3.0/3.0.2),
+   raw session key (2.x). Verified end-to-end: smbclient validates our
+   signed traffic at 3.1.1 with NTLMv2 auth.
+
+## REMAINING (future session)
+1. Encryption transform: AES-GCM/CCM (52-byte transform header §2.2.41);
+   cipher already negotiated, just not applied to traffic.
+2. Multichannel, leases/oplocks, durable handles.
+3. README refresh.
 
 ## KEY GOTCHAS
 - cargo build at workspace root builds only meta pkg — always use
