@@ -109,17 +109,3 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
     ctx.finish()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::md5;
-
-    fn hex(d: [u8; 16]) -> String {
-        d.iter().map(|b| format!("{:02x}", b)).collect()
-    }
-
-    #[test]
-    fn rfc1321_vectors() {
-        assert_eq!(hex(md5(b"")), "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(hex(md5(b"abc")), "900150983cd24fb0d6963f7d28e17f72");
-    }
-}

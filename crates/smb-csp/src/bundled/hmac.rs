@@ -33,19 +33,3 @@ pub fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
     md5(&both)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::hmac_md5;
-
-    fn hex(d: [u8; 16]) -> String {
-        d.iter().map(|b| format!("{:02x}", b)).collect()
-    }
-
-    #[test]
-    fn rfc2202_case2() {
-        assert_eq!(
-            hex(hmac_md5(b"Jefe", b"what do ya want for nothing?")),
-            "750c783e6ab0b503eaa86e310a5db738"
-        );
-    }
-}

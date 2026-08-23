@@ -94,23 +94,3 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::sha512;
-
-    fn hex(b: &[u8]) -> String {
-        b.iter().map(|x| format!("{:02x}", x)).collect()
-    }
-
-    #[test]
-    fn fips_vectors() {
-        assert_eq!(
-            hex(&sha512(b"")),
-            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
-        );
-        assert_eq!(
-            hex(&sha512(b"abc")),
-            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
-        );
-    }
-}

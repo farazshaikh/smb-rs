@@ -31,22 +31,3 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     sha256(&both)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::hmac_sha256;
-
-    fn hex(d: [u8; 32]) -> String {
-        d.iter().map(|b| format!("{:02x}", b)).collect()
-    }
-
-    #[test]
-    fn rfc4231_case2() {
-        assert_eq!(
-            hex(hmac_sha256(
-                b"Jefe",
-                b"what do ya want for nothing?"
-            )),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-    }
-}

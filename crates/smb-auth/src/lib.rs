@@ -1,7 +1,8 @@
 //! SMB authentication primitives.
 //!
-//! Contains the hand-rolled cryptographic helpers (MD4, MD5, HMAC-MD5, DES)
-//! required by the NTLM family of authentication schemes, plus the
+//! Cryptographic primitives come from the [`smb_csp`] crypto service
+//! provider (RustCrypto crates by default, bundled implementations behind a
+//! feature flag). Also hosts the
 //! [MS-NLMP] NTLMSSP message construction/parsing and the minimal SPNEGO
 //! DER wrapping used during extended-security session setup.
 //!

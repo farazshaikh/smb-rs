@@ -9,6 +9,11 @@ license.workspace = true
 name = "rustsmb"
 path = "src/main.rs"
 
+[features]
+default = ["lib"]
+lib = ["smb-auth/lib"]
+handrolled = ["smb-auth/handrolled"]
+
 [dependencies]
 async-trait.workspace = true
 tokio.workspace = true
@@ -18,4 +23,4 @@ smb-proto-smb1 = { path = "../smb-proto-smb1" }
 smb-transport = { path = "../smb-transport" }
 smb-vfs = { path = "../smb-vfs" }
 smb-backend-posix = { path = "../smb-backend-posix" }
-smb-auth = { path = "../smb-auth" }
+smb-auth = { path = "../smb-auth", default-features = false }

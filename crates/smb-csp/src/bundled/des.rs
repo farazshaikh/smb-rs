@@ -129,14 +129,26 @@ fn des_block(block: [u8; 8], keys: &[[u8; 6]; 16]) -> [u8; 8] {
     bits_to_bytes8(&outbits)
 }
 
+/// Expand a 56-bit NTLM key chunk into an 8-byte DES key: each 7-bit group
+/// is shifted left once, leaving a zero parity bit in every LSB
+/// ([MS-NLMP] §3.3.1).
+fn key7_to_key8(k7: &[u8; 7]) -> [u8; 8] {
+    [
+        ((k7[0] >> 1) & 0x7f) << 1,
+        (((k7[0] & 0x01) << 6 | (k7[1] >> 2) & 0x3f)) << 1,
+        (((k7[1] & 0x03) << 5 | (k7[2] >> 3) & 0x1f)) << 1,
+        (((k7[2] & 0x07) << 4 | (k7[3] >> 4) & 0x0f)) << 1,
+        (((k7[3] & 0x0f) << 3 | (k7[4] >> 5) & 0x07)) << 1,
+        (((k7[4] & 0x1f) << 2 | (k7[5] >> 6) & 0x03)) << 1,
+        (((k7[5] & 0x3f) << 1 | (k7[6] >> 7) & 0x01)) << 1,
+        (k7[6] & 0x7f) << 1,
+    ]
+}
+
 /// Build the 16 round keys from a 7-byte (56-bit) key chunk.
 fn schedule(key56: [u8; 7]) -> [[u8; 6]; 16] {
     use tables::*;
-    let padded = {
-        let mut k = [0u8; 8];
-        k[..7].copy_from_slice(&key56);
-        k
-    };
+    let padded = key7_to_key8(&key56);
     let all = bytes_to_bits(&padded);
     let mut kbits = vec![false; 56];
     for i in 0..56 {

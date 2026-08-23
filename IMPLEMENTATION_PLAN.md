@@ -148,9 +148,13 @@
   applied; clients that do not request encryption work normally
 - ⬜ Multichannel support
 
-### Crypto additions
-- SHA-512 (FIPS vectors), AES-128 forward block + CMAC (RFC 4493 vectors),
-  SP800-108 counter-mode KDF
+### Crypto additions — now via `smb-csp` crate
+- Crypto service provider (`crates/smb-csp`) with two compile-time backends:
+  * `lib` (default): RustCrypto crates (md4/md5/sha2/hmac/des/aes/cmac/rc4),
+    hardware-accelerated AES where available
+  * `handrolled`: bundled from-scratch implementations (zero external deps)
+- Both backends pass the same FIPS/RFC/interop vector suite; NTLMv1 DES key
+  expansion fixed to match impacket/OpenSSL ground truth
 
 ## Known Regressions
 - 🔨 FIND_FIRST2 level 0x104 entry name parse (smbclient ls shows empty names)

@@ -5,8 +5,13 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+default = ["lib"]
+lib = ["smb-server/lib"]
+handrolled = ["smb-server/handrolled"]
+
 [dependencies]
-smb-server = { path = "crates/smb-server" }
+smb-server = { path = "crates/smb-server", default-features = false }
 
 [workspace]
 resolver = "2"
@@ -19,6 +24,7 @@ members = [
     "crates/smb-vfs",
     "crates/smb-backend-posix",
     "crates/smb-auth",
+    "crates/smb-csp",
     "crates/smb-server",
 ]
 

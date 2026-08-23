@@ -28,24 +28,3 @@ pub fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::rc4;
-
-    #[test]
-    fn fips_vector() {
-        // FIPS 197-style test vector widely published for RC4:
-        // key=0x01..0x05, plaintext zeros → known keystream prefix.
-        let ks = rc4(&[1u8, 2, 3, 4, 5], &[0u8; 16]);
-        assert_eq!(
-            ks.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
-            "b2396305f03dc027ccc3524a0a1118a8"
-        );
-    }
-
-    #[test]
-    fn symmetric() {
-        let ct = rc4(b"secret-key", b"attack at dawn");
-        assert_eq!(rc4(b"secret-key", &ct), b"attack at dawn");
-    }
-}

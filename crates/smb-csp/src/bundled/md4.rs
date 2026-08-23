@@ -81,31 +81,3 @@ pub fn md4(data: &[u8]) -> [u8; 16] {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::md4;
-
-    fn hex(d: [u8; 16]) -> String {
-        d.iter().map(|b| format!("{:02x}", b)).collect()
-    }
-
-    #[test]
-    fn rfc1320_vectors() {
-        assert_eq!(hex(md4(b"")), "31d6cfe0d16ae931b73c59d7e0c089c0");
-        assert_eq!(hex(md4(b"abc")), "a448017aaf21d8525fc10ae87aa6729d");
-        assert_eq!(
-            hex(md4(b"message digest")),
-            "d9130a8164549fe818874806e1c7014b"
-        );
-    }
-
-    #[test]
-    fn nt_hash_vector() {
-        // NT hash of "password" — widely published reference value.
-        let mut bytes = Vec::new();
-        for u in "password".encode_utf16() {
-            bytes.extend_from_slice(&u.to_le_bytes());
-        }
-        assert_eq!(hex(md4(&bytes)), "8846f7eaee8fb117ad06bdd830b7586c");
-    }
-}
