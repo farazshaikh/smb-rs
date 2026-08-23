@@ -37,6 +37,11 @@ license = "MIT"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "fs", "time"] }
 async-trait = "0.1"
 thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 opt-level = 2

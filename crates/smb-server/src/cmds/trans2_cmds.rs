@@ -27,8 +27,7 @@ pub async fn dispatch_trans2(
     };
 
 
-    eprintln!("TRANS2 dispatch called subcmd={:#06x}", t.subcmd);
-    eprintln!("T2REQ subcmd={:#06x} unicode={} params={:02x?}", t.subcmd, t.unicode, &t.params[..t.params.len().min(20)]);
+    tracing::trace!(subcmd = format!("{:#06x}", t.subcmd), unicode = t.unicode, "trans2 dispatch");
     let (params, data) = match t.subcmd {
         t2::subcmd::FIND_FIRST2 => find_first2(io, req.hdr.tid, &t).await?,
         t2::subcmd::FIND_NEXT2 => find_next2(io, &t).await?,
@@ -38,7 +37,7 @@ pub async fn dispatch_trans2(
         t2::subcmd::SET_FILE_INFO => set_file(io, &t).await?,
         t2::subcmd::SET_PATH_INFO => set_path(io, req.hdr.tid, &t).await?,
         other => {
-            eprintln!("trans2: unsupported subcmd {:#06x}", other);
+            tracing::debug!(subcmd = format!("{:#06x}", other), "trans2: unsupported");
             return Err(Status::INVALID_PARAMETER);
         }
     };
@@ -55,8 +54,6 @@ async fn find_first2(
     tid: u16,
     t: &t2::Trans2Req,
 ) -> Result<(Vec<u8>, Vec<u8>), Status> {
-    eprintln!("find_first2: params={:02x?} unicode={} param_base={} data={:02x?} data_base={}",
-        t.params, t.unicode, t.param_base, t.data_base, t.data_base);
     if t.params.len() < 12 {
         return Err(Status::INVALID_PARAMETER);
     }
@@ -73,7 +70,7 @@ async fn find_first2(
     // InformationLevel(2) SearchStorageType(4) = 12 bytes; name follows.
     let mut rd = smb_proto::buf::Reader::new(&t.params, 12);
     let pattern = rd.zstring(t.unicode, t.param_base);
-    eprintln!("find_first2: level={:#06x} pattern={:?}", level, pattern);
+    tracing::trace!(level = format!("{:#06x}", level), pattern = %pattern, "find_first2");
 
     let share = share_name(io, tid)?;
     let vfs = share_vfs(io, tid);
@@ -274,7 +271,6 @@ async fn query_path(
     let m = vfs.stat(&name).await.map_err(vfs_err)?;
     let short = name.rsplit(['\\', '/']).next().unwrap_or("").to_string();
     let qm = qmeta_from(&m);
-    eprintln!("query_path: name={:?} level={:#06x} eof={}", name, level, qm.eof);
     query::encode_payload(level, &qm, &short)
         .map(|d| (Vec::new(), d))
         .map_err(|_| Status::INVALID_PARAMETER)

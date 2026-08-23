@@ -13,6 +13,8 @@ use smb_proto_smb1::header::{build_response, parse_header, Header, RespBody, HDR
 use smb_transport::Transport;
 use smb_proto_smb1::consts::flags2;
 
+use metrics::{counter, histogram};
+
 use crate::state::{next_uid, ServerShared, ConnState, Session};
 
 /// Short alias used by command handlers.
@@ -88,15 +90,20 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, mut transport
             continue;
         }
 
+        counter!("smb_nbss_frames_total").increment(1);
+
         // SMB2/3 frames (\xFESMB magic).
         if frame.0[0] == 0xFE || conn.upgraded_smb2 {
             if smb2_conn.is_none() {
                 smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge()));
             }
             let c2 = smb2_conn.as_mut().unwrap();
+            let start = std::time::Instant::now();
             if let Some(resp) =
                 crate::smb2::process_frame(&server, c2, &frame.0).await
             {
+                histogram!("smb_frame_duration_us").record(start.elapsed().as_micros() as f64);
+                counter!("smb_responses_total").increment(1);
                 if transport.send(&resp).await.is_err() {
                     return;
                 }
@@ -178,7 +185,7 @@ pub(crate) async fn process_frame(
     {
         if let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {
             conn.upgraded_smb2 = true;
-            eprintln!("upgraded to SMB2 via multi-protocol negotiate");
+            tracing::info!("client upgraded to SMB2 via multi-protocol negotiate");
             return Some(resp);
         }
     }
@@ -224,10 +231,14 @@ pub(crate) async fn process_frame(
         match crate::cmds::dispatch_one(&mut io, req, &mut bodies).await {
             Ok(st) => last_status = st,
             Err(status) => {
-                eprintln!(
-                    "handler error: cmd=0x{:02x} tid={:#06x} uid={:#06x} -> {:08x}",
-                    req.hdr.command, req.hdr.tid, req.hdr.uid, status.raw()
+                tracing::warn!(
+                    cmd = format!("{:#06x}", req.hdr.command),
+                    tid = format!("{:#06x}", req.hdr.tid),
+                    uid = format!("{:#06x}", req.hdr.uid),
+                    status = format!("{:08x}", status.raw()),
+                    "handler error"
                 );
+                counter!("smb_handler_errors_total").increment(1);
                 final_hdr = req.hdr.clone();
                 last_status = status;
                 bodies.clear();

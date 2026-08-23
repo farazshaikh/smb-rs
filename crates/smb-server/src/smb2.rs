@@ -10,6 +10,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use metrics::{counter, gauge};
+
 use smb_proto::types::Status;
 use smb_proto_smb2::commands as c;
 use smb_proto_smb2::info as info;
@@ -206,17 +208,14 @@ async fn process_single(
         Some(h) => h,
         None => return None,
     };
-    if std::env::var_os("RUSTSMB_DEBUG").is_some() {
-        eprintln!(
-            "smb2: cmd={} mid={} sid={:#x} tid={:#x} len={} body={:02x?}",
-            hdr.command,
-            hdr.message_id,
-            hdr.session_id,
-            hdr.tree_id,
-            buf.len(),
-            &buf[64..buf.len().min(104)]
-        );
-    }
+    tracing::debug!(
+        cmd = hdr.command,
+        mid = hdr.message_id,
+        sid = format!("{:#x}", hdr.session_id),
+        tid = format!("{:#x}", hdr.tree_id),
+        len = buf.len(),
+        "smb2 request"
+    );
     // Request half of the 3.1.1 pre-auth integrity hash ([MS-SMB2] §3.3.4.1.1):
     // every NEGOTIATE / SESSION_SETUP message updates it before processing.
     let is_preauth_msg = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP);
@@ -234,6 +233,18 @@ async fn process_single(
     let pre_session = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP | ss::cmd::ECHO);
     if !pre_session && (!conn.authenticated || sid != conn.session_id) {
         return Some(response(&hdr, Status::ACCESS_DENIED, Vec::new(), 0));
+    }
+
+    // Signing policy ([MS-SMB2] §3.3.5.2.3): reject unsigned traffic from
+    // real accounts when --require-signing is set.
+    if server.require_signing
+        && !pre_session
+        && !conn.guest
+        && conn.signing_key.is_some()
+        && !hdr.is_signed()
+    {
+        counter!("smb_reject_unsigned_total").increment(1);
+        return Some(response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id));
     }
 
     // TREE_CONNECT overrides the response TreeId with the fresh value.
@@ -309,6 +320,9 @@ async fn process_single(
                 let new_tid = next_tree_id();
                 conn.trees.insert(new_tid, name);
                 resp_tid = Some(new_tid);
+                counter!("smb_tcons_total").increment(1);
+                gauge!("smb_trees_active").increment(1.0);
+                tracing::debug!(share = %conn.trees[&new_tid], "tree connected");
                 (Status::SUCCESS, c::build_tree_connect_resp(share_type))
             }
             Err(status) => (status, Vec::new()),
@@ -324,8 +338,12 @@ async fn process_single(
             close_all_handles(conn);
             conn.trees.clear();
             conn.searches.clear();
+            if conn.authenticated {
+                gauge!("smb_sessions_active").decrement(1.0);
+            }
             conn.authenticated = false;
             conn.session_id = 0;
+            counter!("smb_logoffs_total").increment(1);
             (Status::SUCCESS, c::build_logoff_resp())
         }
         ss::cmd::CREATE => {
@@ -552,11 +570,10 @@ fn session_setup(
 ) -> Result<(Status, Vec<u8>), Status> {
     let req = ss::Request::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let inner = smb_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
-    eprintln!(
-        "smb2 setup: blob_len={} first={:02x?} inner_type={:?}",
-        req.blob.len(),
-        &req.blob[..req.blob.len().min(12)],
-        smb_auth::ntlm::msg_type(inner)
+    tracing::trace!(
+        blob_len = req.blob.len(),
+        msg_type = ?smb_auth::ntlm::msg_type(inner),
+        "session setup token"
     );
     match smb_auth::ntlm::msg_type(inner) {
         Some(smb_auth::ntlm::MSG_TYPE1) | None => {
@@ -572,7 +589,7 @@ fn session_setup(
         }
         Some(smb_auth::ntlm::MSG_TYPE3) => {
             if smb_auth::ntlm::parse_type3(inner).is_none() {
-                eprintln!("smb2 setup: parse_type3 FAILED");
+                tracing::warn!("session setup: malformed NTLMSSP type3");
                 return Err(Status::INVALID_PARAMETER);
             }
             let t3 = smb_auth::ntlm::parse_type3(inner).unwrap();
@@ -583,12 +600,13 @@ fn session_setup(
                 &t3,
             );
             if !out.ok {
+                counter!("smb_auth_total", "outcome" => "fail").increment(1);
                 return Err(Status::LOGON_FAILURE);
             }
-            eprintln!(
-                "smb2 setup leg2: ok={} guest={} user={:?}",
-                out.ok, out.guest, out.user
-            );
+            counter!("smb_auth_total", "outcome" => "ok").increment(1);
+            gauge!("smb_sessions_active").increment(1.0);
+            tracing::info!(user = %out.user, guest = out.guest,
+                signed = out.session_key.is_some(), "session established");
             conn.user = out.user.clone();
             conn.guest = out.guest;
             conn.session_key = out.session_key;
@@ -673,10 +691,8 @@ async fn create(
     conn.searches.remove(&fid_bytes);
     conn.handles.insert(fid_bytes, open);
 
-    eprintln!(
-        "SMB2 CREATE: name={:?} eof={} is_dir={} action={}",
-        rel, meta.eof, meta.is_dir, action
-    );
+    tracing::debug!(name = %rel, eof = meta.eof, dir = meta.is_dir, action, "create");
+    counter!("smb_creates_total").increment(1);
     Ok(c::build_create_resp(
         fid,
         action,
@@ -704,7 +720,8 @@ async fn read(
         return Err(Status::ACCESS_DENIED);
     }
     let data = vfs.read(h, req.offset, len).await.map_err(vfs_err)?;
-    eprintln!("SMB2 READ: offset={} want={} got={}", req.offset, len, data.len());
+    counter!("smb_bytes_read_total").increment(data.len() as u64);
+    tracing::trace!(offset = req.offset, got = data.len(), "read");
     Ok(c::build_read_resp(&data))
 }
 
@@ -723,7 +740,8 @@ async fn write(
     let written = vfs.write(h, req.offset, &req.payload, false)
         .await
         .map_err(vfs_err)?;
-    eprintln!("SMB2 WRITE: offset={} wrote={}", req.offset, written);
+    counter!("smb_bytes_written_total").increment(written);
+    tracing::trace!(offset = req.offset, wrote = written, "write");
     Ok(c::build_write_resp(written as u32))
 }
 
@@ -739,7 +757,7 @@ async fn close(
     conn.searches.remove(&req.file_id.0);
     let meta = vfs.stat(&h.path).await.ok().unwrap_or_default();
     vfs.close(h).await.map_err(vfs_err)?;
-    eprintln!("SMB2 CLOSE: fid={:02x?}", req.file_id.0);
+    counter!("smb_closes_total").increment(1);
     Ok(c::build_close_resp(
         [meta.times[0].0, meta.times[1].0, meta.times[2].0, meta.times[3].0],
         meta.alloc,

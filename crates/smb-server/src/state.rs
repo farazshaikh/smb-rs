@@ -44,6 +44,9 @@ pub struct ServerShared {
     pub users: HashMap<String, String>,
     /// When no users are configured every principal maps to guest.
     pub allow_guest: bool,
+    /// Reject traffic from authenticated sessions that does not carry a
+    /// valid signature ([MS-SMB2] §3.3.5.2.3 signing policy).
+    pub require_signing: bool,
 }
 
 /// An authenticated SMB session (one UID).

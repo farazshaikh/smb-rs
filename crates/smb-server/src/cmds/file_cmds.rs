@@ -90,7 +90,8 @@ pub async fn nt_create(
         meta.eof,
         meta.is_dir,
     );
-    eprintln!("NT_CREATE: fid={:#06x} eof={} alloc={} is_dir={}", fid, meta.eof, meta.alloc, meta.is_dir);
+    tracing::debug!(fid = format!("{:#06x}", fid), eof = meta.eof, dir = meta.is_dir, "nt_create");
+    metrics::counter!("smb_creates_total").increment(1);
     bodies.push(RespBody::new(consts::COM_NT_CREATE_ANDX, body, Vec::new()));
     Ok(Status::SUCCESS)
 }
@@ -102,7 +103,7 @@ pub async fn read_andx(
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
     let rr = ReadReq::parse(req.words).map_err(|_| Status::INVALID_PARAMETER)?;
-    eprintln!("READ_ANDX: fid={:#06x} offset={} max_count={}", rr.fid, rr.offset, rr.max_count);
+    tracing::trace!(fid = format!("{:#06x}", rr.fid), offset = rr.offset, want = rr.max_count, "read_andx");
     let vfs = share_vfs(io, req.hdr.tid);
 
     let Some(h) = io.conn.handles.get_mut(&rr.fid).map(|b| &mut **b) else {
@@ -112,6 +113,7 @@ pub async fn read_andx(
         return Err(Status::ACCESS_DENIED);
     }
     let data = vfs.read(h, rr.offset, rr.max_count).await.map_err(vfs_err)?;
+    metrics::counter!("smb_bytes_read_total").increment(data.len() as u64);
 
     let (params, bytes) = rw::read_response(&data);
     bodies.push(RespBody::new(consts::COM_READ_ANDX, params, bytes));
