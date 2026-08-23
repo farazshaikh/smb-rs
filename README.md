@@ -1,6 +1,14 @@
-# smb-rs (rustsmb)
+<p align="center">
+  <img src="assets/logo.jpg" alt="smb-rs logo" width="600"/>
+</p>
 
-**A Server Message Block (SMB1) file server written in pure Rust — zero external dependencies.**
+<h1 align="center">smb-rs</h1>
+
+<p align="center">
+  <strong>An SMB1 file server written in pure Rust — zero external dependencies.</strong>
+</p>
+
+---
 
 `smb-rs` is a from-scratch implementation of the SMB Version 1.0 wire protocol,
 built directly against the public [MS-SMB] and [MS-CIFS] specifications
