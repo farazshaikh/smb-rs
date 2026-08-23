@@ -103,3 +103,25 @@ M1.1 encryption transform: aes-gcm crate, KDF labels SMBC2SCipherKey/
 SMBServerCipherKey? (verify exact MS-SMB2 3.1.4.1 strings), 52-byte TF
 header wrap/unwrap around transport send/recv keyed on session
 encrypt_data flag; then M1.2 srvsvc share enumeration over IPC$.
+
+## ADDENDUM 2 — encryption session progress (commit 440acdf)
+DONE:
+- csp: aes128gcm_seal/open, aes128ccm_seal/open (+NIST GCM vector,
+  roundtrip/tamper tests), ntlm_mech_list_mic (NTLMSSP MAC w/ RC4
+  checksum under KEY_EXCH)
+- proto-smb2: transform header consts/build/parse (52B, magic FDSMB)
+- server: cipher persisted at negotiate; C2S/S2C keys derived per dialect
+  labels; ENCRYPT_DATA stamped on final setup resp (plaintext); TF frames
+  decrypted pre-dispatch / responses sealed post-assembly; credits
+  grant=max(charge,1); LARGE_MTU + 1MiB max sizes; CANCEL acked
+
+OPEN — single blocker for sealed sessions:
+samba client rejects our mechListMIC ("invalid signature"). Inputs logged
+at debug (sk/mech blob/key_exch/mic). Next steps:
+1. Run smbd as reference with --debug-stdout=10 while smbclient
+   --client-protection=encrypt connects to IT; capture its 'ntlmssp v2 sig'
+   dump + mech_types bytes.
+2. Diff SignKey derivation (MD5(SK||SRV_SIGN+NUL)?) and message span
+   (mech_types incl. embedded type1 token? seq=0 or 1?).
+3. Mirror exact recipe in csp::ntlm_mech_list_mic.
+Everything else (negotiate contexts, keys, AEAD primitives) verified.
