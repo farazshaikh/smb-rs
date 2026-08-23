@@ -9,14 +9,16 @@
 
 ## Phase 0: Foundation
 
-- ✅ Cargo workspace (7 crates, modular, independently testable)
+- ✅ Cargo workspace (10 crates, modular, independently testable)
 - ✅ `deny(missing_docs)`, `forbid(unsafe_code)` on all crates
 - ✅ Explicit-endian reads (`from_le_bytes` / `to_le_bytes`)
 - ✅ Zero-copy decode trait (`Wire` with `'de` lifetime borrows)
 - ✅ Async transport abstraction (`Transport` trait, tokio)
 - ✅ VFS abstraction trait (`Vfs` with async methods)
 - ✅ POSIX backend (`PosixVfs`: path containment, wildcards, case-insensitive)
-- ✅ Crypto primitives (MD4, MD5, HMAC-MD5, DES — RFC vectors pass)
+- ✅ Crypto service provider (`smb-csp`): RustCrypto crates by default,
+  bundled hand-rolled implementations behind `handrolled` feature;
+  both pass the same FIPS/RFC/interop vector suite
 
 ## Phase 1: SMB1 ([MS-SMB] + [MS-CIFS])
 
@@ -320,3 +322,30 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 
 > The **Feature Matrix** above is the live tracker for remaining work; the
 > phase lists are historical records of what landed when.
+
+
+---
+
+## Milestones (execution order for remaining work)
+
+Ordered cut-lines over the Feature Matrix above.
+
+### M1 — Windows-usable
+1. Encryption transform (AES-GCM/CCM, TF header §2.2.41, C2S/S2C key labels)
+   — cipher already negotiated.
+2. srvsvc NetShareEnum over a minimal named-pipe path on IPC$ so
+   `smbclient -L` / network browsing works.
+3. Credit accounting + multi-credit large R/W; advertise Large-MTU.
+
+### M2 — Real-server semantics
+4. Async/PENDING scaffolding → CHANGE_NOTIFY via inotify → CANCEL.
+5. Oplocks v1/v2 + leases v2/v3 with break notifications.
+6. Byte-range lock enforcement + sharing-violation detection.
+7. FSCTL batch: SRV_REQUEST_RESUME_KEY, COPYCHUNK, ZERO_DATA/SET_SPARSE.
+
+### M3 — Completeness & hardening
+8. Security-descriptor stubs, quota stubs, ADS in VFS, 8.3 short names.
+9. Compression capability (LZNT1/PATTERN_V1).
+10. Multichannel + session binding; durable handles.
+11. cargo-fuzz parser targets, cross-client stress harness, Windows soak,
+    criterion benches wired into CI.
