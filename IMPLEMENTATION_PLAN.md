@@ -184,7 +184,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Credit accounting (grant/charge, multi-credit) | [MS-SMB2] §3.3.1.1 | planned | charge calc unit tests | large-file copy ≥64 KiB chunks | large-R/W MB/s | credits granted per resp | credits_granted |
 | Large MTU (>64 KiB single R/W) | §2.2.3.1.1 CAP_LARGE_MTU | planned | — | dd through mount | bulk MB/s | — | max_rw_seen |
 | Async processing (STATUS_PENDING, async id) | §2.2.1.1, §3.3.4.2 | planned | state-machine tests | notify long-poll | — | pending count | async_pending |
-| CANCEL | §2.2.30 | planned | — | ctrl-c mid-read | — | cancel received | cancels_total |
+| CANCEL | §2.2.30 | complete | — | ctrl-c mid-read | — | cancel received | cancels_total |
 | NetBIOS 139 + datagram browsing | RFC 1001/1002 | planned | — | Windows Network browse | — | — | — |
 
 ### Negotiation ([MS-SMB2] §2.2.3)
@@ -221,7 +221,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | AES-CMAC signatures (3.x) + SIGNING_CAPABILITIES ctx | §2.2.3.1.2, §3.2.5.3.1 | complete | rfc4493 vectors | SMB3 signed session | 1.6 GB/s (AES-NI) | — | — |
 | Signing-key KDF (CTR-HMAC-SHA256, dialect labels) | §3.1.4.1 | complete | python cross-check vector | keys accepted by samba | — | derived-once assert | — |
 | Preauth-hash-bound 3.1.1 signing key | §3.3.5.2.1 | complete | — | SMB3 auth works | — | — | — |
-| Encryption transform AES-GCM/CCM (TF header §2.2.41) | §3.3.5.16 | in_progress | AEAD roundtrip tests (todo) | smbclient --encrypt (todo) | target >500 MB/s | enc on/off per msg | enc_bytes_total |
+| Encryption transform AES-GCM/CCM (TF header §2.2.41) | §3.3.5.16 | in_progress | csp AEAD roundtrip+tamper+NIST ✅ | negotiate+keys verified live; mechListMIC value rejected by smbclient — next: diff MAC inputs vs smbd reference (--debug-stdout dumps 'ntlmssp v2 sig') | target >500 MB/s | enc on/off per msg | enc_bytes_total |
 | Cipher key derivation (C2S/S2C labels + preauth ctx) | §3.1.4.1 | planned (w/ transform) | kdf vectors | encrypted session | — | — | — |
 | Require-signing server policy (--require-signing) / require-encryption | §3.3.5.2.3 | in_progress | gate unit test (todo) | unsigned client rejected (todo) | — | rejects logged + counted | rejects_total ✅ |
 

@@ -195,6 +195,8 @@ pub(crate) async fn process_frame(
         let Some((single, may_wrap)) = process_single(server, conn, rest).await else {
             return None;
         };
+        #[cfg(not(feature = "lib"))]
+        let may_wrap = false; // sealing unsupported on this backend
         parts.push((single, may_wrap));
 
         let next = u32::from_le_bytes(rest[20..24].try_into().unwrap()) as usize;
@@ -236,6 +238,12 @@ pub(crate) async fn process_frame(
 
 /// Wrap an assembled response into a transform frame ([MS-SMB2] §2.2.41)
 /// using the S2C cipher key.
+#[cfg(not(feature = "lib"))]
+fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
+    let _ = (conn, msg);
+    None
+}
+#[cfg(not(feature = "handrolled"))]
 fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
     let (c2s, s2c) = conn.enc_keys?;
     let _ = c2s;
@@ -274,6 +282,11 @@ fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Open an incoming transform frame using the C2S cipher key.
+#[cfg(not(feature = "lib"))]
+fn decrypt_transform(_conn: &mut Smb2Conn, _frame: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+#[cfg(not(feature = "handrolled"))]
 fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
     let tf = smb_proto_smb2::commands::TransformHdr::parse(frame)?;
     if tf.session_id != conn.session_id {
@@ -641,9 +654,15 @@ async fn process_single(
     // C2S/S2C keys and set SMB2_SESSION_FLAG_ENCRYPT_DATA on the final
     // SESSION_SETUP response (that response itself stays plaintext).
     let mut seal_session = false;
+    // Sealing requires the AEAD primitives from the default CSP backend.
+    #[cfg(feature = "lib")]
+    let sealing_available = true;
+    #[cfg(not(feature = "lib"))]
+    let sealing_available = false;
     if hdr.command == ss::cmd::SESSION_SETUP
         && status == Status::SUCCESS
         && server.encrypt
+        && sealing_available
         && conn.authenticated
         && !conn.guest
         && conn.cipher.is_some()
@@ -860,13 +879,17 @@ fn session_setup(
                     Vec::new()
                 })();
                 let key_exch = t3.encrypted_session_key.len() == 16;
+                #[cfg(feature = "lib")]
+                // Leg-2 response signature consumed sequence number 0.
                 let mic = smb_auth::crypto::ntlm_mech_list_mic(
                     &key,
                     true,
                     key_exch,
-                    0,
+                    1,
                     &mech_types,
                 );
+                #[cfg(not(feature = "lib"))]
+                let mic = [0u8; 16];
                 tracing::debug!(
                     sk = %hex_str(&key),
                     mech = %hex_str(&mech_types),

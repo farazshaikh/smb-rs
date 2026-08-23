@@ -34,6 +34,12 @@ mod lib_backend;
 #[cfg(feature = "lib")]
 pub use lib_backend::*;
 
+#[cfg(feature = "lib")]
+pub(crate) mod csp_call {
+    pub fn md4(data: &[u8]) -> [u8; 16] { crate::lib_backend::md4(data) }
+    pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] { crate::lib_backend::hmac_sha256(key, data) }
+}
+
 #[cfg(feature = "handrolled")]
 mod bundled {
     pub mod aes128;
@@ -63,13 +69,20 @@ mod backend {
 #[cfg(feature = "handrolled")]
 pub use backend::*;
 
+#[cfg(feature = "handrolled")]
+pub(crate) mod csp_call {
+    pub fn md4(data: &[u8]) -> [u8; 16] { super::backend::md4(data) }
+    pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] { super::backend::hmac_sha256(key, data) }
+}
+
+
 /// NT hash = MD4 of the UTF-16LE encoded password ([MS-NLMP] §3.3.1.1).
 pub fn nt_hash(password: &str) -> [u8; 16] {
     let mut bytes = Vec::with_capacity(password.len() * 2);
     for u in password.encode_utf16() {
         bytes.extend_from_slice(&u.to_le_bytes());
     }
-    crate::lib_backend::md4(&bytes)
+    crate::csp_call::md4(&bytes)
 }
 
 /// SP800-108 counter-mode KDF with HMAC-SHA256 PRF ([MS-SMB2] §3.1.4.1):
@@ -93,7 +106,7 @@ pub fn kdf_counter_mode_hmac_sha256(
         input.push(0);
         input.extend_from_slice(context);
         input.extend_from_slice(&bitlen.to_be_bytes());
-        let tag = crate::lib_backend::hmac_sha256(key, &input);
+        let tag = crate::csp_call::hmac_sha256(key, &input);
         out.extend_from_slice(&tag);
         counter += 1;
     }
