@@ -74,3 +74,32 @@ encryption) is the remaining work.
 - Compound replies: patch NextCommand of every non-final frame, 8-align.
 - Guest/anonymous sessions have no signing key; authenticated ones MUST get
   signed responses whenever the request carried SMB2_FLAGS_SIGNED.
+
+## ADDENDUM — post-SMB3 work (same session)
+1. smb-csp crate: crypto service provider; default backend = RustCrypto
+   crates (md4/md5/sha2/hmac/des/aes/cmac/rc4), handrolled kept behind
+   `--features handrolled` (feature forwarding server->auth->csp).
+   Benchmarks: bundled AES-CMAC 45 MB/s vs 1650 MB/s w/ AES-NI -> crates
+   are production default.
+2. NTLMv1 DES key schedule bug found during swap: bundled code fed [k7||0]
+   through PC1 instead of parity-inserted expansion; both backends now
+   locked to impacket get_ntlmv1_response / OpenSSL ground truth
+   (23f68ad3636db29e for h21=[7]*21 ch=[3]*8).
+3. Observability: tracing subscriber (--log EnvFilter, RUST_LOG wins),
+   prometheus recorder at --metrics-bind ADDR serving /metrics via minimal
+   HTTP responder; counters: nbss_frames, responses, bytes_read/written,
+   creates/closes/tcons/logoffs, auth_total{outcome}, sessions_active,
+   trees_active gauges, frame_duration_us histogram.
+4. clap-derive CLI: -p/-s/-u preserved + --log --metrics-bind
+   --require-signing (enforces ACCESS_DENIED on unsigned traffic from
+   authenticated non-guest sessions).
+5. Docs: README rewritten for SMB1/2/3 + workspace layout + csp backends;
+   IMPLEMENTATION_PLAN.md gained a 76-row Feature Matrix (status/unittest/
+   systemtest/benchmarking/logging/metric per feature) plus M1/M2/M3
+   milestone ordering; Known Regressions = none open.
+
+## NEXT SESSION START POINT
+M1.1 encryption transform: aes-gcm crate, KDF labels SMBC2SCipherKey/
+SMBServerCipherKey? (verify exact MS-SMB2 3.1.4.1 strings), 52-byte TF
+header wrap/unwrap around transport send/recv keyed on session
+encrypt_data flag; then M1.2 srvsvc share enumeration over IPC$.
