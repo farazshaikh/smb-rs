@@ -1,0 +1,69 @@
+# SESSION SUMMARY 003 — continuation state
+
+## Objective
+Full SMB2 command surface landed and verified with real clients.
+SMB3 (dialects 3.0/3.1.1: negotiate contexts, AES-CMAC signing,
+encryption) is the remaining work.
+
+## Build / Test
+- cd ~/wrk/smb-rs && cargo build --release --workspace
+- Run: pkill -9 -x rustsmb; ./target/release/rustsmb -p 4450 -s public=$PWD/share [-u alice:secret123]
+- SMB1: smbclient //127.0.0.1/public -p 4450 -U guest% -N --option='client min protocol=NT1' --option='client max protocol=NT1' -c 'ls'
+- SMB2 guest: same but min/max protocol=SMB2
+- SMB2 auth: -U alice%secret123 (with -u alice:secret123 server flag)
+- impacket real-SMB2/SMB3 class: python3 /tmp/opencode/smb3test.py
+- Raw probes: /tmp/opencode/raw_tcon.py (negotiate/setup/tcon/create/read/close)
+- Spec text: /tmp/smb.txt (SMB1), /tmp/smb2.txt (MS-SMB2 pdftotext)
+
+## CURRENT STATE — WORKING
+- SMB1 NT1: full suite green (ls/get/put/del/mkdir/rmdir/rename).
+- SMB2 via smbclient (min/max=SMB2): ls/get/put/del/mkdir/rmdir green, both
+  guest and authenticated (-u user:pass) modes; authenticated sessions are
+  signed (HMAC-SHA256 over session key) and samba validates them.
+- impacket SMB3 class: negotiate(2.10)/auth/tcon/create/read/write/close/
+  queryDirectory/delete-on-close/tree-disconnect/logoff all pass.
+- cargo tests: 17 passed.
+
+## KEY BUGS FIXED THIS SESSION
+1. find encoder: final entry NextEntryOffset was never zeroed; DIRECTORY
+   (0x102) layout lacked the four FILETIMEs; DOS size table mismatched.
+2. Header2: SessionId is at 40..48 (36..44 was TreeId+half). TreeId @36.
+3. SESSION_SETUP body: Flags/SecurityMode are SINGLE bytes; fixed part is 24;
+   blob located by SecurityBufferOffset (both samba + impacket send it).
+4. TREE_CONNECT response must stamp the NEW TreeId into the response header.
+5. CREATE response FileId lives at offset 64 (after Reserved2), NOT at 8.
+6. READ response DataOffset is header-ABSOLUTE (80), not body-relative (16).
+7. Negotiate responses need SecurityBufferOffset = 128 when blob empty
+   (samba checks secoff == 64 + masked body size).
+8. Samba's initial negotiate uses the 3.1.1-style body: dialect array at
+   offset 36/44 (after NegCtxOffset fields), not 28.
+9. QUERY_DIRECTORY: clients repeat the pattern on continuation calls —
+   only RESTART/REOPEN/SCAN flags (or missing state) may restart the enum,
+   otherwise infinite loop.
+10. Every non-SUCCESS status needs a generic ERROR body (StructureSize 9,
+    padded to 8) — bare headers break client compound parsers.
+11. FileAllInformation: embedded FSCC structs are 8-byte aligned inside the
+    composite (Basic occupies 40 bytes incl. pad).
+
+## NEXT STEPS (SMB3)
+1. Negotiate contexts: parse PREAUTH_INTEGRITY_CAPABILITIES +
+   ENCRYPTION_CAPABILITIES from client; include contexts in our response
+   when dialect >= 3.1.1; accept dialects 0x300/0x302/0x311 in pick().
+2. Preauth integrity hash: SHA-512 chaining over negotiate/session-setup
+   frames ([MS-SMB2] §3.3.4.1.1).
+3. Signing keys for 3.x: KDF counter mode HMAC-SHA256(label "SMBSigningKey\0"
+   [3.1.1] w/ preauth hash context, or "SMB2AESCMAC\0"/"SmbSign\0" [3.0]).
+4. AES-CMAC-AES128 signatures for 3.x (needs AES-128 core; CMAC on top).
+5. Encryption transform (AES-GCM/CCM, 52-byte transform header) last.
+
+## KEY GOTCHAS
+- cargo build at workspace root builds only meta pkg — always use
+  `cargo build --release --workspace`.
+- Buffer offsets in SMB2 bodies are ABSOLUTE from frame start (parsers here
+  take the full frame; BODY const = 64).
+- StructureSize odd values mean "+1 variable buffer"; samba masks to even
+  and compares against bytes actually present.
+- Response credits: grant 1 per request; echo CreditCharge from request.
+- Compound replies: patch NextCommand of every non-final frame, 8-align.
+- Guest/anonymous sessions have no signing key; authenticated ones MUST get
+  signed responses whenever the request carried SMB2_FLAGS_SIGNED.

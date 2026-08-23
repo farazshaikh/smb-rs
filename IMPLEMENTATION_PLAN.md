@@ -96,18 +96,18 @@
 - ✅ Per-frame dialect routing (\xFE magic routes to SMB2 loop)
 
 ### Negotiate
-- ⬜ NEGOTIATE request parsing
-- ⬜ NEGOTIATE response building
-- ⬜ Dialect selection (2.0.2 2.1.0)
-- ⬜ Capabilities advertisement
-- ⬜ Client GUID echo
-- ⬜ Security mode negotiation
+- ✅ NEGOTIATE request parsing
+- ✅ NEGOTIATE response building
+- ✅ Dialect selection (2.0.2 2.1.0)
+- ✅ Capabilities advertisement
+- ✅ Client GUID echo
+- ✅ Security mode negotiation
 
 ### Session Management
 - ✅ SESSION_SETUP both legs (SPNEGO/NTLMSSP reuse)
 - ✅ Session ID allocation (u64)
 - ✅ Session flags (guest bit)
-- ⬜ LOGOFF handler
+- ✅ LOGOFF handler
 
 ### Tree Connect
 - ✅ TREE_CONNECT basic share resolution
@@ -115,25 +115,42 @@
 - ⬜ Share capabilities in response
 
 ### File Operations
-- ⬜ CREATE
-- ⬜ READ
-- ⬜ WRITE
-- ⬜ CLOSE
-- ⬜ FLUSH
-- ⬜ LOCK
+- ✅ CREATE (dispositions, dirs, delete-on-close)
+- ✅ READ
+- ✅ WRITE
+- ✅ CLOSE (post-close attrs)
+- ✅ FLUSH
+- ✅ LOCK (accepted unenforced)
 
 ### Directory and Info
-- ⬜ FIND (directory enumeration)
-- ⬜ QUERY_INFO
-- ⬜ SET_INFO
+- ✅ FIND (QUERY_DIRECTORY, classes 1/2/3/12/37/38, continuation state)
+- ✅ QUERY_INFO (file + fs levels)
+- ✅ SET_INFO (basic/eof/alloc/disposition/rename)
+- ✅ IOCTL (VALIDATE_NEGOTIATE_INFO echo, LMR_REQ_RESILIENCY)
+- ✅ Compound request/response chaining (8-byte aligned NextCommand)
+
+### Signing ([MS-SMB2] §3.2.5.3, dialects < 3.0)
+- ✅ NTLMv2 session key derivation (SessionBaseKey + RC4 key exchange)
+- ✅ HMAC-SHA256 response signatures mirrored from signed requests
+- ✅ Crypto additions: SHA-256, HMAC-SHA256, RC4 (FIPS/RFC vectors green)
 
 ## Phase 3: SMB3 ([MS-SMB2] 3.0+)
 
-- ⬜ Negotiate contexts (pre-auth integrity, encryption)
-- ⬜ AES-CCM / AES-GCM encryption
-- ⬜ HMAC-SHA256 signing
-- ⬜ Pre-auth integrity hash (SHA-512)
+- ✅ Dialects 3.0 / 3.0.2 / 3.1.1 selection
+- ✅ Negotiate contexts: PREAUTH_INTEGRITY_CAPABILITIES (SHA-512 + salt),
+  ENCRYPTION_CAPABILITIES (single chosen cipher), SIGNING_CAPABILITIES
+  (AES-128-CMAC)
+- ✅ Signing keys: KDF counter-mode HMAC-SHA256 ("SMB2AESCMAC"/"SmbSign" for
+  3.0+, "SMBSigningKey"/preauth-hash for 3.1.1); raw session key for 2.x
+- ✅ AES-CMAC-AES128 signatures for 3.x (HMAC-SHA256 for 2.x)
+- ✅ Pre-auth integrity hash (SHA-512 over negotiate/session-setup frames)
+- 🔨 Encryption transform (AES-GCM/CCM): cipher negotiated but transform not
+  applied; clients that do not request encryption work normally
 - ⬜ Multichannel support
+
+### Crypto additions
+- SHA-512 (FIPS vectors), AES-128 forward block + CMAC (RFC 4493 vectors),
+  SP800-108 counter-mode KDF
 
 ## Known Regressions
 - 🔨 FIND_FIRST2 level 0x104 entry name parse (smbclient ls shows empty names)

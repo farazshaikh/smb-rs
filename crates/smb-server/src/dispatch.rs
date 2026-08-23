@@ -118,6 +118,26 @@ pub fn rand_challenge_pub() -> [u8; 8] {
     rand_challenge()
 }
 
+/// Cryptographically random bytes (urandom with time fallback).
+pub fn rand_bytes(n: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            return buf;
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_le_bytes();
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = nanos[i % 16];
+    }
+    buf
+}
+
 /// Cryptographically random per-connection NTLM challenge.
 fn rand_challenge() -> [u8; 8] {
     use std::io::Read;

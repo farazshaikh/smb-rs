@@ -35,6 +35,10 @@ pub struct Smb2Conn {
     /// Exported NTLM session key; enables SMB2 signing for this session
     /// ([MS-SMB2] §3.2.5.3).
     pub session_key: Option<[u8; 16]>,
+    /// Derived signing key (dialect-specific); `None` disables signing.
+    pub signing_key: Option<[u8; 16]>,
+    /// Pre-authentication integrity hash (3.1.1 only).
+    pub preauth_hash: [u8; 64],
     /// TID -> share name map.
     pub trees: HashMap<u32, String>,
     /// Open handles keyed by 16-byte SMB2 FileId.
@@ -54,6 +58,8 @@ impl Smb2Conn {
             user: String::new(),
             guest: false,
             session_key: None,
+            signing_key: None,
+            preauth_hash: [0u8; 64],
             trees: HashMap::new(),
             handles: HashMap::new(),
             searches: HashMap::new(),
@@ -211,6 +217,15 @@ async fn process_single(
             &buf[64..buf.len().min(104)]
         );
     }
+    // Request half of the 3.1.1 pre-auth integrity hash ([MS-SMB2] §3.3.4.1.1):
+    // every NEGOTIATE / SESSION_SETUP message updates it before processing.
+    let is_preauth_msg = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP);
+    if is_preauth_msg {
+        let mut joined = Vec::with_capacity(64 + buf.len());
+        joined.extend_from_slice(&conn.preauth_hash);
+        joined.extend_from_slice(buf);
+        conn.preauth_hash = smb_auth::crypto::sha512(&joined);
+    }
     let body_start = 64usize;
     let tid = hdr.tree_id;
     let sid = hdr.session_id;
@@ -247,12 +262,41 @@ async fn process_single(
                 return Some(response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0));
             };
             conn.dialect = Some(dialect);
+            let mut salt = [0u8; 32];
+            salt.copy_from_slice(&crate::dispatch::rand_bytes(32));
+            // Pick one cipher the client offered (GCM preferred).
+            let client_ciphers: Vec<u16> = req
+                .contexts
+                .iter()
+                .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::ENCRYPTION)
+                .and_then(|c| {
+                    if c.data.len() >= 2 {
+                        let n = u16::from_le_bytes([c.data[0], c.data[1]]) as usize;
+                        Some(
+                            c.data[2..]
+                                .chunks_exact(2)
+                                .take(n)
+                                .map(|w| u16::from_le_bytes([w[0], w[1]]))
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            let chosen = [smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
+                          smb_proto_smb2::negotiate::ctx_type::AES128_CCM]
+                .into_iter()
+                .find(|ours| client_ciphers.contains(ours))
+                .unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM);
             (
                 Status::SUCCESS,
-                smb_proto_smb2::negotiate::build_response(
+                smb_proto_smb2::negotiate::build_response_full(
                     dialect,
                     &server.guid,
                     smb_proto::types::FileTime::now().0,
+                    &salt,
+                    chosen,
                 ),
             )
         }
@@ -401,21 +445,75 @@ async fn process_single(
         _ => (Status::NOT_IMPLEMENTED, Vec::new()),
     };
 
+    // Derive the dialect-specific signing key once authentication completes;
+    // the 3.1.1 key binds to the finished pre-auth integrity hash.
+    if hdr.command == ss::cmd::SESSION_SETUP
+        && conn.authenticated
+        && conn.session_key.is_some()
+        && conn.signing_key.is_none()
+    {
+        let key = conn.session_key.unwrap();
+        conn.signing_key = match conn.dialect {
+            Some(smb_proto_smb2::negotiate::DIALECT_300 | smb_proto_smb2::negotiate::DIALECT_302) => {
+                let k = smb_auth::crypto::kdf_counter_mode_hmac_sha256(
+                    &key,
+                    b"SMB2AESCMAC\0",
+                    b"SmbSign\0",
+                    16,
+                );
+                Some(k.try_into().unwrap())
+            }
+            Some(smb_proto_smb2::negotiate::DIALECT_311) => {
+                let k = smb_auth::crypto::kdf_counter_mode_hmac_sha256(
+                    &key,
+                    b"SMBSigningKey\0",
+                    &conn.preauth_hash,
+                    16,
+                );
+                Some(k.try_into().unwrap())
+            }
+            _ => Some(key),
+        };
+    }
+
     let mut resp = response(&hdr, status, body, conn.session_id);
     if let Some(new_tid) = resp_tid {
         resp[36..40].copy_from_slice(&new_tid.to_le_bytes()); // TreeId
     }
+
+    if is_preauth_msg && conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
+        let mut joined = Vec::with_capacity(64 + resp.len());
+        joined.extend_from_slice(&conn.preauth_hash);
+        joined.extend_from_slice(&resp);
+        conn.preauth_hash = smb_auth::crypto::sha512(&joined);
+    }
+
     // Mirror the client's signing flag ([MS-SMB2] §3.3.4.2): authenticated
-    // sessions get HMAC-SHA256 signatures over the full PDU.
-    if hdr.is_signed() {
-        if let Some(key) = conn.session_key {
+    // sessions get signatures over the full PDU - HMAC-SHA256 for 2.x and
+    // AES-CMAC for 3.x. The final SESSION_SETUP leg is signed even though
+    // its request was not (clients verify it once their key is complete).
+    let final_setup_leg =
+        hdr.command == ss::cmd::SESSION_SETUP && status == Status::SUCCESS && conn.authenticated;
+    if hdr.is_signed() || final_setup_leg {
+        if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
             resp[16] |= 0x08; // SMB2_FLAGS_SIGNED in response flags
             let mut msg = Vec::with_capacity(resp.len());
             msg.extend_from_slice(&resp[..48]);
             msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
             msg.extend_from_slice(&resp[64..]);
-            let sig = smb_auth::crypto::hmac_sha256(&key, &msg);
-            resp[48..64].copy_from_slice(&sig[..16]);
+            let sig =
+                if matches!(conn.dialect, Some(smb_proto_smb2::negotiate::DIALECT_300 | smb_proto_smb2::negotiate::DIALECT_302 | smb_proto_smb2::negotiate::DIALECT_311)) {
+                    let t = smb_auth::crypto::aes128_cmac(&key, &msg);
+                    let mut s = [0u8; 16];
+                    s.copy_from_slice(&t);
+                    s
+                } else {
+                    let t = smb_auth::crypto::hmac_sha256(&key, &msg);
+                    let mut s = [0u8; 16];
+                    s.copy_from_slice(&t[..16]);
+                    s
+                };
+            resp[48..64].copy_from_slice(&sig);
         }
     }
     Some(resp)
@@ -494,6 +592,7 @@ fn session_setup(
             conn.user = out.user.clone();
             conn.guest = out.guest;
             conn.session_key = out.session_key;
+            // Dialect-aware signing key ([MS-SMB2] §3.2.5.3.1 / §3.3.5.2.1).
             conn.authenticated = true;
             let flags: u16 = if out.guest { 0x0001 } else { 0x0000 };
             // Close the SPNEGO exchange: clients require a NegTokenResp
