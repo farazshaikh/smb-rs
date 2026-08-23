@@ -55,8 +55,8 @@ impl SessionSetupLegacyReq {
         let nt_resp = data[cip..cip + csp].to_vec();
 
         let mut rd = Reader::new(data, cip + csp);
-        let account = rd.zstring(unicode, data_base + rd.pos());
-        let domain = rd.zstring(unicode, data_base + rd.pos());
+        let account = rd.zstring(unicode, data_base);
+        let domain = rd.zstring(unicode, data_base);
         Ok(Self { lm_resp, nt_resp, account, domain })
     }
 }

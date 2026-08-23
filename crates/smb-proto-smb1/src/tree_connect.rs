@@ -30,10 +30,12 @@ impl TreeConnectReq {
         if pw_len > data.len() {
             return Err(BodyError::BadBlob);
         }
+        // Cursor over the whole data area; password occupies the front.
+        // `base` = absolute frame offset of data[0]; zstring() adds its own
+        // cursor position for parity, so do NOT pre-add it here.
         let mut rd = Reader::new(data, pw_len);
-        let base = data_base + pw_len;
-        let path = rd.zstring(unicode, base);
-        let service = rd.zstring(false, base + rd.pos());
+        let path = rd.zstring(unicode, data_base);
+        let service = rd.zstring(false, data_base);
         Ok(Self { path, service })
     }
 }
