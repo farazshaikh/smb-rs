@@ -51,6 +51,8 @@ pub struct Type3 {
     pub lm_response: Vec<u8>,
     /// NTLM/NTLMv2 response bytes (proof + blob for v2).
     pub ntlm_response: Vec<u8>,
+    /// Encrypted random session key (present with NEGOTIATE_KEY_EXCH).
+    pub encrypted_session_key: Vec<u8>,
     /// Flags echoed by the client in the type 3 message.
     pub flags: u32,
 }
@@ -170,6 +172,16 @@ pub fn build_type2(challenge: &[u8; 8], domain: &str, hostname: &str) -> Vec<u8>
     m
 }
 
+/// Session key field ([MS-NLMP] §2.2.1.3): len @52, max @54, offset @56.
+pub fn parse_type3_session_key(blob: &[u8]) -> Vec<u8> {
+    let len = rd_u16(blob, 52) as usize;
+    let off = rd_u32(blob, 56) as usize;
+    if len == 0 || off + len > blob.len() {
+        return Vec::new();
+    }
+    blob[off..off + len].to_vec()
+}
+
 /// Parse an NTLMSSP AUTHENTICATE (type 3) message per [MS-NLMP] §2.2.1.3.
 pub fn parse_type3(blob: &[u8]) -> Option<Type3> {
     if blob.len() < 32 || msg_type(blob) != Some(MSG_TYPE3) {
@@ -196,6 +208,7 @@ pub fn parse_type3(blob: &[u8]) -> Option<Type3> {
         domain: utf16(&field(28, 32)),
         user: utf16(&field(36, 40)),
         workstation: utf16(&field(44, 48)),
+        encrypted_session_key: parse_type3_session_key(blob),
         flags: rd_u32(blob, 60),
     })
 }

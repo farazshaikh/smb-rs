@@ -195,6 +195,7 @@ impl Vfs for PosixVfs {
             let md = std::fs::metadata(&path).map_err(map_io)?;
             let open = Box::new(OpenFile {
                 path: path.to_string_lossy().into_owned(),
+                rel: rel.to_string(),
                 is_dir: true,
                 can_read: true,
                 can_write: false,
@@ -216,6 +217,7 @@ impl Vfs for PosixVfs {
         let inner = PosixInner { file: Some(file), pos: 0 };
         let open = Box::new(OpenFile {
             path: path.to_string_lossy().into_owned(),
+            rel: rel.to_string(),
             is_dir: false,
             can_read: read_access,
             can_write: write_access,

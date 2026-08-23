@@ -76,7 +76,6 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, mut transport
     let mut conn = ConnState::new(challenge);
 
     let mut smb2_conn: Option<crate::smb2::Smb2Conn> = None;
-    let mut mid: u64 = 1;
 
     loop {
         let Some(frame) = (match transport.recv().await {
@@ -96,7 +95,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, mut transport
             }
             let c2 = smb2_conn.as_mut().unwrap();
             if let Some(resp) =
-                crate::smb2::process_frame(&server, c2, &mut mid, &frame.0)
+                crate::smb2::process_frame(&server, c2, &frame.0).await
             {
                 if transport.send(&resp).await.is_err() {
                     return;
@@ -151,6 +150,8 @@ pub(crate) async fn process_frame(
     }
 
     // Multi-protocol upgrade: only when client offers \xFESMB dialects.
+    // Marks the connection so serve_client routes later frames through the
+    // persistent SMB2 processor.
     if hdr.command == consts::COM_NEGOTIATE
         && !conn.upgraded_smb2
         && buf.windows(4).any(|w| w == [0xFE, b'S', b'M', b'B'])
@@ -160,22 +161,6 @@ pub(crate) async fn process_frame(
             eprintln!("upgraded to SMB2 via multi-protocol negotiate");
             return Some(resp);
         }
-    }
-
-    // Route all subsequent frames through the SMB2 processor once upgraded.
-    if conn.upgraded_smb2 {
-        let mut mid: u64 = 2;
-        let mut c2 = crate::smb2::Smb2Conn::new(conn.challenge);
-        c2.session_id = conn.uid as u64;
-        c2.guest = true;
-        if let Some(resp) = crate::smb2::process_frame(server, &mut c2, &mut mid, buf) {
-            // Sync auth outcome back into the SMB1-side state.
-            if c2.user != String::new() && !c2.guest {
-                io_conn_set_session(conn, c2.user.clone(), c2.guest);
-            }
-            return Some(resp);
-        }
-        return None;
     }
 
     let wct = buf[wc_off] as usize;

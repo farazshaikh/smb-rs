@@ -16,6 +16,9 @@
 /// SMB2 header magic `\xFESMB`.
 pub const SMB2_MAGIC: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
+pub mod commands;
+pub mod consts;
+pub mod info;
 pub mod negotiate;
 pub mod session_setup;
 
@@ -64,6 +67,8 @@ pub struct Header2 {
     pub next_command: u32,
     /// Message identifier.
     pub message_id: u64,
+    /// Tree identifier (0 when not tree-bound).
+    pub tree_id: u32,
     /// Session identifier.
     pub session_id: u64,
     /// Signature / dedupe tag.
@@ -84,7 +89,10 @@ impl Header2 {
             flags: u32::from_le_bytes(buf[16..20].try_into().ok()?),
             next_command: u32::from_le_bytes(buf[20..24].try_into().ok()?),
             message_id: u64::from_le_bytes(buf[24..32].try_into().ok()?),
-            session_id: u64::from_le_bytes(buf[36..44].try_into().ok()?),
+            // ProcessId/Reserved occupies 32..36; TreeId 36..40; SessionId
+            // spans 40..48 ([MS-SMB2] §2.2.1).
+            tree_id: u32::from_le_bytes(buf[36..40].try_into().ok()?),
+            session_id: u64::from_le_bytes(buf[40..48].try_into().ok()?),
             signature: buf[48..64].try_into().ok()?,
         })
     }
@@ -93,7 +101,15 @@ impl Header2 {
     pub fn is_response(&self) -> bool {
         self.flags & 0x0000_0001 != 0
     }
-}
 
-pub mod commands;
-pub mod consts;
+    /// True when the signed flag (bit 2) is set.
+    pub fn is_signed(&self) -> bool {
+        self.flags & 0x0000_0008 != 0
+    }
+
+    /// True when the async (bit 0 of flags word 2 → 0x1000... ) flag is set:
+    /// `Flags & SMB2_FLAGS_ASYNC_COMMAND`.
+    pub fn is_async(&self) -> bool {
+        self.flags & 0x0000_0004 != 0
+    }
+}

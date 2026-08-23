@@ -102,6 +102,7 @@ name = "smb-proto-smb2"
 version = "0.2.0"
 dependencies = [
  "smb-proto",
+ "smb-vfs",
 ]
 
 [[package]]

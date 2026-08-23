@@ -7,13 +7,18 @@
 
 pub mod des;
 pub mod hmac;
+pub mod hmac_sha256;
 pub mod md4;
 pub mod md5;
+pub mod rc4;
+pub mod sha256;
 
 pub use des::{des_encrypt_key7, ntlmv1_response};
 pub use hmac::hmac_md5;
+pub use hmac_sha256::hmac_sha256;
 pub use md4::md4;
 pub use md5::md5;
+pub use rc4::rc4;
 
 /// NT hash = MD4 of the UTF-16LE encoded password ([MS-NLMP] §3.3.1.1).
 pub fn nt_hash(password: &str) -> [u8; 16] {

@@ -21,24 +21,40 @@ pub struct Request {
 
 impl Request {
     /// Parse from the request body (bytes after the 64-byte header).
+    ///
+    /// Two layouts exist ([MS-SMB2] §2.2.3.1): pre-3.1.1 clients place the
+    /// dialect array directly after the fixed part (offset 28); 3.1.1-aware
+    /// clients interpose NegotiateContextOffset/Count fields so dialects
+    /// begin at offset 36. We accept either by validating candidates
+    /// against the set of known dialect revisions.
     pub fn parse(b: &[u8]) -> Option<Request> {
-        // Fixed part: StructureSize(2) DialectCount(2) SecurityMode(2)
-        // Reserved(2) Capabilities(4) ClientGuid(16) = 28 bytes, followed
-        // by the dialect array (§2.2.3).
+        const KNOWN: &[u16] = &[0x0202, 0x0210, 0x0300, 0x0302, 0x0310, 0x0311];
         if b.len() < 28 || u16::from_le_bytes([b[0], b[1]]) != 36 {
             return None;
         }
         let dcount = u16::from_le_bytes([b[2], b[3]]) as usize;
-        if b.len() < 28 + dcount * 2 {
+        if dcount == 0 || dcount > 64 {
             return None;
         }
-        let dialects: Vec<u16> = b[28..]
-            .chunks_exact(2)
-            .take(dcount)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
         let mut guid = [0u8; 16];
         guid.copy_from_slice(b.get(12..28)?);
+
+        let read_dialects = |start: usize| -> Option<Vec<u16>> {
+            if b.len() < start + dcount * 2 {
+                return None;
+            }
+            let v: Vec<u16> = b[start..]
+                .chunks_exact(2)
+                .take(dcount)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            // Only accept when every entry is a real dialect revision.
+            (v.iter().all(|d| KNOWN.contains(d))).then_some(v)
+        };
+
+        let dialects = read_dialects(28)
+            .or_else(|| read_dialects(36))
+            .or_else(|| read_dialects(44))?;
         Some(Request { dialects, client_guid: guid })
     }
 }
@@ -56,10 +72,14 @@ pub fn pick(dialects: &[u16]) -> Option<u16> {
 
 /// Build the NEGOTIATE response body (§2.2.3.1) — no security blob
 /// (clients initiate NTLMSSP in SESSION_SETUP).
+///
+/// The trailing 4-byte NegotiateContextOffset is emitted as 0 even for
+/// pre-3.1.1 dialects (where the spec marks it Reserved); every real-world
+/// parser expects the field's presence.
 pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
-    let mut b = Vec::with_capacity(65);
+    let mut b = Vec::with_capacity(69);
     b.extend_from_slice(&65u16.to_le_bytes()); // StructureSize
-    b.extend_from_slice(&0u16.to_le_bytes()); // SecurityMode: signing off
+    b.extend_from_slice(&1u16.to_le_bytes()); // SecurityMode: signing enabled
     b.extend_from_slice(&dialect.to_le_bytes());
     b.extend_from_slice(&0u16.to_le_bytes()); // Reserved/NegotiateContextCount
     b.extend_from_slice(guid); // ServerGuid
@@ -69,7 +89,10 @@ pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
     b.extend_from_slice(&65536u32.to_le_bytes()); // MaxWriteSize
     b.extend_from_slice(&now.to_le_bytes()); // SystemTime
     b.extend_from_slice(&now.to_le_bytes()); // ServerStartTime
-    b.extend_from_slice(&64u16.to_le_bytes()); // SecurityBufferOffset
+    // Empty security buffer: the offset points just past the fixed part
+    // (header 64 + padded body 64 = 128); clients validate this arithmetic.
+    b.extend_from_slice(&128u16.to_le_bytes()); // SecurityBufferOffset
     b.extend_from_slice(&0u16.to_le_bytes()); // SecurityBufferLength
+    b.extend_from_slice(&0u32.to_le_bytes()); // NegotiateContextOffset
     b
 }

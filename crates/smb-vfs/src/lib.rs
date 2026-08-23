@@ -28,6 +28,10 @@ pub struct OpenFile {
     /// Backend-relative path this handle was opened on (kept in sync across
     /// rename-by-handle).
     pub path: String,
+    /// Share-relative client path the handle was opened on (backslashes
+    /// normalized to `\`), empty for the share root. Lets protocol layers
+    /// re-enumerate or re-stat without re-deriving paths from storage.
+    pub rel: String,
     /// True when the handle refers to a directory.
     pub is_dir: bool,
     /// Read data access was granted at open time.

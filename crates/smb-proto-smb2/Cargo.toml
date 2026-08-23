@@ -7,3 +7,4 @@ license.workspace = true
 
 [dependencies]
 smb-proto = { path = "../smb-proto" }
+smb-vfs = { path = "../smb-vfs" }
