@@ -33,8 +33,14 @@ impl PosixVfs {
         PosixVfs { root: root.into() }
     }
 
-    fn resolve(&self, rel: &str) -> std::path::PathBuf {
-        resolve_under(&self.root, rel)
+    fn resolve(&self, path: &str) -> std::path::PathBuf {
+        // If already absolute and under our root (stored by create/open),
+        // return as-is; otherwise treat as share-relative.
+        let abs = std::path::PathBuf::from(path);
+        if abs.is_absolute() && abs.starts_with(&self.root) {
+            return abs;
+        }
+        resolve_under(&self.root, path)
     }
 
     fn open_inner(path: &std::path::Path, read: bool, write: bool) -> VfsResult<std::fs::File> {

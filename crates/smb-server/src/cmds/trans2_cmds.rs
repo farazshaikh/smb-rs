@@ -28,6 +28,7 @@ pub async fn dispatch_trans2(
 
 
     eprintln!("TRANS2 dispatch called subcmd={:#06x}", t.subcmd);
+    eprintln!("T2REQ subcmd={:#06x} unicode={} params={:02x?}", t.subcmd, t.unicode, &t.params[..t.params.len().min(20)]);
     let (params, data) = match t.subcmd {
         t2::subcmd::FIND_FIRST2 => find_first2(io, req.hdr.tid, &t).await?,
         t2::subcmd::FIND_NEXT2 => find_next2(io, &t).await?,
