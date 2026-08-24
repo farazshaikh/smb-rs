@@ -39,8 +39,13 @@ pub const NEGOTIATE_VERSION: u32 = 0x0200_0000;
 pub const TARGET_TYPE_DOMAIN: u32 = 0x0001_0000;
 /// Message signing is supported.
 pub const NEGOTIATE_SIGN: u32 = 0x0000_0010;
+
 /// Sealing (encryption) is supported.
 pub const NEGOTIATE_SEAL: u32 = 0x0000_0020;
+
+/// Key exchange negotiated ([MS-NLMP] §2.2.2.5): the AUTHENTICATE
+/// message carries an RC4-encrypted RandomSessionKey.
+pub const NEGOTIATE_KEY_EXCH: u32 = 0x4000_0000;
 
 /// Parsed AUTHENTICATE (type 3) message.
 #[derive(Debug, Default)]

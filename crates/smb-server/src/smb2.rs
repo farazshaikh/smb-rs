@@ -288,40 +288,76 @@ fn decrypt_transform(_conn: &mut Smb2Conn, _frame: &[u8]) -> Option<Vec<u8>> {
 }
 #[cfg(not(feature = "handrolled"))]
 fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
-    let tf = smb_proto_smb2::commands::TransformHdr::parse(frame)?;
+    let tf = match smb_proto_smb2::commands::TransformHdr::parse(frame) {
+        Some(t) => t,
+        None => {
+            tracing::warn!("transform parse failed");
+            return None;
+        }
+    };
     if tf.session_id != conn.session_id {
         tracing::warn!(sid = format!("{:#x}", tf.session_id), "transform sid mismatch");
         return None;
     }
-    let (c2s, _s2c) = conn.enc_keys?;
-    let cipher = conn.cipher?;
+    let Some((c2s, _s2c)) = conn.enc_keys else {
+        tracing::warn!("no cipher keys derived");
+        return None;
+    };
+    let Some(cipher) = conn.cipher else {
+        tracing::warn!("no cipher negotiated");
+        return None;
+    };
     let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
     let iv_size = if gcm { 12 } else { 11 };
     let aad = &frame[smb_proto_smb2::commands::tf_off::NONCE
         ..smb_proto_smb2::commands::tf_off::HDR_SIZE];
     let payload = &frame[smb_proto_smb2::commands::tf_off::HDR_SIZE
         ..tf_off_end(tf.original_len)];
+    // The GCM/CCM tag travels in the TF Signature field ([MS-SMB2]
+    // §2.2.41), detached from the ciphertext; re-attach it for the AEAD
+    // open, which expects ct||tag.
+    let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
+    let mut sealed = payload.to_vec();
+    sealed.extend_from_slice(&frame[tag_at..tag_at + 16]);
     let pt = if gcm {
-        smb_auth::crypto::aes128gcm_open(
+        match smb_auth::crypto::aes128gcm_open(
             &c2s,
             frame[smb_proto_smb2::commands::tf_off::NONCE..]
                 .get(..12)?
                 .try_into()
                 .ok()?,
             aad,
-            payload,
-        )
+            &sealed,
+        ) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    nonce = %hex_str(&frame[smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::NONCE+12]),
+                    aad_len = aad.len(),
+                    payload_len = payload.len(),
+                    orig_len = tf.original_len,
+                    "gcm open failed"
+                );
+                return None;
+            }
+        }
     } else {
-        smb_auth::crypto::aes128ccm_open(
+        match smb_auth::crypto::aes128ccm_open(
             &c2s,
             frame[smb_proto_smb2::commands::tf_off::NONCE..]
                 .get(..11)?
                 .try_into()
                 .ok()?,
             aad,
-            payload,
-        )
-    }?;
+            &sealed,
+        ) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("ccm open failed");
+                return None;
+            }
+        }
+    };
     counter!("smb_decrypted_msgs_total").increment(1);
     counter!("smb_decrypted_bytes_total").increment(pt.len() as u64);
     Some(pt)
@@ -790,7 +826,9 @@ fn session_setup(
                 smb_auth::ntlm::build_type2(&conn.challenge, &server.domain, &server.server_name);
             // Grant SIGN|SEAL so clients may negotiate protected sessions
             // ([MS-NLMP] §3.2.5.1); sealing itself rides the SMB3 cipher.
-            let extra = smb_auth::ntlm::NEGOTIATE_SIGN | smb_auth::ntlm::NEGOTIATE_SEAL;
+            let extra = smb_auth::ntlm::NEGOTIATE_SIGN
+                | smb_auth::ntlm::NEGOTIATE_SEAL
+                | smb_auth::ntlm::NEGOTIATE_KEY_EXCH;
             let fl_off = 60 - 8; // flags live at type2 offset 52 within msg
             // build_type2 writes flags right after the fixed header; patch
             // via known offset instead of plumbing a parameter:
@@ -836,6 +874,11 @@ fn session_setup(
                 signed = out.session_key.is_some(), "session established");
             conn.user = out.user.clone();
             conn.guest = out.guest;
+            // out.session_key is already the EXPORTED session key
+            // ([MS-NLMP] §3.2.5.1.2): derive_session_key in auth.rs RC4-
+            // decrypts EncryptedRandomSessionKey under the key-exchange
+            // key when KEY_EXCH was negotiated. mechListMIC, SMB2 signing
+            // and SMB3 cipher keys all derive from this value.
             conn.session_key = out.session_key;
             // Dialect-aware signing key ([MS-SMB2] §3.2.5.3.1 / §3.3.5.2.1).
             conn.authenticated = true;
@@ -856,42 +899,82 @@ fn session_setup(
                     return Err(Status::INVALID_PARAMETER);
                 };
                 let init = conn.ntlm_blobs.as_ref().map(|b| b.0.clone()).unwrap_or_default();
-                // Locate MechTypes: the first A0 context tag wraps a
-                // 30-tagged SEQUENCE of mechanism OIDs; samba signs exactly
-                // that inner SEQUENCE (tag included). The A0 length byte is
-                // not followed directly by 0x30, so scan for A0 then decode.
+                // Locate MechTypes: smbclient's token nests as
+                //   60{ OID, A0{ 30{ A0{ 30<OIDs> }, A2{ntlm} } } }
+                // and samba signs exactly the bare `30<OIDs>` SEQUENCE
+                // (spnego_write_mech_types: ASN1_SEQUENCE(0) of OIDs).
+                // Walk: outer A0 (negTokenInit) -> its 30 SEQUENCE ->
+                // first inner A0 (mechTypes wrapper) -> that 30 SEQUENCE.
+                fn der_len(b: &[u8], i: usize) -> Option<(usize, usize)> {
+                    let n = *b.get(i + 1)?;
+                    Some(match n {
+                        v @ 0..=0x7F => (v as usize, 2),
+                        0x81 => (*b.get(i + 2)? as usize, 3),
+                        _ => return None,
+                    })
+                }
                 let mech_types: Vec<u8> = (|| {
-                    for i in 0..init.len().saturating_sub(3) {
-                        if init[i] != 0xA0 {
+                    for a in 0..init.len().saturating_sub(4) {
+                        if init[a] != 0xA0 {
                             continue;
                         }
-                        let (len, hdr) = match init[i + 1] {
-                            n if n < 0x80 => (n as usize, 2),
-                            0x81 => (init[i + 2] as usize, 3),
-                            _ => continue,
+                        // outer negTokenInit: content must start with 0x30
+                        let (alen, ahdr) = match der_len(&init, a) {
+                            Some(v) => v,
+                            None => continue,
                         };
-                        let t = i + hdr;
-                        if t < init.len() && init[t] == 0x30 {
-                            let end = (t + 2 + len).min(init.len());
-                            return init[t..end.max(t)].to_vec();
+                        let s30 = a + ahdr;
+                        if init.get(s30) != Some(&0x30) {
+                            continue;
+                        }
+                        let (slen, _) = match der_len(&init, s30) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        let send = s30 + slen;
+                        // first child inside the SEQUENCE: mechTypes [0]
+                        for m in s30 + 2..send.saturating_sub(4) {
+                            if init[m] != 0xA0 {
+                                break; // first field only
+                            }
+                            let (_, mhdr) = match der_len(&init, m) {
+                                Some(v) => v,
+                                None => continue,
+                            };
+                            let t30 = m + mhdr;
+                            if init.get(t30) == Some(&0x30) {
+                                // sign exactly the bare `30 <len> <OIDs>`
+                                let (ilen, ihdr) = match der_len(&init, t30) {
+                                    Some(v) => v,
+                                    None => continue,
+                                };
+                                let end = (t30 + ihdr + ilen).min(init.len());
+                                if end > t30 {
+                                    return init[t30..end].to_vec();
+                                }
+                            }
                         }
                     }
                     Vec::new()
                 })();
                 let key_exch = t3.encrypted_session_key.len() == 16;
                 #[cfg(feature = "lib")]
-                // Leg-2 response signature consumed sequence number 0.
+                // NTLMSSP sequence counters are independent of SMB2
+                // signing; samba resets them to 0 at sign_reset right
+                // after auth, and the accept-complete MIC is the first
+                // SEND (ntlmssp_make_packet_signature: sending.seq_num++).
                 let mic = smb_auth::crypto::ntlm_mech_list_mic(
                     &key,
                     true,
                     key_exch,
-                    1,
+                    0,
                     &mech_types,
                 );
                 #[cfg(not(feature = "lib"))]
                 let mic = [0u8; 16];
                 tracing::debug!(
                     sk = %hex_str(&key),
+                    init = %hex_str(&init),
                     mech = %hex_str(&mech_types),
                     key_exch,
                     mic = %hex_str(&mic),

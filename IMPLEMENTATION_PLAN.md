@@ -151,9 +151,16 @@
 - ✅ Signing keys: KDF counter-mode HMAC-SHA256 ("SMB2AESCMAC"/"SmbSign" for
   3.0+, "SMBSigningKey"/preauth-hash for 3.1.1); raw session key for 2.x
 - ✅ AES-CMAC-AES128 signatures for 3.x (HMAC-SHA256 for 2.x)
-- ✅ Pre-auth integrity hash (SHA-512 over negotiate/session-setup frames)
-- 🔨 Encryption transform (AES-GCM/CCM): cipher negotiated but transform not
-  applied; clients that do not request encryption work normally
+- ✅ Pre-auth integrity hash (SHA-512 over negotiate/session-setup frames,
+  both directions — request and response each re-seed the chain:
+  `state = SHA512(prev_state || msg)`, starting from zeros(64))
+- ✅ Encryption transform (AES-GCM/CCM): full sealed sessions green against
+  smbclient `--client-protection=encrypt` on 3.1.1 + 3.0.2 (ls/put/get/rm).
+  Fixes landed: TYPE2 advertises KEY_EXCH, mechListMIC = bare MechTypes
+  SEQUENCE with seq 0, TF tag read from the Signature field (detached),
+  0xFD transform frames routed to SMB2 dispatch. Open nits: encrypt +
+  require-signing combo rejects smbclient (client does not sign inside
+  encryption); CCM live path untested
 - ⬜ Multichannel support
 
 ### Crypto additions — now via `smb-csp` crate
@@ -220,9 +227,10 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | HMAC-SHA256 signatures (2.x) | §3.2.5.3.1 | complete | rfc4231 vectors | samba verifies our sigs | 2.1 GB/s (sha2 crate) | bad-sig line | sig_verify_fail |
 | AES-CMAC signatures (3.x) + SIGNING_CAPABILITIES ctx | §2.2.3.1.2, §3.2.5.3.1 | complete | rfc4493 vectors | SMB3 signed session | 1.6 GB/s (AES-NI) | — | — |
 | Signing-key KDF (CTR-HMAC-SHA256, dialect labels) | §3.1.4.1 | complete | python cross-check vector | keys accepted by samba | — | derived-once assert | — |
-| Preauth-hash-bound 3.1.1 signing key | §3.3.5.2.1 | complete | — | SMB3 auth works | — | — | — |
-| Encryption transform AES-GCM/CCM (TF header §2.2.41) | §3.3.5.16 | in_progress | csp AEAD roundtrip+tamper+NIST ✅ | negotiate+keys verified live; mechListMIC value rejected by smbclient — next: diff MAC inputs vs smbd reference (--debug-stdout dumps 'ntlmssp v2 sig') | target >500 MB/s | enc on/off per msg | enc_bytes_total |
-| Cipher key derivation (C2S/S2C labels + preauth ctx) | §3.1.4.1 | planned (w/ transform) | kdf vectors | encrypted session | — | — | — |
+| Preauth-hash-bound 3.1.1 signing key | §3.3.5.2.1 | complete | — | SMB3 auth works; chain verified byte-exact vs smbclient (LD_PRELOAD gnutls trace) | — | — | — |
+| mechListMIC (SPNEGO accept-complete, [MS-NLMP] §3.4.6) | RFC 4178 §4.2.2 | complete | — | smbclient --client-protection=encrypt session setup green | — | debug: sk/mech/mic inputs | — |
+| Encryption transform AES-GCM/CCM (TF header §2.2.41) | §3.3.5.16 | complete | csp AEAD roundtrip+tamper+NIST ✅ | smbclient --client-protection=encrypt green on 3.1.1 + 3.0.2 (ls/put/get/rm); open: encrypt+require-signing combo, CCM live | target >500 MB/s | enc on/off per msg | enc_bytes_total |
+| Cipher key derivation (C2S/S2C labels + preauth ctx) | §3.1.4.1 | complete | kdf vectors | encrypted tree-connect/read/write round-trips | — | — | — |
 | Require-signing server policy (--require-signing) / require-encryption | §3.3.5.2.3 | in_progress | gate unit test (todo) | unsigned client rejected (todo) | — | rejects logged + counted | rejects_total ✅ |
 
 ### Tree connects & shares ([MS-SMB2] §2.2.9–§2.2.11)
@@ -331,11 +339,16 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 Ordered cut-lines over the Feature Matrix above.
 
 ### M1 — Windows-usable
-1. Encryption transform (AES-GCM/CCM, TF header §2.2.41, C2S/S2C key labels)
-   — cipher already negotiated.
+1. ~~Encryption transform (AES-GCM/CCM, TF header §2.2.41, C2S/S2C key labels)
+   — cipher already negotiated.~~ ✅ DONE — smbclient --client-protection=encrypt
+   green on 3.1.1 + 3.0.2. Residual: encrypt+require-signing combo, CCM live
+   path, throughput benchmark.
 2. srvsvc NetShareEnum over a minimal named-pipe path on IPC$ so
    `smbclient -L` / network browsing works.
 3. Credit accounting + multi-credit large R/W; advertise Large-MTU.
+4. Pre-existing regressions to triage: SMB2(2.02) tree-connect
+   INVALID_PARAMETER; NT1 negotiate INVALID_PARAMETER_MIX (both fail before
+   this milestone's changes — verified against stashed baseline).
 
 ### M2 — Real-server semantics
 4. Async/PENDING scaffolding → CHANGE_NOTIFY via inotify → CANCEL.

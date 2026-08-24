@@ -125,3 +125,25 @@ at debug (sk/mech blob/key_exch/mic). Next steps:
    (mech_types incl. embedded type1 token? seq=0 or 1?).
 3. Mirror exact recipe in csp::ntlm_mech_list_mic.
 Everything else (negotiate contexts, keys, AEAD primitives) verified.
+
+## ADDENDUM 3 — encryption milestone CLOSED (uncommitted working tree)
+smbclient --client-protection=encrypt green on 3.1.1 and 3.0.2 (ls/put/get/rm).
+Root causes found by diffing against samba 4.19.5 smbd reference (isolated
+instance on :4460, wire captures + LD_PRELOAD gnutls shim on smbclient):
+1. type2 never offered NEGOTIATE_KEY_EXCH -> client sent no
+   EncryptedRandomSessionKey. Fix: advertise KEY_EXCH in leg-1 extra flags.
+   (auth.rs derive_session_key already exported correctly; a double-export
+   added mid-debug was removed.)
+2. mechListMIC: wrong span — must be the bare `30 <len> <OIDs>` SEQUENCE
+   inside negTokenInit (spnego_write_mech_types), not the outer SEQUENCE;
+   seq num = 0 (NTLMSSP counters independent of SMB2 signing).
+3. 3.1.1 preauth hash: fold BOTH directions — [negReq, negResp, ss1Req,
+   ss1Resp(MORE_PROCESSING), ss2Req], each as state = SHA512(prev_state ||
+   msg) starting from zeros(64); keys KDF-HMAC-SHA256 off that context.
+4. TF decrypt: GCM/CCM tag lives in the TF Signature field (detached), not
+   appended to payload; dispatch must route 0xFD frames to SMB2.
+Open: --require-signing together with encrypt rejects smbclient (client
+does not sign inside encryption); CCM cipher live path untested; SMB2(2.02)
+tree-connect and NT1 negotiation failures pre-date this session.
+Reference env kept under /tmp/opencode/smbref (smb.conf, mic_solve.py,
+shim.c, pcaps).

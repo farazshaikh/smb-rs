@@ -92,8 +92,9 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, mut transport
 
         counter!("smb_nbss_frames_total").increment(1);
 
-        // SMB2/3 frames (\xFESMB magic).
-        if frame.0[0] == 0xFE || conn.upgraded_smb2 {
+        // SMB2/3 frames (\xFESMB magic) and encrypted transform frames
+        // (\xFD"SMB" — [MS-SMB2] §2.2.41).
+        if frame.0[0] == 0xFE || frame.0[0] == 0xFD || conn.upgraded_smb2 {
             if smb2_conn.is_none() {
                 smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge()));
             }
