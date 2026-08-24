@@ -39,6 +39,12 @@ pub struct Smb2Conn {
     pub session_key: Option<[u8; 16]>,
     /// Derived signing key (dialect-specific); `None` disables signing.
     pub signing_key: Option<[u8; 16]>,
+    /// Capabilities word advertised in our NEGOTIATE response — echoed
+    /// verbatim in FSCTL_VALIDATE_NEGOTIATE_INFO ([MS-SMB2] §3.3.5.15).
+    pub advertised_caps: u32,
+    /// Credits the client currently holds (granted minus spent,
+    /// [MS-SMB2] §3.3.1.1).
+    pub client_credits: u32,
     /// Pre-authentication integrity hash (3.1.1 only).
     pub preauth_hash: [u8; 64],
     /// Chosen encryption cipher (from negotiate ENCRYPTION_CAPABILITIES).
@@ -58,6 +64,8 @@ pub struct Smb2Conn {
     pub trees: HashMap<u32, String>,
     /// Open handles keyed by 16-byte SMB2 FileId.
     pub handles: HashMap<[u8; 16], Box<smb_vfs::OpenFile>>,
+    /// Virtual named pipes opened on IPC$ (srvsvc, …) keyed by file id.
+    pub pipes: HashMap<[u8; 16], crate::srvsvc::Pipe>,
     /// Directory-enumeration continuation queues keyed by directory FileId.
     pub searches: HashMap<[u8; 16], VecDeque<info::FindEntry>>,
 }
@@ -74,6 +82,8 @@ impl Smb2Conn {
             guest: false,
             session_key: None,
             signing_key: None,
+            advertised_caps: 0,
+            client_credits: 0,
             preauth_hash: [0u8; 64],
             cipher: None,
             enc_keys: None,
@@ -82,6 +92,7 @@ impl Smb2Conn {
             ntlm_targ: None,
             trees: HashMap::new(),
             handles: HashMap::new(),
+            pipes: HashMap::new(),
             searches: HashMap::new(),
         }
     }
@@ -195,6 +206,11 @@ pub(crate) async fn process_frame(
         let Some((single, may_wrap)) = process_single(server, conn, rest).await else {
             return None;
         };
+        // Refund the Credits this response grants back to the client's
+        // balance ([MS-SMB2] §3.3.1.1) — the field was stamped by
+        // response() as max(CreditCharge, 1).
+        let granted = u16::from_le_bytes(single[14..16].try_into().unwrap()) as u32;
+        conn.client_credits = conn.client_credits.saturating_add(granted);
         #[cfg(not(feature = "lib"))]
         let may_wrap = false; // sealing unsupported on this backend
         parts.push((single, may_wrap));
@@ -405,11 +421,31 @@ async fn process_single(
         return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), 0), false));
     }
 
+    // Credit accounting ([MS-SMB2] §3.3.1.1): every request spends its
+    // CreditCharge from the balance we have granted; the response's own
+    // Credits field tops the balance back up (done by the caller reading
+    // it out of the response header). An over-spend is a broken or hostile
+    // client — reject it.
+    // The initial NEGOTIATE arrives with an implicit credit already granted
+    // ([MS-SMB2] §3.3.5.2.4) — some clients set CreditCharge=1 on it.
+    if hdr.command == ss::cmd::NEGOTIATE {
+        conn.client_credits = conn.client_credits.max(1);
+    }
+    // Lenient, smbd-style policy: track the spend but never fail a request
+    // whose CreditCharge exceeds the tracked balance — some clients
+    // (impacket) set large charges without prior grant negotiation. The
+    // response refunds max(CreditCharge, 1) via the caller.
+    let charge = hdr.credit_charge as u32;
+    conn.client_credits = conn.client_credits.saturating_sub(charge);
+
     // Signing policy ([MS-SMB2] §3.3.5.2.3): reject unsigned traffic from
-    // real accounts when --require-signing is set.
+    // real accounts when --require-signing is set. Sealed (encrypted)
+    // sessions carry their own integrity guarantee via the AEAD tag, so
+    // the signature requirement is satisfied by encryption there.
     if server.require_signing
         && !pre_session
         && !conn.guest
+        && !conn.encrypt_data
         && conn.signing_key.is_some()
         && !hdr.is_signed()
     {
@@ -426,21 +462,30 @@ async fn process_single(
             // NEGOTIATE or one carrying Status = STATUS_INVALID_PARAMETER
             // ([MS-SMB2] §3.3.5.3). Answer both with the wildcard-dialect
             // response so they retry a real negotiation.
-            if hdr.status == Status::INVALID_PARAMETER.raw()
-                || smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]))
-                    .is_none()
-            {
+            let parsed = smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]));
+            tracing::debug!(status = hdr.status, parsed_ok = parsed.is_some(), len = buf.len(), "negotiate probe check");
+            if hdr.status == Status::INVALID_PARAMETER.raw() || parsed.is_none() {
+                if parsed.is_none() {
+                    tracing::debug!(len = buf.len(), body = %hex_str(buf.get(body_start..).unwrap_or(&[])), "negotiate parse failed");
+                }
                 return Some((
                     response(&hdr, Status::INVALID_PARAMETER, probe_negotiate_resp(), 0),
                     false,
                 ));
             }
-            let req = smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]))
-                .expect("validated above");
+            let req = parsed.expect("validated above");
             let Some(dialect) = smb_proto_smb2::negotiate::pick(&req.dialects) else {
                 return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0), true));
             };
             conn.dialect = Some(dialect);
+            // Must match the Capabilities word written by
+            // build_response_full below so VALIDATE_NEGOTIATE_INFO echoes it.
+            conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
+                smb_proto_smb2::negotiate::caps::LARGE_MTU
+            } else {
+                0
+            };
+            tracing::debug!(dialect = format!("{:#06x}", dialect), "negotiated");
             let mut salt = [0u8; 32];
             salt.copy_from_slice(&crate::dispatch::rand_bytes(32));
             // Pick one cipher the client offered (GCM preferred).
@@ -463,12 +508,27 @@ async fn process_single(
                     }
                 })
                 .unwrap_or_default();
-            let chosen = [smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
-                          smb_proto_smb2::negotiate::ctx_type::AES128_CCM]
-                .into_iter()
-                .find(|ours| client_ciphers.contains(ours))
-                .unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM);
-            conn.cipher = Some(chosen);
+            let chosen = {
+                // GCM preferred by default ([MS-SMB2] §3.1.4.1); override
+                // with RUSTSMB_CIPHER=ccm to exercise the CCM path live.
+                let prefer_ccm = std::env::var("RUSTSMB_CIPHER")
+                    .map(|v| v.eq_ignore_ascii_case("ccm"))
+                    .unwrap_or(false);
+                let order = if prefer_ccm {
+                    [smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
+                     smb_proto_smb2::negotiate::ctx_type::AES128_GCM]
+                } else {
+                    [smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
+                     smb_proto_smb2::negotiate::ctx_type::AES128_CCM]
+                };
+                order.into_iter().find(|ours| client_ciphers.contains(ours))
+            };
+            // Dialects without negotiate contexts (or clients that did not
+            // offer ENCRYPTION_CAPABILITIES) must leave conn.cipher unset —
+            // otherwise --encrypt would seal sessions the peer cannot read.
+            if dialect == smb_proto_smb2::negotiate::DIALECT_311 && !client_ciphers.is_empty() {
+                conn.cipher = chosen;
+            }
             (
                 Status::SUCCESS,
                 smb_proto_smb2::negotiate::build_response_full(
@@ -476,7 +536,7 @@ async fn process_single(
                     &server.guid,
                     smb_proto::types::FileTime::now().0,
                     &salt,
-                    chosen,
+                    chosen.unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM),
                 ),
             )
         }
@@ -516,18 +576,30 @@ async fn process_single(
             (Status::SUCCESS, c::build_logoff_resp())
         }
         ss::cmd::CREATE => {
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+            // Named-pipe open on IPC$: \srvsvc and friends are virtual
+            // files backed by the RPC dispatcher, not the VFS.
+            if share_is_ipc(server, conn, tid) {
+                match pipe_create(conn, buf) {
+                    Ok(body) => (Status::SUCCESS, body),
+                    Err(status) => (status, Vec::new()),
                 }
-            };
-            match create(conn, vfs, buf).await {
-                Ok(body) => (Status::SUCCESS, body),
-                Err(status) => (status, Vec::new()),
+            } else {
+                let vfs = match share_vfs(server, conn, tid) {
+                    Some(v) => v,
+                    None => {
+                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                    }
+                };
+                match create(conn, vfs, buf).await {
+                    Ok(body) => (Status::SUCCESS, body),
+                    Err(status) => (status, Vec::new()),
+                }
             }
         }
         ss::cmd::READ => {
+            if let Some(pipe_read) = pipe_read(conn, buf) {
+                return Some((response(&hdr, Status::SUCCESS, pipe_read, conn.session_id), true));
+            }
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
                 None => {
@@ -540,6 +612,9 @@ async fn process_single(
             }
         }
         ss::cmd::WRITE => {
+            if let Some(written) = pipe_write(server, conn, buf) {
+                return Some((response(&hdr, Status::SUCCESS, written, conn.session_id), true));
+            }
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
                 None => {
@@ -552,15 +627,20 @@ async fn process_single(
             }
         }
         ss::cmd::CLOSE => {
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+            // Close a pipe handle first; fall through to file handles.
+            if pipe_close(conn, buf) {
+                (Status::SUCCESS, c::build_close_resp([0u64;4], 0, 0, 0))
+            } else {
+                let vfs = match share_vfs(server, conn, tid) {
+                    Some(v) => v,
+                    None => {
+                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                    }
+                };
+                match close(conn, vfs, buf).await {
+                    Ok(body) => (Status::SUCCESS, body),
+                    Err(status) => (status, Vec::new()),
                 }
-            };
-            match close(conn, vfs, buf).await {
-                Ok(body) => (Status::SUCCESS, body),
-                Err(status) => (status, Vec::new()),
             }
         }
         ss::cmd::FLUSH => {
@@ -577,27 +657,51 @@ async fn process_single(
         }
         ss::cmd::IOCTL => {
             let Some(req) = c::IoctlReq::parse(buf) else {
+                tracing::debug!("ioctl parse failed");
                 return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
             };
+            tracing::debug!(ctl = format!("{:#010x}", req.ctl_code), "ioctl");
             match req.ctl_code {
                 // Echo the negotiated parameters back ([MS-SMB2] §3.3.5.15):
                 // capabilities, server GUID, security mode and dialect.
                 c::fsctl::VALIDATE_NEGOTIATE_INFO if req.input.len() >= 24 => {
                     let mut out = Vec::with_capacity(24);
-                    out.extend_from_slice(&0u32.to_le_bytes()); // Capabilities
+                    // Echo the exact values from our NEGOTIATE response —
+                    // the client fails the exchange on any mismatch
+                    // ([MS-SMB2] §3.3.5.15).
+                    out.extend_from_slice(&conn.advertised_caps.to_le_bytes());
                     out.extend_from_slice(&server.guid);
                     out.extend_from_slice(&1u16.to_le_bytes()); // SecurityMode
                     out.extend_from_slice(
                         &conn.dialect.unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
                             .to_le_bytes(),
                     );
-                    // Ignore the client's copy; success means "validated".
                     let _ = &req.input;
                     (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
                 }
                 // Resiliency handshake carries no output data.
-                c::fsctl::LMR_REQUEST_RESILIENCY | c::fsctl::PIPE_WAIT => {
+                c::fsctl::LMR_REQUEST_RESILIENCY => {
                     (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+                }
+                // FSCTL_PIPE_TRANSACT (0x0011C017): the DCERPC PDU arrives
+                // in the input buffer and the reply leaves in the output
+                // buffer — this is how SMB2 clients speak RPC over named
+                // pipes.
+                c::fsctl::PIPE_TRANSACT => {
+                    let Some(pipe) = conn.pipes.get_mut(&req.file_id.0) else {
+                        tracing::debug!(pipes = conn.pipes.len(), "transact on non-pipe fid");
+                        return Some((response(&hdr, Status::NOT_IMPLEMENTED, Vec::new(), conn.session_id), true));
+                    };
+                    let shares = server.share_infos();
+                    let out = {
+                        pipe.on_write(&req.input, &shares);
+                        counter!("smb_pipe_writes_total").increment(1);
+                        pipe.take(req.max_output as usize)
+                    };
+                    counter!("smb_pipe_reads_total").increment(1);
+                    let out_hex = hex_str(&out);
+                    tracing::debug!(out_len = out.len(), %out_hex, "pipe transact");
+                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
                 }
                 _ => (Status::NOT_IMPLEMENTED, Vec::new()),
             }
@@ -726,7 +830,11 @@ async fn process_single(
             };
             conn.enc_keys = Some((kdf(c2s_label, c2s_ctx), kdf(s2c_label, s2c_ctx)));
             conn.encrypt_data = true;
-            tracing::info!(cipher = format!("{:#x}", conn.cipher.unwrap()), "encryption enabled for session");
+            tracing::info!(
+                cipher = format!("{:#x}", conn.cipher.unwrap()),
+                dialect = format!("{:#06x}", conn.dialect.unwrap_or(0)),
+                "encryption enabled for session"
+            );
 
             seal_session = true;
         }
@@ -1148,6 +1256,89 @@ async fn flush(
 
 fn close_all_handles(conn: &mut Smb2Conn) {
     conn.handles.clear();
+    conn.pipes.clear();
+}
+
+// ---------------- Named pipes (IPC$) ----------------
+
+/// True when the tree behind `tid` is the virtual IPC$ share.
+fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32) -> bool {
+    conn.trees
+        .get(&tid)
+        .and_then(|n| server.shares.get(n))
+        .map(|s| s.is_ipc)
+        .unwrap_or(false)
+}
+
+/// Known pipe names served on IPC$.
+const KNOWN_PIPES: &[&str] = &["srvsvc", "wkssvc", "lanman", "netlogon"];
+
+/// Open a virtual pipe; `Err(FILE_NOT_FOUND)` for unknown names.
+fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
+    let req = c::CreateReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
+    let name = req.name.trim_start_matches(['\\', '/']).to_lowercase();
+    if !KNOWN_PIPES.contains(&name.as_str()) {
+        return Err(Status::OBJECT_PATH_NOT_FOUND);
+    }
+    let fid_bytes = next_file_id();
+    let fid = c::FileId(fid_bytes);
+    conn.pipes.insert(fid_bytes, crate::srvsvc::Pipe::new(&name));
+    tracing::debug!(pipe = %name, "pipe opened");
+    // Zeroed timestamps/attrs; a pipe is a stream device.
+    Ok(c::build_create_resp(
+        fid,
+        1, // FILE_OPENED
+        [0u64; 4],
+        0, // no file attributes
+        4096,
+        0,
+        false,
+    ))
+}
+
+/// Drain up to the requested byte count from a pipe's outbound queue;
+/// `None` when `file_id` is not a pipe.
+fn pipe_read(conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
+    let Some(req) = c::ReadReq::parse(buf) else {
+        tracing::debug!("pipe_read: parse failed");
+        return None;
+    };
+    let Some(pipe) = conn.pipes.get_mut(&req.file_id.0) else {
+        tracing::debug!(fid = ?req.file_id, "read on non-pipe");
+        return None;
+    };
+    tracing::debug!(pending = pipe.pending(), max = req.length, "pipe read");
+    let data = pipe.take(req.length as usize);
+    counter!("smb_pipe_reads_total").increment(1);
+    Some(c::build_read_resp(&data))
+}
+
+/// Feed client bytes into a pipe RPC dispatcher; `None` when `file_id` is
+/// not a pipe. Returns the WRITE response body.
+fn pipe_write(server: &Arc<ServerShared>, conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
+    let req = c::WriteReq::parse(buf);
+    let Some(req) = req else {
+        tracing::debug!("pipe_write: parse failed");
+        return None;
+    };
+    if !conn.pipes.contains_key(&req.file_id.0) {
+        return None;
+    }
+    let shares = server.share_infos();
+    let written = req.payload.len() as u32;
+    let pipe = conn.pipes.get_mut(&req.file_id.0)?;
+    tracing::debug!(pipe = %pipe.name, len = req.payload.len(), payload = %hex_str(&req.payload), "pipe write");
+    pipe.on_write(&req.payload, &shares);
+    tracing::debug!(pending = pipe.pending(), "pipe read queued");
+    counter!("smb_pipe_writes_total").increment(1);
+    Some(c::build_write_resp(written))
+}
+
+/// Remove a pipe handle; `true` when it was one.
+fn pipe_close(conn: &mut Smb2Conn, buf: &[u8]) -> bool {
+    c::CloseReq::parse(buf)
+        .map(|r| conn.pipes.remove(&r.file_id.0).is_some())
+        .unwrap_or(false)
 }
 
 // ---------------- QUERY_DIRECTORY ----------------

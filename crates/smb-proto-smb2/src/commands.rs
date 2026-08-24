@@ -749,12 +749,17 @@ mod ioctl_off {
 pub mod fsctl {
     /// FSCTL_DFS_GET_REFERRALS.
     pub const DFS_GET_REFERRALS: u32 = 0x0006_0194;
-    /// FSCTL_PIPE_WAIT.
-    pub const PIPE_WAIT: u32 = 0x0011_0098;
+    /// FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2):
+    /// CTL_CODE(FILE_DEVICE_NAMED_PIPE, 60, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    /// = 0x0011C017.
+    pub const PIPE_WAIT: u32 = 0x0011_C017;
     /// FSCTL_SRV_REQUEST_RESUME_KEY.
     pub const SRV_REQUEST_RESUME_KEY: u32 = 0x0014_0078;
     /// FSCTL_LMR_REQ_RESILIENCY.
     pub const LMR_REQUEST_RESILIENCY: u32 = 0x0014_01D4;
+    /// FSCTL_PIPE_TRANSACT ([MS-SMB2] §2.2.31.10 "Transact named pipe"):
+    /// DCERPC PDUs tunnelled through the IOCTL input/output buffers.
+    pub const PIPE_TRANSACT: u32 = 0x0011_C017;
     /// FSCTL_VALIDATE_NEGOTIATE_INFO.
     pub const VALIDATE_NEGOTIATE_INFO: u32 = 0x0014_0204;
 }
@@ -800,8 +805,8 @@ impl IoctlReq {
     }
 }
 
-/// Build an IOCTL response body (§2.2.32.1). Fixed part is 48 bytes
-/// (StructureSize 49); `output` lands 8-byte aligned after it.
+/// Build an IOCTL response body (§2.2.32.1). Fixed part is 48 bytes;
+/// StructureSize mirrors smbd (49); `output` lands 8-byte aligned after it.
 pub fn build_ioctl_resp(file_id: FileId, ctl_code: u32, output: &[u8]) -> Vec<u8> {
     const FIXED: usize = 48;
     let mut b = Vec::with_capacity(FIXED + output.len());

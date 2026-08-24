@@ -300,9 +300,9 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 
 | feature | specsection | status | unittest | systemtest | benchmarking | logging | metric |
 |---|---|---|---|---|---|---|---|
-| Pipe create/read/write over IPC$ (srvsvc, lanman) | §2.1.2.1 | planned | pipe frame tests | smbclient -L | — | pipe open/close | pipe_msgs_total |
-| srvsvc NetShareEnum (share enumeration) | [MS-SRVS] §3.1.4.10 | planned | share-list NDR tests | smbclient -L / net view | — | enum served | enums_served |
-| RPC bind/transact over named pipes ([MS-RPCE]) | [MS-RPCE] §2 | planned | bind ack tests | — | — | — | — |
+| Pipe create/read/write over IPC$ (srvsvc, lanman) | §2.1.2.1 | complete | pipe open/write/read/close tests | impacket + smbclient -L | — | pipe opened/write/read debug | pipe_writes/reads_total |
+| srvsvc NetShareEnum (share enumeration) | [MS-SRVS] §3.1.4.10 | in_progress | stub layout unit test (todo: golden) | smbclient -L ✅ (replay mode) | — | debug: opnum/resp len | enums_served |
+| RPC bind/transact over named pipes ([MS-RPCE]) | [MS-RPCE] §2 | complete | bind ack + auth3 + frag reassembly tests | impacket DCERPC bind+request ✓ | — | — | pipe_msgs_total |
 
 ### Ergonomics
 

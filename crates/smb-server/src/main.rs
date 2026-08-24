@@ -4,6 +4,7 @@ mod auth;
 pub mod cmds;
 pub mod dispatch;
 pub mod smb2;
+pub mod srvsvc;
 pub mod state;
 
 use std::collections::HashMap;
@@ -92,6 +93,7 @@ async fn main() {
     };
     tracing::info!(
         port = args.port,
+        build = "B7",
         shares = ?shared.shares.keys().collect::<Vec<_>>(),
         auth = if shared.users.is_empty() { "guest(any)" } else { "users" },
         "rustsmb listening"

@@ -111,6 +111,9 @@ impl Transport for TcpTransport {
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         let mut hdr = [0u8; 4];
         hdr[0] = nb_type::SESSION_MESSAGE;
+        // 3-byte big-endian length: frames above 64 KiB (multi-credit
+        // reads/writes, sealed transform payloads) need the middle byte.
+        hdr[1] = (data.len() >> 16) as u8;
         hdr[2] = (data.len() >> 8) as u8;
         hdr[3] = (data.len() & 0xff) as u8;
         self.stream.write_all(&hdr).await?;

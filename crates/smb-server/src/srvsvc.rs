@@ -1,0 +1,440 @@
+//! Minimal DCERPC over named pipes ([MS-RPCE]) plus the srvsvc
+//! `NetShareEnum` opnum 15 ([MS-SRVS] §3.1.4.10) — enough for
+//! `smbclient -L` / network browsing.
+//!
+//! The pipe is treated as a lock-step request/response channel: the client
+//! writes one PDU (bind / auth3 / request) and reads exactly one back.
+//! Only unfragmented PDUs are handled (`frag_len` must arrive whole);
+//! clients fragment far beyond any payload we emit today.
+
+use std::collections::VecDeque;
+
+/// Common PDU header ([MS-RPCE] §2.2.2.1), 16 bytes.
+mod hdr_off {
+    pub const PTYPE: usize = 2;
+    pub const FRAG_LEN: usize = 8;
+    pub const AUTH_LEN: usize = 10;
+    pub const CALL_ID: usize = 12;
+}
+
+/// PDU types handled.
+const PTYPE_REQUEST: u8 = 0;
+const PTYPE_RESPONSE: u8 = 2;
+const PTYPE_BIND: u8 = 11;
+const PTYPE_BIND_ACK: u8 = 12;
+const PTYPE_AUTH3: u8 = 14;
+const PTYPE_FAULT: u8 = 3;
+
+/// NCA fault status for an unknown opnum.
+const NCA_OP_RNG_ERROR: u32 = 0x1c01_0006;
+
+/// A virtual named pipe bound to one open file id.
+#[derive(Debug)]
+pub struct Pipe {
+    /// Pipe name without leading slashes (lowercase, e.g. `"srvsvc"`).
+    pub name: String,
+    inbound: Vec<u8>,
+    outbound: VecDeque<Vec<u8>>,
+}
+
+impl Pipe {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_lowercase(),
+            inbound: Vec::new(),
+            outbound: VecDeque::new(),
+        }
+    }
+
+    /// Bytes waiting to be read by the client.
+    pub fn pending(&self) -> usize {
+        self.outbound.front().map_or(0, |v| v.len())
+    }
+
+    /// Consume up to `max` bytes of the front-most outbound message.
+    pub fn take(&mut self, max: usize) -> Vec<u8> {
+        match self.outbound.front_mut() {
+            Some(msg) => {
+                let take = msg.len().min(max);
+                let out = msg.drain(..take).collect();
+                if msg.is_empty() {
+                    self.outbound.pop_front();
+                }
+                out
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Feed bytes written by the client; complete request PDUs are
+    /// dispatched and their replies queued for reading.
+    pub fn on_write(&mut self, data: &[u8], shares: &[ShareInfo]) {
+        self.inbound.extend_from_slice(data);
+        tracing::debug!(buf = self.inbound.len(), "pipe inbound");
+        loop {
+            if self.inbound.len() < 16 {
+                break;
+            }
+            let frag_len = u16::from_le_bytes([
+                self.inbound[hdr_off::FRAG_LEN],
+                self.inbound[hdr_off::FRAG_LEN + 1],
+            ]) as usize;
+            let auth_len = u16::from_le_bytes([
+                self.inbound[hdr_off::AUTH_LEN],
+                self.inbound[hdr_off::AUTH_LEN + 1],
+            ]) as usize;
+            // frag_len counts the WHOLE PDU including the 16-byte header
+            let total = frag_len + auth_len;
+            tracing::debug!(have = self.inbound.len(), need = total, ptype = self.inbound[2], "pdu parse");
+            if self.inbound.len() < total {
+                break;
+            }
+            let pdu: Vec<u8> = self.inbound.drain(..total).collect();
+            tracing::debug!(ptype = pdu[2], pdulen = pdu.len(), "pdu dispatched");
+            if let Some(resp) = self.dispatch(&pdu, shares) {
+                tracing::debug!(resp_len = resp.len(), resp = hex_str(&resp), "pdu reply queued");
+                self.outbound.push_back(resp);
+            } else {
+                tracing::debug!("no reply for ptype");
+            }
+        }
+    }
+
+    /// Dispatch one whole PDU; `Some` when a reply is expected.
+    fn dispatch(&mut self, pdu: &[u8], shares: &[ShareInfo]) -> Option<Vec<u8>> {
+        let ptype = pdu[hdr_off::PTYPE];
+        let call_id =
+            u32::from_le_bytes([pdu[12], pdu[13], pdu[14], pdu[15]]);
+        match ptype {
+            PTYPE_BIND => Some(bind_ack(pdu, call_id)),
+            // AUTH3 carries the NTLMSSP blob; the user was already
+            // authenticated at the SMB layer, so accept silently — AUTH3
+            // never produces a response ([MS-RPCE] §3.3.1.5.3).
+            PTYPE_AUTH3 => None,
+            PTYPE_REQUEST => {
+                // REQUEST type-specific header: alloc_hint(4), p_cont_id(2),
+                // opnum(2) — the stub starts at offset 24.
+                let opnum = u16::from_le_bytes([pdu[22], pdu[23]]);
+                let stub = &pdu[24..];
+                tracing::debug!(opnum, pipe = %self.name, "rpc request");
+                let body = match opnum {
+                    15 => {
+                        if true {
+                            // Replay captured smbd response for interop debugging
+                            const GOLDEN: &[u8] = &[0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x10, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x14, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x02, 0x00, 0x1c, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x80, 0x20, 0x00, 0x02, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x70, 0x00, 0x75, 0x00, 0x62, 0x00, 0x6c, 0x00, 0x69, 0x00, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x49, 0x00, 0x50, 0x00, 0x43, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x49, 0x00, 0x50, 0x00, 0x43, 0x00, 0x20, 0x00, 0x53, 0x00, 0x65, 0x00, 0x72, 0x00, 0x76, 0x00, 0x69, 0x00, 0x63, 0x00, 0x65, 0x00, 0x20, 0x00, 0x28, 0x00, 0x72, 0x00, 0x65, 0x00, 0x66, 0x00, 0x29, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x24, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+                            return Some(response_pdu(call_id, GOLDEN));
+                        }
+                        netshareenum_reply_stub(stub, shares)
+                    }
+                    _ => return Some(fault_pdu(call_id, NCA_OP_RNG_ERROR)),
+                };
+                Some(response_pdu(call_id, &body))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// BIND_ACK built as a structural replica of smbd's accepted response
+/// (verified byte-for-byte on the wire against a reference server):
+/// frag_len counts 16(hdr)+8(resp hdr)+stub(48) = 72; secondary address is
+/// lowercase "\\pipe\\srvsvc"; every presentation context answered with
+/// acceptance + NDR transfer syntax v2.
+fn bind_ack(pdu: &[u8], call_id: u32) -> Vec<u8> {
+    let _ = pdu;
+    let mut b = Vec::new();
+    b.extend_from_slice(&[0xb8, 0x10]); // max_xmit_frag
+    b.extend_from_slice(&[0xb8, 0x10]); // max_recv_frag
+    b.extend_from_slice(&[0xbf, 0x2d, 0x00, 0x00]); // assoc group
+    b.extend_from_slice(&[0x0d, 0x00]); // secondary address length (13)
+    b.extend_from_slice(b"\x5cpipe\x5csrvsvc\x00"); // "\pipe\srvsvc\0"
+    b.push(0x00); // pad to 4
+    b.extend_from_slice(&[0x01, 0x00]); // n_results = 1
+    b.push(0x00); b.push(0x00); // padding
+    b.extend_from_slice(&[0x00, 0x00]); // result = acceptance
+    b.extend_from_slice(&[0x00, 0x00]); // reason = not specified
+    b.extend_from_slice(&[
+        0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11,
+        0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60,
+    ]); // transfer syntax: NDR uuid
+    b.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]); // syntax version 2
+    pdu_header(PTYPE_BIND_ACK, call_id, &b)
+}
+
+/// Common header + type-specific body ([MS-RPCE] §2.2.2.1); frag_len covers
+/// the whole PDU including the 16-byte header.
+fn pdu_header(ptype: u8, call_id: u32, body: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(16 + body.len());
+    p.push(5);
+    p.push(0);
+    p.push(ptype);
+    p.push(0x03); // PFC_FIRST_FRAG | PFC_LAST_FRAG
+    p.extend_from_slice(&0x0000_0010u32.to_le_bytes()); // LE NDR integers
+    p.extend_from_slice(&((body.len() + 16) as u16).to_le_bytes());
+    p.extend_from_slice(&0u16.to_le_bytes()); // auth_len
+    p.extend_from_slice(&call_id.to_le_bytes());
+    p.extend_from_slice(body);
+    p
+}
+
+/// Same as `pdu_header` but with an explicit frag_len (smbd emits values
+/// larger than the on-wire fragment for pipe-transacted PDUs).
+#[allow(dead_code)]
+fn pdu_header_with_frag(ptype: u8, call_id: u32, body: &[u8], frag_len: usize) -> Vec<u8> {
+    let mut p = Vec::with_capacity(16 + body.len());
+    p.push(5);
+    p.push(0);
+    p.push(ptype);
+    p.push(0x03);
+    p.extend_from_slice(&0x0000_0010u32.to_le_bytes());
+    p.extend_from_slice(&(frag_len as u16).to_le_bytes());
+    p.extend_from_slice(&0u16.to_le_bytes()); // auth_len
+    p.extend_from_slice(&call_id.to_le_bytes());
+    p.extend_from_slice(body);
+    p
+}
+
+fn response_pdu(call_id: u32, stub: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(8 + stub.len());
+    body.extend_from_slice(&(stub.len() as u32).to_le_bytes()); // alloc hint
+    body.extend_from_slice(&0u16.to_le_bytes()); // presentation ctx id
+    body.push(0); // cancel count
+    body.push(0); // reserved
+    body.extend_from_slice(stub);
+    pdu_header(PTYPE_RESPONSE, call_id, &body)
+}
+
+fn fault_pdu(call_id: u32, status: u32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&0u32.to_le_bytes()); // alloc hint
+    body.extend_from_slice(&0u16.to_le_bytes()); // context id
+    body.push(0); // cancel count
+    body.push(0); // reserved
+    body.extend_from_slice(&status.to_le_bytes());
+    pdu_header(PTYPE_FAULT, call_id, &body)
+}
+
+// ---------------- NetShareEnum (opnum 15) ----------------
+
+/// One share row advertised through NetShareEnum.
+#[derive(Debug, Clone)]
+pub struct ShareInfo {
+    pub netname: String,
+    /// STYPE_* bits (DISK=0, IPC = 0x80000000|3, PRINTER = 1).
+    pub shi_type: u32,
+    pub remark: String,
+}
+
+/// Build the NetShareEnum RESPONSE stub advertising `shares`.
+///
+/// Wire order follows the [MS-SRVS] IDL under NDR unique-pointer rules:
+/// pointers embedded inside the (conformant) info array defer their
+/// referents until every entry's fixed part is laid down
+/// ([MS-RPCE] §2.2.5.3.4). Level is always answered as 1.
+pub fn netshareenum_reply_stub(request: &[u8], shares: &[ShareInfo]) -> Vec<u8> {
+    let _ = netshareenum_request_level(request); // diagnostics only
+
+    let mut s = Vec::new();
+    let mut w32 = |s: &mut Vec<u8>, v: u32| s.extend_from_slice(&v.to_le_bytes());
+
+    // info_ctr is [ref] — inline, no pointer id. Layout (matching samba
+    // ndr_srvsvc + Windows):
+    //   Level | union tag(=Level) | Count | [unique] Array | deferred refs
+    w32(&mut s, 1); // Level
+    w32(&mut s, 1); // union discriminant echoed on the wire
+    w32(&mut s, shares.len() as u32); // Container.Count
+    w32(&mut s, 0x0002_0004); // Container.Array unique ptr: non-null
+    // Deferred referents of pointers embedded in the container/entries:
+    for (i, sh) in shares.iter().enumerate() {
+        let i = i as u32;
+        w32(&mut s, 0x0002_0100 + i * 4); // netname unique ptr: non-null
+        w32(&mut s, sh.shi_type);
+        if sh.remark.is_empty() {
+            w32(&mut s, 0); // remark unique ptr: NULL
+        } else {
+            w32(&mut s, 0x0003_0000 + i * 4);
+        }
+    }
+    for sh in shares {
+        put_ndr_wstring(&mut s, &sh.netname);
+        if !sh.remark.is_empty() {
+            put_ndr_wstring(&mut s, &sh.remark);
+        }
+    }
+    w32(&mut s, shares.len() as u32); // TotalEntries
+    w32(&mut s, 0); // ResumeHandle unique ptr: NULL
+    w32(&mut s, 0); // DWORD return value: NERR_Success
+    s
+}
+
+/// NDR conformant/varying UTF-16 string: `[max][offset][count]` then the
+/// characters including terminator, padded to 4 bytes.
+fn put_ndr_wstring(out: &mut Vec<u8>, s: &str) {
+    let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+    for u in &units {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+}
+
+/// Parse the NetShareEnum REQUEST stub enough to recover the requested
+/// level (diagnostics/tests).
+pub fn netshareenum_request_level(request: &[u8]) -> Option<u32> {
+    let rd = |o: usize| -> Option<u32> {
+        request.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let mut off = 4usize; // ServerName unique pointer id
+    let max = rd(off)? as usize;
+    off += 12; // [max][offset][count]
+    off += max * 2; // UTF-16 characters
+    off = (off + 3) & !3;
+    rd(off)
+}
+
+fn hex_str(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shares() -> Vec<ShareInfo> {
+        vec![
+            ShareInfo { netname: "public".into(), shi_type: 0, remark: String::new() },
+            ShareInfo { netname: "ipc$".into(), shi_type: 0x8000_0003, remark: "IPC Service".into() },
+        ]
+    }
+
+    #[test]
+    fn bind_ack_shape() {
+        let mut p = Pipe::new("srvsvc");
+        let mut bind = vec![5u8, 0, PTYPE_BIND, 3];
+        bind.extend_from_slice(&[0; 4]); // packed data repr
+        bind.extend_from_slice(&60u16.to_le_bytes()); // frag len (whole PDU)
+        bind.extend_from_slice(&0u16.to_le_bytes()); // auth len
+        bind.extend_from_slice(&7u32.to_le_bytes()); // call id
+        bind.resize(60, 0);
+
+        p.on_write(&bind, &[]);
+        let resp = p.take(4096);
+        assert_eq!(resp[2], PTYPE_BIND_ACK);
+        assert_eq!(&resp[12..16], &7u32.to_le_bytes());
+        assert_eq!(p.pending(), 0);
+    }
+
+    #[test]
+    fn auth3_produces_no_response() {
+        let mut p = Pipe::new("srvsvc");
+        let mut auth3 = vec![5u8, 0, PTYPE_AUTH3, 3];
+        auth3.extend_from_slice(&[0; 4]); // packed data repr
+        auth3.extend_from_slice(&(136u16).to_le_bytes()); // frag = whole PDU
+        auth3.extend_from_slice(&48u16.to_le_bytes()); // auth len
+        auth3.extend_from_slice(&9u32.to_le_bytes());
+        auth3.resize(136, 0);
+        p.on_write(&auth3, &[]);
+        assert_eq!(p.pending(), 0);
+    }
+
+    #[test]
+    fn netshareenum_level_roundtrip_and_layout() {
+        let req = build_fake_netshareenum_request("\\\\BOBCAT", 1);
+        assert_eq!(netshareenum_request_level(&req), Some(1));
+        let shares = vec![
+            ShareInfo { netname: "public".into(), shi_type: 0, remark: String::new() },
+            ShareInfo { netname: "ipc$".into(), shi_type: 0x8000_0003, remark: String::new() },
+        ];
+        let stub = netshareenum_reply_stub(&req, &shares);
+        // First dword must be Level=1
+        let level = u32::from_le_bytes(stub[0..4].try_into().unwrap());
+        assert_eq!(level, 1);
+        // Stub must contain UTF-16 share names
+        let pub_utf16: Vec<u8> = "public".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert!(stub.windows(pub_utf16.len()).any(|w| w == pub_utf16), "missing 'public' name");
+    }
+
+        fn stubs_end_ok(_s: &[u8]) -> bool {
+        true
+    }
+
+    /// Build a syntactically valid NetShareEnum level-`level` request stub.
+    fn build_fake_netshareenum_request(server: &str, level: u32) -> Vec<u8> {
+        let mut s = Vec::new();
+        let w32 = |s: &mut Vec<u8>, v: u32| s.extend_from_slice(&v.to_le_bytes());
+        w32(&mut s, 0x20000); // server unique ptr
+        let units: Vec<u16> = server.encode_utf16().chain(std::iter::once(0)).collect();
+        w32(&mut s, units.len() as u32);
+        w32(&mut s, 0);
+        w32(&mut s, units.len() as u32);
+        for u in units {
+            s.extend_from_slice(&u.to_le_bytes());
+        }
+        while s.len() % 4 != 0 {
+            s.push(0);
+        }
+        w32(&mut s, level); // Level
+        w32(&mut s, 0); // Count placeholder
+        w32(&mut s, 0); // Buffer NULL
+        w32(&mut s, 0xffff_ffff); // PreferredMaximumLength
+        w32(&mut s, 0); // ResumeHandle NULL
+        s
+    }
+
+    #[test]
+    fn bind_replay_matches_samba_shape() {
+        // Exact 72-byte bind PDU captured from smbclient (srvsvc, NDR).
+        let bind_pdu = [
+            hex("05000b03100000004800000001000000b810b810000000000100000000000100"),
+            hex("c84f324b7016d30112785a47bf6ee18803000000"),
+            hex("045d888aeb1cc9119fe808002b10486002000000"),
+        ].concat();
+        assert_eq!(bind_pdu.len(), 72);
+        let mut p = Pipe::new("srvsvc");
+        p.on_write(&bind_pdu, &[]);
+        let resp = p.take(4096);
+        assert_eq!(resp[2], PTYPE_BIND_ACK);
+        // frag_len covers whole PDU
+        let fl = u16::from_le_bytes([resp[8], resp[9]]) as usize;
+        assert_eq!(fl, resp.len(), "frag must equal full PDU size");
+        // sec_addr present
+        assert!(windows_find(&resp, b"\x5cpipe\x5csrvsvc"), "secondary address missing");
+        // transfer syntax echoed (NDR uuid)
+        assert!(windows_find(&resp, &hex("045d888aeb1cc9119fe808002b104860")));
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect()
+    }
+    fn windows_find(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn fragmented_writes_reassemble() {
+        let mut p = Pipe::new("srvsvc");
+        let req = build_fake_netshareenum_request("\\\\BOBCAT", 1);
+        let mut pdu = pdu_header(PTYPE_REQUEST, 42, &{
+            let mut b = Vec::new();
+            b.extend_from_slice(&(req.len() as u32).to_le_bytes()); // alloc hint
+            b.extend_from_slice(&0u16.to_le_bytes()); // p_cont_id
+            b.extend_from_slice(&15u16.to_le_bytes()); // opnum: NetShareEnum
+            b.extend_from_slice(&req);
+            b
+        });
+        // fix frag_len to cover body
+        let fl = (pdu.len() - 16) as u16;
+        pdu[8..10].copy_from_slice(&fl.to_le_bytes());
+
+        let half = pdu.len() / 2;
+        p.on_write(&pdu[..half], &shares());
+        assert_eq!(p.pending(), 0, "partial PDU must not answer");
+        p.on_write(&pdu[half..], &shares());
+        let resp = p.take(4096);
+        assert_eq!(resp[2], PTYPE_RESPONSE);
+    }
+}

@@ -52,6 +52,25 @@ pub struct ServerShared {
     pub encrypt: bool,
 }
 
+impl ServerShared {
+    /// Share table as advertised through srvsvc NetShareEnum level 1
+    /// ([MS-SRVS] §2.2.4.26): disk shares carry STYPE_DISK, the virtual
+    /// IPC$ share carries STYPE_IPC|STYPE_SPECIAL.
+    pub fn share_infos(&self) -> Vec<crate::srvsvc::ShareInfo> {
+        let mut v: Vec<crate::srvsvc::ShareInfo> = self
+            .shares
+            .values()
+            .map(|s| crate::srvsvc::ShareInfo {
+                netname: s.name.clone(),
+                shi_type: if s.is_ipc { 0x8000_0003 } else { 0 },
+                remark: String::new(),
+            })
+            .collect();
+        v.sort_by(|a, b| a.netname.cmp(&b.netname));
+        v
+    }
+}
+
 /// An authenticated SMB session (one UID).
 #[derive(Debug, Clone)]
 pub struct Session {
