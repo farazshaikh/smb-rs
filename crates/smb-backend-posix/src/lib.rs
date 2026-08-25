@@ -35,10 +35,13 @@ pub struct PosixVfs {
 /// Holds an io_uring [`File`], which is `!Send`; the handle therefore lives
 /// entirely on its connection's runtime and is never sent across threads.
 pub struct PosixInner {
-    /// Open io_uring file (None for directory handles).
+    /// Open io_uring file (None for directory and alternate-data-stream handles).
     pub file: Option<File>,
     /// Tracked cursor for SEEK support.
     pub pos: u64,
+    /// Alternate data stream name when this handle targets an ADS (stored in an
+    /// extended attribute on the base file), else `None` for the data stream.
+    pub stream: Option<String>,
 }
 
 impl std::fmt::Debug for PosixInner {
@@ -46,6 +49,7 @@ impl std::fmt::Debug for PosixInner {
         f.debug_struct("PosixInner")
             .field("open", &self.file.is_some())
             .field("pos", &self.pos)
+            .field("stream", &self.stream)
             .finish()
     }
 }
@@ -71,6 +75,118 @@ impl PosixVfs {
         }
         resolve_under(&self.root, path)
     }
+
+    /// Open or create an alternate data stream, backed by an extended attribute
+    /// on the base file. The base file's own data stream is never truncated
+    /// here; create/overwrite dispositions apply to the stream contents only.
+    async fn create_stream(
+        &self,
+        base_rel: &str,
+        sname: &str,
+        access: u32,
+        disposition: u32,
+        options: u32,
+    ) -> VfsResult<(Box<OpenFile>, FileMeta, u32)> {
+        const OPT_DELETE_ON_CLOSE: u32 = 0x1000;
+        let path = self.resolve(base_rel);
+
+        // Ensure the base file exists (streams cannot exist without it), never
+        // truncating its data stream.
+        let base_is_file = std::fs::symlink_metadata(&path).map(|m| !m.is_dir()).unwrap_or(false);
+        if !base_is_file {
+            match Disposition::from_u32(disposition) {
+                Some(Disposition::Open) | Some(Disposition::Overwrite) => return Err(VfsError::NotFound),
+                _ => {
+                    if let Some(parent) = path.parent() {
+                        let _ = tokio_uring::fs::create_dir_all(parent).await;
+                    }
+                    let f = OpenOptions::new().write(true).create(true).open(&path).await.map_err(map_io)?;
+                    let _ = f.close().await;
+                }
+            }
+        }
+
+        let xname = stream_xattr(sname);
+        let stream_exists = xattr::get(&path, &xname).ok().flatten().is_some();
+        let action = if stream_exists {
+            match Disposition::from_u32(disposition) {
+                Some(Disposition::Supersede) => {
+                    xattr::set(&path, &xname, b"").map_err(map_io)?;
+                    0
+                }
+                Some(Disposition::Overwrite) | Some(Disposition::OverwriteIf) => {
+                    xattr::set(&path, &xname, b"").map_err(map_io)?;
+                    3
+                }
+                Some(Disposition::Create) => return Err(VfsError::AlreadyExists),
+                _ => 1,
+            }
+        } else {
+            match Disposition::from_u32(disposition) {
+                Some(Disposition::Open) | Some(Disposition::Overwrite) => return Err(VfsError::NotFound),
+                _ => {
+                    xattr::set(&path, &xname, b"").map_err(map_io)?;
+                    2
+                }
+            }
+        };
+
+        let size = xattr::get(&path, &xname).ok().flatten().map(|v| v.len() as u64).unwrap_or(0);
+        let (read_access, write_access) = access_flags(access);
+        let md = std::fs::metadata(&path).map_err(map_io)?;
+        let mut m = meta_of(&md);
+        m.eof = size;
+        m.alloc = size;
+        let open = Box::new(OpenFile {
+            path: path.to_string_lossy().into_owned(),
+            rel: base_rel.to_string(),
+            is_dir: false,
+            can_read: read_access,
+            can_write: write_access,
+            delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
+            delete_pending: false,
+            inner: Box::new(PosixInner { file: None, pos: 0, stream: Some(sname.to_string()) }),
+        });
+        Ok((open, m, action))
+    }
+}
+
+/// Split an SMB path into `(base, Some(stream))` when it names an alternate
+/// data stream (`file:stream[:$DATA]`); the default data stream (`file` or
+/// `file::$DATA`) yields `(base, None)`. Only a colon in the final path
+/// component is considered.
+fn split_stream(rel: &str) -> (String, Option<String>) {
+    let (dir, last) = match rel.rfind(['\\', '/']) {
+        Some(i) => (&rel[..=i], &rel[i + 1..]),
+        None => ("", rel),
+    };
+    match last.find(':') {
+        None => (rel.to_string(), None),
+        Some(ci) => {
+            let base = &last[..ci];
+            let sname = last[ci + 1..].split(':').next().unwrap_or("");
+            let base_full = format!("{dir}{base}");
+            if sname.is_empty() {
+                (base_full, None)
+            } else {
+                (base_full, Some(sname.to_string()))
+            }
+        }
+    }
+}
+
+/// Extended-attribute name backing an alternate data stream.
+fn stream_xattr(name: &str) -> String {
+    format!("{STREAM_XATTR_PREFIX}{name}")
+}
+
+/// Decode an NT desired-access mask into `(read, write)` capability flags.
+fn access_flags(access: u32) -> (bool, bool) {
+    let read = access & (0x8000_0000 | 0x0000_0001 | 0x0000_0008 | 0x0000_0080 | 0x1000_0000) != 0;
+    let write = access
+        & (0x4000_0000 | 0x0000_0002 | 0x0000_0004 | 0x0001_0000 | 0x2000_0000 | 0x1000_0000)
+        != 0;
+    (read, write)
 }
 
 fn resolve_under(root: &std::path::Path, rel: &str) -> std::path::PathBuf {
@@ -172,6 +288,15 @@ impl Vfs for PosixVfs {
         const OPT_DIRECTORY_FILE: u32 = 0x1;
         const OPT_DELETE_ON_CLOSE: u32 = 0x1000;
 
+        // Alternate data streams (`file:stream:$DATA`) live in extended
+        // attributes on the base file; route them to a separate open path.
+        let (base_rel, stream) = split_stream(rel);
+        if let Some(sname) = stream {
+            return self
+                .create_stream(&base_rel, &sname, access, disposition, options)
+                .await;
+        }
+        let rel = base_rel.as_str();
         let path = self.resolve(rel);
         let want_dir = is_dir || options & OPT_DIRECTORY_FILE != 0;
         let existing = std::fs::symlink_metadata(&path).ok();
@@ -202,7 +327,7 @@ impl Vfs for PosixVfs {
                 can_write: false,
                 delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
                 delete_pending: false,
-                inner: Box::new(PosixInner { file: None, pos: 0 }),
+                inner: Box::new(PosixInner { file: None, pos: 0, stream: None }),
             });
             return Ok((open, meta_of(&md), action));
         }
@@ -227,11 +352,7 @@ impl Vfs for PosixVfs {
             (2, false, true)
         };
 
-        let read_access =
-            access & (0x8000_0000 | 0x0000_0001 | 0x0000_0008 | 0x0000_0080 | 0x1000_0000) != 0;
-        let write_access = access
-            & (0x4000_0000 | 0x0000_0002 | 0x0000_0004 | 0x0001_0000 | 0x2000_0000 | 0x1000_0000)
-            != 0;
+        let (read_access, write_access) = access_flags(access);
 
         let mut oo = OpenOptions::new();
         oo.read(read_access || !write_access);
@@ -253,13 +374,22 @@ impl Vfs for PosixVfs {
             can_write: write_access,
             delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
             delete_pending: false,
-            inner: Box::new(PosixInner { file: Some(file), pos: 0 }),
+            inner: Box::new(PosixInner { file: Some(file), pos: 0, stream: None }),
         });
         Ok((open, meta_of(&md), action))
     }
 
     async fn read(&self, open: &mut OpenFile, offset: u64, len: usize) -> VfsResult<Vec<u8>> {
         let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
+        if let Some(sname) = inner.stream.clone() {
+            let blob = xattr::get(self.resolve(&open.path), stream_xattr(&sname))
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let start = (offset as usize).min(blob.len());
+            let end = (start + len).min(blob.len());
+            return Ok(blob[start..end].to_vec());
+        }
         let f = inner.file.as_ref().ok_or(VfsError::AccessDenied)?;
         // io_uring positional read; the buffer round-trips through the kernel.
         let (res, mut buf) = f.read_at(vec![0u8; len], offset).await;
@@ -276,6 +406,19 @@ impl Vfs for PosixVfs {
         write_through: bool,
     ) -> VfsResult<u64> {
         let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
+        if let Some(sname) = inner.stream.clone() {
+            // Whole-value xattr: read-modify-write the stream blob at `offset`.
+            let p = self.resolve(&open.path);
+            let xname = stream_xattr(&sname);
+            let mut blob = xattr::get(&p, &xname).ok().flatten().unwrap_or_default();
+            let start = offset as usize;
+            if blob.len() < start + data.len() {
+                blob.resize(start + data.len(), 0);
+            }
+            blob[start..start + data.len()].copy_from_slice(data);
+            xattr::set(&p, &xname, &blob).map_err(map_io)?;
+            return Ok(data.len() as u64);
+        }
         let f = inner.file.as_ref().ok_or(VfsError::AccessDenied)?;
         let total = data.len();
         let (res, _buf) = f.write_all_at(data.to_vec(), offset).await;
@@ -313,6 +456,14 @@ impl Vfs for PosixVfs {
     }
 
     async fn close(&self, mut open: Box<OpenFile>) -> VfsResult<()> {
+        // Stream handles hold no io_uring file; delete-on-close removes the
+        // backing extended attribute, never the base file.
+        if let Some(sname) = open.inner_as_ref::<PosixInner>().and_then(|i| i.stream.clone()) {
+            if open.delete_on_close || open.delete_pending {
+                let _ = xattr::remove(self.resolve(&open.path), stream_xattr(&sname));
+            }
+            return Ok(());
+        }
         // Close the io_uring file explicitly (async close), then honor
         // delete-on-close.
         if let Some(inner) = open.inner_as_mut::<PosixInner>() {
@@ -488,11 +639,30 @@ impl Vfs for PosixVfs {
         }
         Ok(())
     }
+
+    async fn list_streams(&self, rel: &str) -> VfsResult<Vec<(String, u64)>> {
+        let p = self.resolve(rel);
+        let mut out = Vec::new();
+        if let Ok(names) = xattr::list(&p) {
+            for n in names {
+                let n = n.to_string_lossy();
+                if let Some(sname) = n.strip_prefix(STREAM_XATTR_PREFIX) {
+                    let size = xattr::get(&p, n.as_ref()).ok().flatten().map(|v| v.len() as u64).unwrap_or(0);
+                    out.push((format!(":{sname}:$DATA"), size));
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Extended-attribute name under which the raw NT security descriptor is kept
 /// (mirrors Samba's `security.NTACL`, but in the unprivileged `user.` namespace).
 const NTACL_XATTR: &str = "user.rustsmb.ntacl";
+
+/// Extended-attribute name prefix backing alternate data streams (mirrors
+/// Samba's `streams_xattr` module, in the unprivileged `user.` namespace).
+const STREAM_XATTR_PREFIX: &str = "user.rustsmb.stream.";
 
 #[cfg(test)]
 mod tests {
@@ -520,6 +690,49 @@ mod tests {
             let meta = vfs.stat(&open.path).await.expect("stat by stored handle path");
             assert_eq!(meta.eof, 6, "reported size matches file contents");
 
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    /// An alternate data stream (`file:stream:$DATA`) is created in an xattr,
+    /// round-trips read/write, is enumerated, and leaves the base data intact.
+    #[test]
+    fn ads_stream_round_trip() {
+        tokio_uring::start(async {
+            let dir = format!("target/it_ads_{}", std::process::id());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(format!("{dir}/host.txt"), b"base-data").unwrap();
+            let vfs = PosixVfs::new(&dir);
+
+            let payload = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+            // OVERWRITE_IF (5), GENERIC_WRITE.
+            let (mut s, _m, _a) = vfs
+                .create("host.txt:Zone.Identifier:$DATA", false, 0x4000_0000, 5, 0, 0)
+                .await
+                .expect("create stream");
+            vfs.write(&mut s, 0, payload, false).await.expect("write stream");
+            vfs.close(s).await.unwrap();
+
+            // FILE_OPEN (1), GENERIC_READ.
+            let (mut s2, m2, _a) = vfs
+                .create("host.txt:Zone.Identifier:$DATA", false, 0x8000_0000, 1, 0, 0)
+                .await
+                .expect("open stream");
+            assert_eq!(m2.eof, payload.len() as u64, "stream size reported");
+            let got = vfs.read(&mut s2, 0, 4096).await.expect("read stream");
+            assert_eq!(got, payload, "stream round-trips");
+            vfs.close(s2).await.unwrap();
+
+            let streams = vfs.list_streams("host.txt").await.expect("list");
+            assert!(
+                streams.iter().any(|(n, sz)| n == ":Zone.Identifier:$DATA" && *sz == payload.len() as u64),
+                "ADS enumerated: {streams:?}"
+            );
+            assert_eq!(
+                std::fs::read(format!("{dir}/host.txt")).unwrap(),
+                b"base-data",
+                "base data stream untouched",
+            );
             std::fs::remove_dir_all(&dir).ok();
         });
     }

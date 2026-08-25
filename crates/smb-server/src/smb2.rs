@@ -2105,6 +2105,15 @@ async fn query_info(
         c::info_type::FILE => {
             let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
             let m = vfs.stat(&h.path).await.map_err(vfs_err)?;
+            if req.class == info::file_class::STREAM {
+                // Default `::$DATA` data stream (files only) plus any ADS.
+                let mut streams = Vec::new();
+                if !m.is_dir {
+                    streams.push(("::$DATA".to_string(), m.eof));
+                }
+                streams.extend(vfs.list_streams(&h.path).await.map_err(vfs_err)?);
+                return Ok(Some(info::encode_stream_info(&streams)));
+            }
             let qm = info::QueryMeta::from_vfs(&m);
             let name = h
                 .rel

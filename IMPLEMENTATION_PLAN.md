@@ -282,7 +282,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | SET_INFO basic/eof/allocation/disposition/rename/position | §2.2.39/40 | complete | SetOp decode tests | rename/truncate flows | — | — | sets_total |
 | Security descriptors (query/set SECURITY) | [MS-FSCC] §2.4.6 | complete | SD build/filter + query/set round-trip tests | smbprotocol query→set→query ✅ | — | — | via win-sd crate |
 | Quota query/set | [MS-FSCC] §2.4.14 | planned | — | — | — | — | — |
-| Alternate data streams (enumerate/read/write) | [MS-FSCC] §2.6 | planned | stream VFS tests | ads copy | — | — | streams_io |
+| Alternate data streams (enumerate/read/write) | [MS-FSCC] §2.6 | complete | stream_info codec + backend round-trip tests | smbprotocol ADS write/read + FileStreamInformation enum ✅ | — | — | xattr-backed |
 | Case-insensitive resolution + path containment | backend | complete | posix resolve tests | case-twiddled opens | — | — | — |
 
 ### IOCTLs / FSCTL ([MS-SMB2] §2.2.31)

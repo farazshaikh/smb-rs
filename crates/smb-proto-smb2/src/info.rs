@@ -37,6 +37,8 @@ pub mod file_class {
     pub const ALIGNMENT: u8 = 0x11;
     /// FileAllInformation.
     pub const ALL: u8 = 0x12;
+    /// FileStreamInformation ([MS-FSCC] §2.4.40).
+    pub const STREAM: u8 = 0x16;
     /// FilePositionInformation.
     pub const POSITION: u8 = 0x0E;
     /// FileNetworkOpenInformation.
@@ -190,6 +192,31 @@ pub fn encode_file_info(class: u8, m: &QueryMeta, name: &str) -> Option<Vec<u8>>
         _ => return None,
     }
     Some(d.into_inner())
+}
+
+/// Encode a FILE_STREAM_INFORMATION chain ([MS-FSCC] §2.4.40) from a list of
+/// `(stream_name, size)` pairs. Names are the full SMB stream syntax, e.g.
+/// `::$DATA` for the default data stream or `:Zone.Identifier:$DATA` for an
+/// alternate data stream. An empty list yields an empty buffer (no streams).
+pub fn encode_stream_info(streams: &[(String, u64)]) -> Vec<u8> {
+    let mut d = Writer::new(0);
+    for (i, (name, size)) in streams.iter().enumerate() {
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let name_bytes = units.len() * 2;
+        // Entry = 24-byte fixed part + name, padded to an 8-byte boundary.
+        let entry_len = 24 + name_bytes;
+        let padded = entry_len.next_multiple_of(8);
+        let next = if i + 1 == streams.len() { 0 } else { padded };
+        d.push_u32(next as u32); // NextEntryOffset
+        d.push_u32(name_bytes as u32); // StreamNameLength
+        d.push_u64(*size); // StreamSize
+        d.push_u64(*size); // StreamAllocationSize
+        for u in units {
+            d.push_u16(u);
+        }
+        d.raw(&vec![0u8; padded - entry_len]);
+    }
+    d.into_inner()
 }
 
 /// Encode a QUERY_INFO filesystem payload for `class`.
@@ -354,4 +381,32 @@ pub fn encode_find_entries(entries: &[FindEntry], class: u8) -> Vec<u8> {
         }
     }
     buf
+}
+
+#[cfg(test)]
+mod stream_info_tests {
+    use super::*;
+
+    #[test]
+    fn encodes_default_plus_ads_chain() {
+        let streams = vec![
+            ("::$DATA".to_string(), 9u64),
+            (":Zone.Identifier:$DATA".to_string(), 26u64),
+        ];
+        let buf = encode_stream_info(&streams);
+        // First entry: NextEntryOffset != 0, name "::$DATA" (7 UTF-16 units).
+        let next0 = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        assert_ne!(next0, 0, "first entry links to the second");
+        assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 14, "::$DATA name bytes");
+        assert_eq!(u64::from_le_bytes(buf[8..16].try_into().unwrap()), 9, "default stream size");
+        assert_eq!(next0 % 8, 0, "entries are 8-byte aligned");
+        // Last entry's NextEntryOffset is zero.
+        let last = next0 as usize;
+        assert_eq!(u32::from_le_bytes(buf[last..last + 4].try_into().unwrap()), 0, "chain terminates");
+    }
+
+    #[test]
+    fn empty_list_is_empty_buffer() {
+        assert!(encode_stream_info(&[]).is_empty());
+    }
 }

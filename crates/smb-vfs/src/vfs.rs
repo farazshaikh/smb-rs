@@ -121,4 +121,12 @@ pub trait Vfs: Send + Sync {
         let _ = (rel, descriptor);
         Ok(())
     }
+
+    /// List the alternate data streams of `rel` as `(smb_stream_name, size)`
+    /// pairs (e.g. `:Zone.Identifier:$DATA`), excluding the default `::$DATA`
+    /// stream which the caller derives from the file size. Default: none.
+    async fn list_streams(&self, rel: &str) -> VfsResult<Vec<(String, u64)>> {
+        let _ = rel;
+        Ok(Vec::new())
+    }
 }
