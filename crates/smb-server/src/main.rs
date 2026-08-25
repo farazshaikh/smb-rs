@@ -84,6 +84,7 @@ async fn main() {
         encrypt: args.encrypt,
         locks: Arc::new(state::LockManager::new()),
         share_modes: Arc::new(state::ShareModeTable::new()),
+        oplocks: Arc::new(state::OplockTable::new()),
     });
 
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await {

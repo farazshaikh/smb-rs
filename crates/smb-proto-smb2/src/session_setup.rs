@@ -136,4 +136,6 @@ pub mod cmd {
     pub const QUERY_INFO: u16 = 16;
         /// Set Info command.
     pub const SET_INFO: u16 = 17;
+        /// Oplock break notification / acknowledgement.
+    pub const OPLOCK_BREAK: u16 = 18;
 }

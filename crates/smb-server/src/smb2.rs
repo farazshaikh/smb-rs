@@ -624,6 +624,7 @@ async fn process_single(
             close_all_handles(conn);
             server.locks.release_session(conn.session_id);
             server.share_modes.close_session(conn.session_id);
+            server.oplocks.release_session(conn.session_id);
             conn.trees.clear();
             conn.searches.clear();
             if conn.authenticated {
@@ -652,7 +653,7 @@ async fn process_single(
                         return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
                     }
                 };
-                match create(conn, vfs, &server.share_modes, buf).await {
+                match create(conn, vfs, server, hdr.is_signed(), buf).await {
                     Ok(body) => (Status::SUCCESS, body),
                     Err(status) => (status, Vec::new()),
                 }
@@ -707,6 +708,7 @@ async fn process_single(
                         if let Some((fid, path)) = close_path {
                             server.locks.release_owner((conn.session_id, fid));
                             server.share_modes.close(&path, (conn.session_id, fid));
+                            server.oplocks.release(&path, (conn.session_id, fid));
                         }
                         (Status::SUCCESS, body)
                     }
@@ -986,6 +988,12 @@ async fn process_single(
             return None;
         }
         ss::cmd::ECHO => (Status::SUCCESS, c::build_echo_resp()),
+        ss::cmd::OPLOCK_BREAK => match c::OplockBreakAck::parse(buf) {
+            // The holder acknowledges a break; we already downgraded on our
+            // side, so echo the settled level ([MS-SMB2] §3.3.5.22.2).
+            Some(ack) => (Status::SUCCESS, c::build_oplock_break_resp(ack.file_id, ack.level)),
+            None => (Status::INVALID_PARAMETER, Vec::new()),
+        },
         _ => (Status::NOT_IMPLEMENTED, Vec::new()),
     };
 
@@ -1603,7 +1611,8 @@ fn tree_connect(
 async fn create(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
-    share_modes: &crate::state::ShareModeTable,
+    server: &Arc<ServerShared>,
+    req_signed: bool,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::CreateReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
@@ -1633,11 +1642,13 @@ async fn create(
     open.delete_on_close |= req.options & OPT_DELETE_ON_CLOSE != 0;
 
     let fid_bytes = next_file_id();
+    let path = open.path.clone();
+    let is_dir = open.is_dir;
     // Sharing-violation check ([MS-FSA] §2.1.5.1): reject an open whose access
     // or share flags conflict with an existing open on the same file. Undo the
     // just-opened handle on rejection. Directories are not share-checked.
-    if !open.is_dir
-        && !share_modes.try_open(&open.path, req.desired_access, req.share_access, (conn.session_id, fid_bytes))
+    if !is_dir
+        && !server.share_modes.try_open(&path, req.desired_access, req.share_access, (conn.session_id, fid_bytes))
     {
         let _ = vfs.close(open).await;
         counter!("smb_sharing_violations_total").increment(1);
@@ -1648,7 +1659,38 @@ async fn create(
     conn.searches.remove(&fid_bytes);
     conn.handles.insert(fid_bytes, open);
 
-    tracing::debug!(name = %rel, eof = meta.eof, dir = meta.is_dir, action, "create");
+    // Oplock arbitration ([MS-SMB2] §2.2.23): grant an exclusive oplock only
+    // to the sole opener of a file. A contending open first breaks the current
+    // holder to NONE, then gets no oplock itself.
+    let wants_oplock = matches!(
+        req.oplock_level,
+        c::oplock::LEVEL_II | c::oplock::EXCLUSIVE | c::oplock::BATCH
+    );
+    let granted = if is_dir {
+        c::oplock::NONE
+    } else if server.share_modes.open_count(&path) > 1 {
+        if let Some(holder) = server.oplocks.take(&path) {
+            send_oplock_break(&holder, c::oplock::NONE);
+        }
+        c::oplock::NONE
+    } else if wants_oplock {
+        let holder = crate::state::OplockHolder {
+            session_id: conn.session_id,
+            file_id: fid_bytes,
+            outbound: conn.outbound.clone(),
+            crypto: break_crypto(conn, req_signed),
+        };
+        if server.oplocks.grant(&path, holder) {
+            counter!("smb_oplocks_granted_total").increment(1);
+            c::oplock::EXCLUSIVE
+        } else {
+            c::oplock::NONE
+        }
+    } else {
+        c::oplock::NONE
+    };
+
+    tracing::debug!(name = %rel, eof = meta.eof, dir = meta.is_dir, action, oplock = granted, "create");
     counter!("smb_creates_total").increment(1);
     Ok(c::build_create_resp(
         fid,
@@ -1658,7 +1700,70 @@ async fn create(
         meta.alloc,
         meta.eof,
         meta.is_dir,
+        granted,
     ))
+}
+
+/// Snapshot the crypto material needed to protect an oplock break sent later
+/// to this holder.
+fn break_crypto(conn: &Smb2Conn, signed: bool) -> crate::state::BreakCrypto {
+    crate::state::BreakCrypto {
+        dialect: conn.dialect,
+        signing_key: conn.signing_key.or(conn.session_key),
+        enc_keys: conn.enc_keys,
+        cipher: conn.cipher,
+        session_id: conn.session_id,
+        encrypt: conn.encrypt_data || conn.peer_encrypts,
+        signed,
+    }
+}
+
+/// Build, protect and enqueue an unsolicited OPLOCK_BREAK notification
+/// ([MS-SMB2] §2.2.23.1) telling `holder` to break down to `level`.
+fn send_oplock_break(holder: &crate::state::OplockHolder, level: u8) {
+    let body = c::build_oplock_break(c::FileId(holder.file_id), level);
+    let frame = finalize_break(&holder.crypto, build_break_frame(holder.crypto.session_id, &body));
+    if holder.outbound.try_send(frame).is_ok() {
+        counter!("smb_oplock_breaks_total").increment(1);
+    }
+}
+
+/// Build a server-initiated OPLOCK_BREAK frame (unsolicited: MessageId all-ones,
+/// sync header). Returned unsigned and unsealed.
+fn build_break_frame(session_id: u64, body: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(64 + body.len());
+    f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
+    f.extend_from_slice(&64u16.to_le_bytes()); // StructureSize
+    f.extend_from_slice(&0u16.to_le_bytes()); // CreditCharge
+    f.extend_from_slice(&0u32.to_le_bytes()); // Status
+    f.extend_from_slice(&ss::cmd::OPLOCK_BREAK.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes()); // CreditResponse
+    f.extend_from_slice(&1u32.to_le_bytes()); // Flags = SERVER_TO_REDIR
+    f.extend_from_slice(&0u32.to_le_bytes()); // NextCommand
+    f.extend_from_slice(&u64::MAX.to_le_bytes()); // MessageId (unsolicited)
+    f.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+    f.extend_from_slice(&0u32.to_le_bytes()); // TreeId
+    f.extend_from_slice(&session_id.to_le_bytes());
+    f.extend_from_slice(&[0u8; 16]); // Signature
+    f.extend_from_slice(body);
+    f
+}
+
+/// Sign/seal an oplock break for its holder, mirroring the request path order.
+fn finalize_break(crypto: &crate::state::BreakCrypto, mut frame: Vec<u8>) -> Vec<u8> {
+    if crypto.signed {
+        if let Some(key) = crypto.signing_key {
+            sign_pdu(&mut frame, &key, crypto.dialect);
+        }
+    }
+    if crypto.encrypt {
+        if let (Some(keys), Some(cipher)) = (crypto.enc_keys, crypto.cipher) {
+            if let Some(sealed) = seal_pdu(crypto.session_id, keys, cipher, &frame) {
+                return sealed;
+            }
+        }
+    }
+    frame
 }
 
 // ---------------- READ / WRITE / CLOSE / FLUSH ----------------
@@ -1774,6 +1879,7 @@ fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
         4096,
         0,
         false,
+        c::oplock::NONE,
     ))
 }
 
@@ -2270,6 +2376,104 @@ mod fsctl_tests {
             *b = 0;
         }
         assert_eq!(std::fs::read(dir.join("z.bin")).unwrap(), expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod oplock_tests {
+    use super::*;
+
+    fn server_with_share(dir: &std::path::Path) -> Arc<ServerShared> {
+        use crate::state::*;
+        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+        let mut shares = HashMap::new();
+        shares.insert(
+            "public".to_string(),
+            Share { name: "public".into(), root: dir.to_path_buf(), vfs, is_ipc: false },
+        );
+        Arc::new(ServerShared {
+            shares,
+            guid: [0; 16],
+            domain: "W".into(),
+            server_name: "R".into(),
+            users: HashMap::new(),
+            allow_guest: true,
+            require_signing: false,
+            encrypt: false,
+            locks: Arc::new(LockManager::new()),
+            share_modes: Arc::new(ShareModeTable::new()),
+            oplocks: Arc::new(OplockTable::new()),
+        })
+    }
+
+    fn create_request(name: &str, oplock: u8, access: u32, share: u32) -> Vec<u8> {
+        let name16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let name_off = 64 + 56; // header + fixed body
+        let mut body = vec![0u8; 56];
+        body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
+        body[3] = oplock; // RequestedOplockLevel
+        body[24..28].copy_from_slice(&access.to_le_bytes()); // DesiredAccess
+        body[32..36].copy_from_slice(&share.to_le_bytes()); // ShareAccess
+        body[36..40].copy_from_slice(&1u32.to_le_bytes()); // Disposition = OPEN
+        body[44..46].copy_from_slice(&(name_off as u16).to_le_bytes()); // NameOffset
+        body[46..48].copy_from_slice(&(name16.len() as u16).to_le_bytes()); // NameLength
+        let mut f = vec![0u8; 64];
+        f.extend_from_slice(&body);
+        f.extend_from_slice(&name16);
+        f
+    }
+
+    /// The sole opener requesting an oplock gets EXCLUSIVE; a second open on the
+    /// same file breaks that oplock (a break notification lands on the first
+    /// connection's outbound queue) and itself gets no oplock.
+    #[tokio::test]
+    async fn oplock_granted_then_broken_on_second_open() {
+        let dir = std::env::temp_dir().join(format!("rustsmb_op_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shared.bin"), b"data").unwrap();
+        let server = server_with_share(&dir);
+        let vfs = server.shares["public"].vfs.clone();
+
+        let access = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
+        let share = 0x7; // READ|WRITE|DELETE
+
+        let (tx_a, mut rx_a) = mpsc::channel(8);
+        let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
+        conn_a.session_id = 1;
+        let resp_a = create(
+            &mut conn_a,
+            vfs.clone(),
+            &server,
+            false,
+            &create_request("shared.bin", c::oplock::BATCH, access, share),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp_a[2], c::oplock::EXCLUSIVE, "sole opener granted exclusive");
+
+        let (tx_b, _rx_b) = mpsc::channel(8);
+        let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
+        conn_b.session_id = 2;
+        let resp_b = create(
+            &mut conn_b,
+            vfs.clone(),
+            &server,
+            false,
+            &create_request("shared.bin", c::oplock::NONE, access, share),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp_b[2], c::oplock::NONE, "contending open gets no oplock");
+
+        let brk = rx_a.try_recv().expect("break notification delivered to A");
+        assert_eq!(
+            u16::from_le_bytes([brk[12], brk[13]]),
+            ss::cmd::OPLOCK_BREAK,
+            "frame is an OPLOCK_BREAK",
+        );
+        assert_eq!(brk[64 + 2], c::oplock::NONE, "broken down to NONE");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

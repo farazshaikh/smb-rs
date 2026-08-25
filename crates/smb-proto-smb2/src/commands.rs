@@ -44,6 +44,8 @@ mod create_off {
 
     /// StructureSize (=57).
     pub const STRUCT: usize = BODY;
+    /// RequestedOplockLevel (1 byte, after the 1-byte SecurityFlags).
+    pub const OPLOCK_LEVEL: usize = BODY + 3;
     /// SecurityFlags(1) RequestedOplockLevel(1) BulkSecurity(4) — skip to:
     /// ImpersonationLevel.
     pub const IMPERSONATION: usize = BODY + 8;
@@ -86,6 +88,8 @@ pub struct CreateReq {
     pub options: u32,
     /// Object name relative to share root (empty = share root itself).
     pub name: String,
+    /// RequestedOplockLevel ([MS-SMB2] §2.2.13, [`oplock`]).
+    pub oplock_level: u8,
 }
 
 impl CreateReq {
@@ -114,8 +118,23 @@ impl CreateReq {
             disposition: g32(frame, create_off::DISPOSITION),
             options: g32(frame, create_off::OPTIONS),
             name: String::from_utf16_lossy(&units),
+            oplock_level: *frame.get(create_off::OPLOCK_LEVEL).unwrap_or(&0),
         })
     }
+}
+
+/// Oplock levels ([MS-SMB2] §2.2.13 / §2.2.14).
+pub mod oplock {
+    /// No oplock.
+    pub const NONE: u8 = 0x00;
+    /// Level II (shared, read caching).
+    pub const LEVEL_II: u8 = 0x01;
+    /// Exclusive.
+    pub const EXCLUSIVE: u8 = 0x08;
+    /// Batch.
+    pub const BATCH: u8 = 0x09;
+    /// A lease is requested instead of an oplock.
+    pub const LEASE: u8 = 0xFF;
 }
 
 /// Build CREATE response body (§2.2.14.1).
@@ -130,11 +149,12 @@ pub fn build_create_resp(
     alloc: u64,
     eof: u64,
     is_dir: bool,
+    oplock: u8,
 ) -> Vec<u8> {
     let _ = is_dir;
     let mut b = Vec::with_capacity(88);
     b.extend_from_slice(&89u16.to_le_bytes()); // StructureSize @0
-    b.push(0); // OplockLevel @2
+    b.push(oplock); // OplockLevel @2
     b.push(0); // Flags @3
     b.extend_from_slice(&action.to_le_bytes()); // CreateAction @4
     for t in &times {
@@ -149,6 +169,46 @@ pub fn build_create_resp(
     b.extend_from_slice(&0u32.to_le_bytes()); // CreateContextsLength @84
     debug_assert_eq!(b.len(), 88);
     b
+}
+
+/// Build an OPLOCK_BREAK notification body ([MS-SMB2] §2.2.23.1): a 24-byte
+/// structure telling the holder to break its oplock down to `new_level`.
+pub fn build_oplock_break(file_id: FileId, new_level: u8) -> Vec<u8> {
+    let mut b = Vec::with_capacity(24);
+    b.extend_from_slice(&24u16.to_le_bytes()); // StructureSize
+    b.push(new_level); // OplockLevel
+    b.push(0); // Reserved
+    b.extend_from_slice(&0u32.to_le_bytes()); // Reserved2
+    b.extend_from_slice(&file_id.0); // FileId
+    b
+}
+
+/// OPLOCK_BREAK acknowledgement/response body ([MS-SMB2] §2.2.24.2), echoing
+/// the level the holder settled on.
+pub fn build_oplock_break_resp(file_id: FileId, level: u8) -> Vec<u8> {
+    build_oplock_break(file_id, level)
+}
+
+/// Parsed OPLOCK_BREAK acknowledgement ([MS-SMB2] §2.2.24.1).
+#[derive(Debug)]
+pub struct OplockBreakAck {
+    /// Level the client has broken to.
+    pub level: u8,
+    /// Handle being acknowledged.
+    pub file_id: FileId,
+}
+
+impl OplockBreakAck {
+    /// Parse from the complete frame.
+    pub fn parse(frame: &[u8]) -> Option<OplockBreakAck> {
+        if frame.len() < BODY + 24 || g16(frame, BODY) != 24 {
+            return None;
+        }
+        Some(OplockBreakAck {
+            level: *frame.get(BODY + 2)?,
+            file_id: FileId(frame.get(BODY + 8..BODY + 24)?.try_into().ok()?),
+        })
+    }
 }
 
 // ---------------- READ (§2.2.19 / §2.2.19.1) ----------------
@@ -1304,5 +1364,34 @@ mod lock_tests {
         assert_eq!(req.locks.len(), 2);
         assert!(req.locks[0].shared && !req.locks[0].unlock);
         assert!(req.locks[1].unlock && !req.locks[1].shared);
+    }
+}
+
+#[cfg(test)]
+mod oplock_codec_tests {
+    use super::*;
+
+    #[test]
+    fn create_response_carries_oplock_level() {
+        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::EXCLUSIVE);
+        assert_eq!(body[2], oplock::EXCLUSIVE, "OplockLevel @2");
+    }
+
+    #[test]
+    fn oplock_break_notification_shape() {
+        let brk = build_oplock_break(FileId([9; 16]), oplock::NONE);
+        assert_eq!(brk.len(), 24);
+        assert_eq!(&brk[0..2], &24u16.to_le_bytes(), "StructureSize");
+        assert_eq!(brk[2], oplock::NONE, "OplockLevel");
+        assert_eq!(&brk[8..24], &[9u8; 16], "FileId");
+    }
+
+    #[test]
+    fn parses_oplock_break_ack() {
+        let mut frame = vec![0u8; BODY];
+        frame.extend_from_slice(&build_oplock_break(FileId([7; 16]), oplock::LEVEL_II));
+        let ack = OplockBreakAck::parse(&frame).expect("parse");
+        assert_eq!(ack.level, oplock::LEVEL_II);
+        assert_eq!(ack.file_id.0, [7; 16]);
     }
 }

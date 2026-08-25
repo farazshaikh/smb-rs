@@ -56,6 +56,9 @@ pub struct ServerShared {
     /// Server-wide open share-mode table for sharing-violation detection
     /// ([MS-FSA] §2.1.5.1).
     pub share_modes: Arc<ShareModeTable>,
+    /// Server-wide oplock table ([MS-SMB2] §2.2.23) — at most one exclusive
+    /// oplock per file, broken when a second open contends.
+    pub oplocks: Arc<OplockTable>,
 }
 
 /// Identifies the open that owns a byte-range lock: `(session_id, file_id)`.
@@ -224,6 +227,86 @@ impl ShareModeTable {
             list.retain(|e| e.owner.0 != session_id);
             !list.is_empty()
         });
+    }
+
+    /// Number of opens currently recorded for `path`.
+    pub fn open_count(&self, path: &str) -> usize {
+        self.opens.lock().unwrap().get(path).map_or(0, |l| l.len())
+    }
+}
+
+/// Crypto material needed to sign/seal an unsolicited oplock break for a
+/// holder, snapshotted at grant time (mirrors the async completion path).
+#[derive(Clone)]
+pub struct BreakCrypto {
+    /// Negotiated dialect.
+    pub dialect: Option<u16>,
+    /// Signing key, if the session signs.
+    pub signing_key: Option<[u8; 16]>,
+    /// (c2s, s2c) cipher keys, if a cipher is negotiated.
+    pub enc_keys: Option<([u8; 16], [u8; 16])>,
+    /// Negotiated cipher id.
+    pub cipher: Option<u16>,
+    /// Session id for the transform header.
+    pub session_id: u64,
+    /// Seal the break notification.
+    pub encrypt: bool,
+    /// Sign the break notification.
+    pub signed: bool,
+}
+
+/// A granted exclusive oplock and the means to break it.
+pub struct OplockHolder {
+    /// Session that holds the oplock.
+    pub session_id: u64,
+    /// File id the oplock is bound to (named in the break notification).
+    pub file_id: [u8; 16],
+    /// Outbound queue of the holder's connection, to push the break.
+    pub outbound: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// Crypto material to protect the break notification.
+    pub crypto: BreakCrypto,
+}
+
+/// Server-wide oplock table: at most one exclusive oplock per file path.
+#[derive(Default)]
+pub struct OplockTable {
+    held: std::sync::Mutex<HashMap<String, OplockHolder>>,
+}
+
+impl OplockTable {
+    /// Create an empty table.
+    pub fn new() -> Self {
+        Self { held: std::sync::Mutex::new(HashMap::new()) }
+    }
+
+    /// Grant an exclusive oplock on `path` if none is held.
+    pub fn grant(&self, path: &str, holder: OplockHolder) -> bool {
+        let mut held = self.held.lock().unwrap();
+        if held.contains_key(path) {
+            return false;
+        }
+        held.insert(path.to_string(), holder);
+        true
+    }
+
+    /// Remove and return the current holder of `path`, if any.
+    pub fn take(&self, path: &str) -> Option<OplockHolder> {
+        self.held.lock().unwrap().remove(path)
+    }
+
+    /// Drop the oplock held by `owner` on `path` (on close), returning it.
+    pub fn release(&self, path: &str, owner: LockOwner) -> Option<OplockHolder> {
+        let mut held = self.held.lock().unwrap();
+        if held.get(path).map(|h| (h.session_id, h.file_id)) == Some(owner) {
+            held.remove(path)
+        } else {
+            None
+        }
+    }
+
+    /// Drop every oplock held by any open of `session_id`.
+    pub fn release_session(&self, session_id: u64) {
+        self.held.lock().unwrap().retain(|_, h| h.session_id != session_id);
     }
 }
 

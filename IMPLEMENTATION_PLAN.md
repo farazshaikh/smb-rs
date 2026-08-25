@@ -254,7 +254,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | FLUSH | §2.2.17 | complete | — | — | — | — | flushes_total |
 | LOCK byte-range (enforced) | §2.2.26/27 | complete | conflict-matrix unit tests + lock-parse tests | two-client lock race (smbprotocol) ✅ | — | — | locks_granted ✅ |
 | Sharing-mode conflict detection | §3.3.5.10 | complete | share-mode matrix unit tests | two opens same file (smbprotocol) ✅ | — | violation line | sharing_violations ✅ |
-| Oplocks v1/v2 + break notification | [MS-SMB] §2.2.4.50, §2.2.24 | planned | break state machine | two-client cache race | oplock latency | break sent lines | breaks_sent |
+| Oplocks (exclusive) + break notification | [MS-SMB2] §2.2.23/24 | complete | grant+break integration test + codec tests | smbprotocol grant ✅ (break: server test) | oplock latency | break sent lines | oplock_breaks_total ✅ |
 | Leases v2/v3 (directory leases) | §2.2.23.2 | planned | lease table tests | explorer dir cache | — | lease key lines | leases_active |
 | Durable / persistent handles | §2.2.13.2.4–6 | planned | reconnect test | network-blip resume | — | — | durables_held |
 | Server-side COPYCHUNK (ODX offload) | §2.2.31.6 | complete | copychunk copy + limits integration tests | resume-key→copychunk between two handles | effective MB/s | copychunk debug | copychunk_bytes ✅ |
@@ -405,6 +405,15 @@ pending op and returns STATUS_CANCELLED on the original.
   `sharing_violations`.
 - **M2.3 Oplocks v1/v2 + leases v2/v3** (item 5): parse lease create-contexts;
   lease table; unsolicited break notifications (needs M2.1) + break-ack.
+  Status: **oplocks done; leases remaining.** Exclusive oplocks granted to the
+  sole opener (server-wide OplockTable); a contending open breaks the holder
+  with a signed/sealed unsolicited OPLOCK_BREAK notification via the async
+  writer and gets no oplock; OPLOCK_BREAK acks handled; oplocks released on
+  close/logoff/disconnect. Unit + grant/break integration tests; live
+  smbprotocol grant verified (smbprotocol has no break handling, so the break
+  itself is covered by the server integration test). Fixed nothing pre-existing.
+  Remaining: leases v2/v3 (SMB2_CREATE_REQUEST_LEASE contexts) — needs
+  create-context parse/build infrastructure, then a lease table + lease breaks.
 - **M2.4 FSCTL batch** (item 7, independent/synchronous): SRV_REQUEST_RESUME_KEY
   + COPYCHUNK(_WRITE) pair; SET_SPARSE + SET_ZERO_DATA via `fallocate` punch-hole.
   Status: **done** — resume-key registry, chunked server-side copy with
