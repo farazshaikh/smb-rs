@@ -146,6 +146,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                 server.locks.release_session(c2.session_id);
                 server.share_modes.close_session(c2.session_id);
                 server.oplocks.release_session(c2.session_id);
+                server.leases.release_session(c2.session_id);
             }
         }
     }

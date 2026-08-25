@@ -625,6 +625,7 @@ async fn process_single(
             server.locks.release_session(conn.session_id);
             server.share_modes.close_session(conn.session_id);
             server.oplocks.release_session(conn.session_id);
+            server.leases.release_session(conn.session_id);
             conn.trees.clear();
             conn.searches.clear();
             if conn.authenticated {
@@ -709,6 +710,7 @@ async fn process_single(
                             server.locks.release_owner((conn.session_id, fid));
                             server.share_modes.close(&path, (conn.session_id, fid));
                             server.oplocks.release(&path, (conn.session_id, fid));
+                            server.leases.release(&path, (conn.session_id, fid));
                         }
                         (Status::SUCCESS, body)
                     }
@@ -988,12 +990,27 @@ async fn process_single(
             return None;
         }
         ss::cmd::ECHO => (Status::SUCCESS, c::build_echo_resp()),
-        ss::cmd::OPLOCK_BREAK => match c::OplockBreakAck::parse(buf) {
-            // The holder acknowledges a break; we already downgraded on our
-            // side, so echo the settled level ([MS-SMB2] §3.3.5.22.2).
-            Some(ack) => (Status::SUCCESS, c::build_oplock_break_resp(ack.file_id, ack.level)),
-            None => (Status::INVALID_PARAMETER, Vec::new()),
-        },
+        ss::cmd::OPLOCK_BREAK => {
+            // Command 18 carries both oplock (StructureSize 24) and lease
+            // (StructureSize 36) break acknowledgements; dispatch on the size.
+            let ss = u16::from_le_bytes([*buf.get(64).unwrap_or(&0), *buf.get(65).unwrap_or(&0)]);
+            if ss == 36 {
+                match c::LeaseBreakAck::parse(buf) {
+                    Some(ack) => {
+                        server.leases.set_state(ack.key, ack.state);
+                        (Status::SUCCESS, c::build_lease_break_resp(ack.key, ack.state))
+                    }
+                    None => (Status::INVALID_PARAMETER, Vec::new()),
+                }
+            } else {
+                match c::OplockBreakAck::parse(buf) {
+                    // The holder acknowledges a break; we already downgraded on
+                    // our side, so echo the settled level ([MS-SMB2] §3.3.5.22.2).
+                    Some(ack) => (Status::SUCCESS, c::build_oplock_break_resp(ack.file_id, ack.level)),
+                    None => (Status::INVALID_PARAMETER, Vec::new()),
+                }
+            }
+        }
         _ => (Status::NOT_IMPLEMENTED, Vec::new()),
     };
 
@@ -1666,8 +1683,18 @@ async fn create(
         req.oplock_level,
         c::oplock::LEVEL_II | c::oplock::EXCLUSIVE | c::oplock::BATCH
     );
+    // A lease request (RequestedOplockLevel = LEASE + an RqLs context) uses the
+    // lease path; leases and oplocks are arbitrated independently.
+    let mut lease_grant: Option<c::LeaseResp> = None;
     let granted = if is_dir {
         c::oplock::NONE
+    } else if req.oplock_level == c::oplock::LEASE {
+        if let Some(lr) = req.lease {
+            lease_grant = Some(arbitrate_lease(server, conn, &path, fid_bytes, &lr, req_signed));
+            c::oplock::LEASE
+        } else {
+            c::oplock::NONE
+        }
     } else if server.share_modes.open_count(&path) > 1 {
         if let Some(holder) = server.oplocks.take(&path) {
             send_oplock_break(&holder, c::oplock::NONE);
@@ -1690,7 +1717,10 @@ async fn create(
         c::oplock::NONE
     };
 
-    tracing::debug!(name = %rel, eof = meta.eof, dir = meta.is_dir, action, oplock = granted, "create");
+    tracing::debug!(
+        name = %rel, eof = meta.eof, dir = meta.is_dir, action,
+        oplock = granted, lease = ?lease_grant.map(|l| l.state), "create"
+    );
     counter!("smb_creates_total").increment(1);
     Ok(c::build_create_resp(
         fid,
@@ -1701,8 +1731,67 @@ async fn create(
         meta.eof,
         meta.is_dir,
         granted,
+        lease_grant,
     ))
 }
+
+/// Arbitrate a caching lease for a lease-requesting CREATE ([MS-SMB2]
+/// §2.2.13.2). The sole opener gets the requested state (capped at RWH); an
+/// open reusing the same lease key shares the existing state; an open with a
+/// different key strips write caching from the current holder (RWH -> RH) via
+/// an unsolicited LEASE_BREAK and is itself granted read/handle caching.
+fn arbitrate_lease(
+    server: &Arc<ServerShared>,
+    conn: &Smb2Conn,
+    path: &str,
+    fid: [u8; 16],
+    lr: &c::LeaseReq,
+    signed: bool,
+) -> c::LeaseResp {
+    let requested = lr.state & c::lease::RWH;
+    if let Some((key, state, epoch, v2)) = server.leases.peek(path) {
+        if key == lr.key {
+            return c::LeaseResp { key: lr.key, state, flags: 0, epoch, v2 };
+        }
+        let new_state = state & c::lease::RH;
+        if let Some((hkey, old, nepoch, outbound, crypto)) = server.leases.downgrade(path, new_state) {
+            send_lease_break(&outbound, &crypto, hkey, old, new_state, nepoch);
+        }
+        let grant = requested & c::lease::RH;
+        return c::LeaseResp { key: lr.key, state: grant, flags: 0, epoch: lr.epoch, v2: lr.v2 };
+    }
+    let holder = crate::state::LeaseHolder {
+        key: lr.key,
+        state: requested,
+        epoch: lr.epoch,
+        v2: lr.v2,
+        session_id: conn.session_id,
+        file_id: fid,
+        outbound: conn.outbound.clone(),
+        crypto: break_crypto(conn, signed),
+    };
+    server.leases.grant(path, holder);
+    counter!("smb_leases_granted_total").increment(1);
+    c::LeaseResp { key: lr.key, state: requested, flags: 0, epoch: lr.epoch, v2: lr.v2 }
+}
+
+/// Build, protect and enqueue an unsolicited LEASE_BREAK notification
+/// ([MS-SMB2] §2.2.23.2) asking a holder to drop from `current` to `new`.
+fn send_lease_break(
+    outbound: &mpsc::Sender<Vec<u8>>,
+    crypto: &crate::state::BreakCrypto,
+    key: [u8; 16],
+    current: u32,
+    new: u32,
+    epoch: u16,
+) {
+    let body = c::build_lease_break(key, current, new, epoch, c::lease::BREAK_FLAG_ACK_REQUIRED);
+    let frame = finalize_break(crypto, build_break_frame(crypto.session_id, &body));
+    if outbound.try_send(frame).is_ok() {
+        counter!("smb_lease_breaks_total").increment(1);
+    }
+}
+
 
 /// Snapshot the crypto material needed to protect an oplock break sent later
 /// to this holder.
@@ -1880,6 +1969,7 @@ fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
         0,
         false,
         c::oplock::NONE,
+        None,
     ))
 }
 
@@ -2414,6 +2504,7 @@ mod oplock_tests {
             locks: Arc::new(LockManager::new()),
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
+            leases: Arc::new(LeaseTable::new()),
         })
     }
 
@@ -2489,3 +2580,176 @@ mod oplock_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    use crate::state::*;
+    use std::collections::HashMap;
+
+    fn server_with_share(dir: &std::path::Path) -> Arc<ServerShared> {
+        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+        let mut shares = HashMap::new();
+        shares.insert(
+            "public".to_string(),
+            Share { name: "public".into(), root: dir.to_path_buf(), vfs, is_ipc: false },
+        );
+        Arc::new(ServerShared {
+            shares,
+            guid: [0; 16],
+            domain: "W".into(),
+            server_name: "R".into(),
+            users: HashMap::new(),
+            allow_guest: true,
+            require_signing: false,
+            encrypt: false,
+            locks: Arc::new(LockManager::new()),
+            share_modes: Arc::new(ShareModeTable::new()),
+            oplocks: Arc::new(OplockTable::new()),
+            leases: Arc::new(LeaseTable::new()),
+        })
+    }
+
+    /// Build a CREATE request that requests a v1 lease via an `RqLs` context.
+    fn create_request_lease(name: &str, key: [u8; 16], state: u32, access: u32, share: u32) -> Vec<u8> {
+        let name16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let name_off = 64 + 56; // header + fixed body
+        let name_end = name_off + name16.len();
+        let pad = (8 - (name_end % 8)) % 8; // 8-byte align the context
+        let ctx_off = name_end + pad;
+
+        let mut ctx = Vec::new();
+        ctx.extend_from_slice(&0u32.to_le_bytes()); // Next
+        ctx.extend_from_slice(&16u16.to_le_bytes()); // NameOffset
+        ctx.extend_from_slice(&4u16.to_le_bytes()); // NameLength
+        ctx.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        ctx.extend_from_slice(&24u16.to_le_bytes()); // DataOffset
+        ctx.extend_from_slice(&32u32.to_le_bytes()); // DataLength (v1)
+        ctx.extend_from_slice(c::lease::CONTEXT_NAME);
+        ctx.extend_from_slice(&[0u8; 4]); // pad to 24
+        ctx.extend_from_slice(&key);
+        ctx.extend_from_slice(&state.to_le_bytes());
+        ctx.extend_from_slice(&0u32.to_le_bytes()); // flags
+        ctx.extend_from_slice(&0u64.to_le_bytes()); // duration
+
+        let mut body = vec![0u8; 56];
+        body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
+        body[3] = c::oplock::LEASE; // RequestedOplockLevel
+        body[24..28].copy_from_slice(&access.to_le_bytes());
+        body[32..36].copy_from_slice(&share.to_le_bytes());
+        body[36..40].copy_from_slice(&1u32.to_le_bytes()); // Disposition = OPEN
+        body[44..46].copy_from_slice(&(name_off as u16).to_le_bytes());
+        body[46..48].copy_from_slice(&(name16.len() as u16).to_le_bytes());
+        body[48..52].copy_from_slice(&(ctx_off as u32).to_le_bytes());
+        body[52..56].copy_from_slice(&(ctx.len() as u32).to_le_bytes());
+
+        let mut f = vec![0u8; 64];
+        f.extend_from_slice(&body);
+        f.extend_from_slice(&name16);
+        f.extend(std::iter::repeat(0u8).take(pad));
+        f.extend_from_slice(&ctx);
+        f
+    }
+
+    /// Read the granted LeaseState out of a CREATE response body's `RqLs`
+    /// context: fixed body 88 + ctx header 24 + LeaseKey 16 = offset 128.
+    fn granted_state(resp: &[u8]) -> u32 {
+        u32::from_le_bytes(resp[128..132].try_into().unwrap())
+    }
+
+    /// The sole lease requester gets its full requested state (RWH); a second
+    /// open with a *different* lease key breaks the holder's write caching down
+    /// to RH (an unsolicited LEASE_BREAK lands on the first connection) and the
+    /// contender is granted RH.
+    #[test]
+    fn lease_granted_then_broken_on_second_key() {
+        tokio_uring::start(async {
+        let dir = std::env::temp_dir().join(format!("rustsmb_ls_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("leased.bin"), b"data").unwrap();
+        let server = server_with_share(&dir);
+        let vfs = server.shares["public"].vfs.clone();
+
+        let access = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
+        let share = 0x7; // READ|WRITE|DELETE
+        let k1 = [0x11u8; 16];
+        let k2 = [0x22u8; 16];
+
+        let (tx_a, mut rx_a) = mpsc::channel(8);
+        let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
+        conn_a.session_id = 1;
+        let resp_a = create(
+            &mut conn_a,
+            vfs.clone(),
+            &server,
+            false,
+            &create_request_lease("leased.bin", k1, c::lease::RWH, access, share),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp_a[2], c::oplock::LEASE, "response is a lease grant");
+        assert_eq!(granted_state(&resp_a), c::lease::RWH, "sole opener gets RWH");
+
+        let (tx_b, _rx_b) = mpsc::channel(8);
+        let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
+        conn_b.session_id = 2;
+        let resp_b = create(
+            &mut conn_b,
+            vfs.clone(),
+            &server,
+            false,
+            &create_request_lease("leased.bin", k2, c::lease::RWH, access, share),
+        )
+        .await
+        .unwrap();
+        assert_eq!(granted_state(&resp_b), c::lease::RH, "contender gets read+handle");
+
+        let brk = rx_a.try_recv().expect("lease break delivered to A");
+        assert_eq!(
+            u16::from_le_bytes([brk[12], brk[13]]),
+            ss::cmd::OPLOCK_BREAK,
+            "break rides the OPLOCK_BREAK command",
+        );
+        assert_eq!(u16::from_le_bytes([brk[64], brk[65]]), 44, "lease-break StructureSize");
+        assert_eq!(&brk[72..88], &k1, "names holder A's lease key");
+        assert_eq!(u32::from_le_bytes(brk[88..92].try_into().unwrap()), c::lease::RWH, "current");
+        assert_eq!(u32::from_le_bytes(brk[92..96].try_into().unwrap()), c::lease::RH, "new");
+
+        std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    /// Reopening with the *same* lease key shares the existing state and emits
+    /// no break notification.
+    #[test]
+    fn same_lease_key_reopen_does_not_break() {
+        tokio_uring::start(async {
+        let dir = std::env::temp_dir().join(format!("rustsmb_ls2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.bin"), b"data").unwrap();
+        let server = server_with_share(&dir);
+        let vfs = server.shares["public"].vfs.clone();
+        let access = 0x8000_0000 | 0x4000_0000;
+        let share = 0x7;
+        let key = [0x55u8; 16];
+
+        let (tx_a, mut rx_a) = mpsc::channel(8);
+        let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
+        conn_a.session_id = 1;
+        let _ = create(&mut conn_a, vfs.clone(), &server, false,
+            &create_request_lease("f.bin", key, c::lease::RWH, access, share)).await.unwrap();
+
+        let (tx_b, _rx_b) = mpsc::channel(8);
+        let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
+        conn_b.session_id = 2;
+        let resp_b = create(&mut conn_b, vfs.clone(), &server, false,
+            &create_request_lease("f.bin", key, c::lease::RWH, access, share)).await.unwrap();
+
+        assert_eq!(granted_state(&resp_b), c::lease::RWH, "same key keeps RWH");
+        assert!(rx_a.try_recv().is_err(), "no break for same lease key");
+
+        std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+}
+

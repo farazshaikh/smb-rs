@@ -90,6 +90,81 @@ pub struct CreateReq {
     pub name: String,
     /// RequestedOplockLevel ([MS-SMB2] §2.2.13, [`oplock`]).
     pub oplock_level: u8,
+    /// Parsed `RqLs` lease create-context, if the client requested a lease.
+    pub lease: Option<LeaseReq>,
+}
+
+/// Requested lease from an `SMB2_CREATE_REQUEST_LEASE`(`_V2`) context
+/// ([MS-SMB2] §2.2.13.2.8 / §2.2.13.2.10).
+#[derive(Debug, Clone, Copy)]
+pub struct LeaseReq {
+    /// Client-chosen lease key identifying the shared caching state.
+    pub key: [u8; 16],
+    /// Requested lease state ([`lease`] caching bits).
+    pub state: u32,
+    /// Lease flags.
+    pub flags: u32,
+    /// Parent lease key (v2 only; zero otherwise).
+    pub parent_key: [u8; 16],
+    /// Lease epoch (v2 only; zero otherwise).
+    pub epoch: u16,
+    /// True when the context was the v2 (52-byte) form.
+    pub v2: bool,
+}
+
+impl LeaseReq {
+    /// Parse the lease context data blob (32 bytes v1, 52 bytes v2).
+    fn parse_data(d: &[u8]) -> Option<LeaseReq> {
+        if d.len() < 32 {
+            return None;
+        }
+        let v2 = d.len() >= 52;
+        Some(LeaseReq {
+            key: d.get(0..16)?.try_into().ok()?,
+            state: u32::from_le_bytes(d.get(16..20)?.try_into().ok()?),
+            flags: u32::from_le_bytes(d.get(20..24)?.try_into().ok()?),
+            parent_key: if v2 {
+                d.get(32..48)?.try_into().ok()?
+            } else {
+                [0u8; 16]
+            },
+            epoch: if v2 {
+                u16::from_le_bytes(d.get(48..50)?.try_into().ok()?)
+            } else {
+                0
+            },
+            v2,
+        })
+    }
+}
+
+/// Locate the `RqLs` lease context in a CREATE request's create-context chain
+/// ([MS-SMB2] §2.2.13.2) and parse it.
+fn parse_lease_context(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option<LeaseReq> {
+    if ctx_len == 0 || ctx_off < BODY {
+        return None;
+    }
+    let mut pos = ctx_off;
+    let end = (ctx_off + ctx_len).min(frame.len());
+    loop {
+        if pos + 16 > end {
+            return None;
+        }
+        let next = g32(frame, pos) as usize;
+        let name_off = g16(frame, pos + 4) as usize;
+        let name_len = g16(frame, pos + 6) as usize;
+        let data_off = g16(frame, pos + 10) as usize;
+        let data_len = g32(frame, pos + 12) as usize;
+        let name = frame.get(pos + name_off..pos + name_off + name_len);
+        if name == Some(lease::CONTEXT_NAME) {
+            let data = frame.get(pos + data_off..(pos + data_off + data_len).min(frame.len()))?;
+            return LeaseReq::parse_data(data);
+        }
+        if next == 0 {
+            return None;
+        }
+        pos += next;
+    }
 }
 
 impl CreateReq {
@@ -111,6 +186,8 @@ impl CreateReq {
             .map(|c| c[0] as u16 | ((c[1] as u16) << 8))
             .take_while(|&u| u != 0)
             .collect();
+        let ctx_off = g32(frame, create_off::CTX_OFFSET) as usize;
+        let ctx_len = g32(frame, create_off::CTX_LENGTH) as usize;
         Some(CreateReq {
             desired_access: g32(frame, create_off::DESIRED_ACCESS),
             attrs: g32(frame, create_off::ATTRIBUTES),
@@ -119,6 +196,7 @@ impl CreateReq {
             options: g32(frame, create_off::OPTIONS),
             name: String::from_utf16_lossy(&units),
             oplock_level: *frame.get(create_off::OPLOCK_LEVEL).unwrap_or(&0),
+            lease: parse_lease_context(frame, ctx_off, ctx_len),
         })
     }
 }
@@ -137,9 +215,72 @@ pub mod oplock {
     pub const LEASE: u8 = 0xFF;
 }
 
+/// Lease caching-state bits and constants ([MS-SMB2] §2.2.13.2.8).
+pub mod lease {
+    /// No caching.
+    pub const NONE: u32 = 0x00;
+    /// Read caching.
+    pub const READ_CACHING: u32 = 0x01;
+    /// Handle caching.
+    pub const HANDLE_CACHING: u32 = 0x02;
+    /// Write caching.
+    pub const WRITE_CACHING: u32 = 0x04;
+    /// Read + handle (the level a write-caching lease breaks down to).
+    pub const RH: u32 = READ_CACHING | HANDLE_CACHING;
+    /// Read + write + handle (full lease).
+    pub const RWH: u32 = READ_CACHING | WRITE_CACHING | HANDLE_CACHING;
+    /// Create-context tag for `SMB2_CREATE_REQUEST_LEASE`.
+    pub const CONTEXT_NAME: &[u8] = b"RqLs";
+    /// Break-notification flag demanding a lease-break acknowledgement.
+    pub const BREAK_FLAG_ACK_REQUIRED: u32 = 0x01;
+}
+
+
+/// Granted lease returned in a CREATE response `RqLs` context.
+#[derive(Debug, Clone, Copy)]
+pub struct LeaseResp {
+    /// Lease key echoed back to the client.
+    pub key: [u8; 16],
+    /// Granted lease state ([`lease`] bits).
+    pub state: u32,
+    /// Lease flags.
+    pub flags: u32,
+    /// Lease epoch (v2 only).
+    pub epoch: u16,
+    /// Emit the v2 (52-byte) form.
+    pub v2: bool,
+}
+
+/// Encode a lease `RqLs` create-context (chain terminator) for a CREATE
+/// response ([MS-SMB2] §2.2.13.2 wrapper around §2.2.13.2.8/§2.2.13.2.10).
+fn encode_lease_context(l: &LeaseResp) -> Vec<u8> {
+    let data_len: usize = if l.v2 { 52 } else { 32 };
+    let mut c = Vec::with_capacity(24 + data_len);
+    c.extend_from_slice(&0u32.to_le_bytes()); // Next = 0 (last)
+    c.extend_from_slice(&16u16.to_le_bytes()); // NameOffset
+    c.extend_from_slice(&4u16.to_le_bytes()); // NameLength
+    c.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    c.extend_from_slice(&24u16.to_le_bytes()); // DataOffset
+    c.extend_from_slice(&(data_len as u32).to_le_bytes()); // DataLength
+    c.extend_from_slice(lease::CONTEXT_NAME); // Name "RqLs" @16
+    c.extend_from_slice(&[0u8; 4]); // pad to DataOffset 24
+    c.extend_from_slice(&l.key); // LeaseKey
+    c.extend_from_slice(&l.state.to_le_bytes()); // LeaseState
+    c.extend_from_slice(&l.flags.to_le_bytes()); // LeaseFlags
+    c.extend_from_slice(&0u64.to_le_bytes()); // LeaseDuration
+    if l.v2 {
+        c.extend_from_slice(&[0u8; 16]); // ParentLeaseKey
+        c.extend_from_slice(&l.epoch.to_le_bytes()); // Epoch
+        c.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    }
+    c
+}
+
 /// Build CREATE response body (§2.2.14.1).
 ///
 /// Fixed part is 88 bytes; the FileId sits after `Reserved2` at offset 64.
+/// When `lease` is `Some`, an `RqLs` create-context is appended and the
+/// context offset/length fields point at it (offset is header-relative).
 #[allow(clippy::too_many_arguments)]
 pub fn build_create_resp(
     file_id: FileId,
@@ -150,9 +291,17 @@ pub fn build_create_resp(
     eof: u64,
     is_dir: bool,
     oplock: u8,
+    lease: Option<LeaseResp>,
 ) -> Vec<u8> {
     let _ = is_dir;
-    let mut b = Vec::with_capacity(88);
+    let ctx = lease.as_ref().map(encode_lease_context).unwrap_or_default();
+    // Contexts follow the 88-byte fixed body, at header-relative offset 152.
+    let (ctx_off, ctx_len) = if ctx.is_empty() {
+        (0u32, 0u32)
+    } else {
+        ((BODY + 88) as u32, ctx.len() as u32)
+    };
+    let mut b = Vec::with_capacity(88 + ctx.len());
     b.extend_from_slice(&89u16.to_le_bytes()); // StructureSize @0
     b.push(oplock); // OplockLevel @2
     b.push(0); // Flags @3
@@ -165,11 +314,13 @@ pub fn build_create_resp(
     b.extend_from_slice(&attrs.to_le_bytes()); // FileAttributes @56
     b.extend_from_slice(&0u32.to_le_bytes()); // Reserved2 @60
     b.extend_from_slice(&file_id.0); // FileId @64..80
-    b.extend_from_slice(&0u32.to_le_bytes()); // CreateContextsOffset @80
-    b.extend_from_slice(&0u32.to_le_bytes()); // CreateContextsLength @84
+    b.extend_from_slice(&ctx_off.to_le_bytes()); // CreateContextsOffset @80
+    b.extend_from_slice(&ctx_len.to_le_bytes()); // CreateContextsLength @84
     debug_assert_eq!(b.len(), 88);
+    b.extend_from_slice(&ctx);
     b
 }
+
 
 /// Build an OPLOCK_BREAK notification body ([MS-SMB2] §2.2.23.1): a 24-byte
 /// structure telling the holder to break its oplock down to `new_level`.
@@ -210,6 +361,61 @@ impl OplockBreakAck {
         })
     }
 }
+
+/// Build a LEASE_BREAK notification body ([MS-SMB2] §2.2.23.2): a 44-byte
+/// structure asking the holder of `key` to drop from `current` to `new` state.
+pub fn build_lease_break(key: [u8; 16], current: u32, new: u32, epoch: u16, flags: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(44);
+    b.extend_from_slice(&44u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&epoch.to_le_bytes()); // NewEpoch
+    b.extend_from_slice(&flags.to_le_bytes()); // Flags
+    b.extend_from_slice(&key); // LeaseKey
+    b.extend_from_slice(&current.to_le_bytes()); // CurrentLeaseState
+    b.extend_from_slice(&new.to_le_bytes()); // NewLeaseState
+    b.extend_from_slice(&0u32.to_le_bytes()); // BreakReason
+    b.extend_from_slice(&0u32.to_le_bytes()); // AccessMaskHint
+    b.extend_from_slice(&0u32.to_le_bytes()); // ShareMaskHint
+    debug_assert_eq!(b.len(), 44);
+    b
+}
+
+/// LEASE_BREAK response body ([MS-SMB2] §2.2.24.2): a 36-byte structure echoing
+/// the state the holder settled on.
+pub fn build_lease_break_resp(key: [u8; 16], state: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(36);
+    b.extend_from_slice(&36u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    b.extend_from_slice(&0u32.to_le_bytes()); // Flags
+    b.extend_from_slice(&key); // LeaseKey
+    b.extend_from_slice(&state.to_le_bytes()); // LeaseState
+    b.extend_from_slice(&0u64.to_le_bytes()); // LeaseDuration
+    debug_assert_eq!(b.len(), 36);
+    b
+}
+
+/// Parsed LEASE_BREAK acknowledgement ([MS-SMB2] §2.2.24.1), distinguished from
+/// an oplock-break ack by its StructureSize of 36.
+#[derive(Debug)]
+pub struct LeaseBreakAck {
+    /// Lease key being acknowledged.
+    pub key: [u8; 16],
+    /// State the client has broken to.
+    pub state: u32,
+}
+
+impl LeaseBreakAck {
+    /// Parse from the complete frame.
+    pub fn parse(frame: &[u8]) -> Option<LeaseBreakAck> {
+        if frame.len() < BODY + 36 || g16(frame, BODY) != 36 {
+            return None;
+        }
+        Some(LeaseBreakAck {
+            key: frame.get(BODY + 8..BODY + 24)?.try_into().ok()?,
+            state: g32(frame, BODY + 24),
+        })
+    }
+}
+
 
 // ---------------- READ (§2.2.19 / §2.2.19.1) ----------------
 
@@ -1373,8 +1579,9 @@ mod oplock_codec_tests {
 
     #[test]
     fn create_response_carries_oplock_level() {
-        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::EXCLUSIVE);
+        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::EXCLUSIVE, None);
         assert_eq!(body[2], oplock::EXCLUSIVE, "OplockLevel @2");
+        assert_eq!(&body[80..84], &0u32.to_le_bytes(), "no contexts");
     }
 
     #[test]
@@ -1395,3 +1602,95 @@ mod oplock_codec_tests {
         assert_eq!(ack.file_id.0, [7; 16]);
     }
 }
+
+#[cfg(test)]
+mod lease_codec_tests {
+    use super::*;
+
+    /// Wrap a lease data blob in a `RqLs` create-context inside a full CREATE
+    /// request frame and confirm the parser recovers it.
+    fn create_with_lease(key: [u8; 16], state: u32, v2: bool) -> Vec<u8> {
+        let data_len = if v2 { 52usize } else { 32 };
+        let mut ctx = Vec::new();
+        ctx.extend_from_slice(&0u32.to_le_bytes()); // Next
+        ctx.extend_from_slice(&16u16.to_le_bytes()); // NameOffset
+        ctx.extend_from_slice(&4u16.to_le_bytes()); // NameLength
+        ctx.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        ctx.extend_from_slice(&24u16.to_le_bytes()); // DataOffset
+        ctx.extend_from_slice(&(data_len as u32).to_le_bytes()); // DataLength
+        ctx.extend_from_slice(lease::CONTEXT_NAME);
+        ctx.extend_from_slice(&[0u8; 4]); // pad to 24
+        ctx.extend_from_slice(&key);
+        ctx.extend_from_slice(&state.to_le_bytes());
+        ctx.extend_from_slice(&0u32.to_le_bytes()); // flags
+        ctx.extend_from_slice(&0u64.to_le_bytes()); // duration
+        if v2 {
+            ctx.extend_from_slice(&[0u8; 16]); // parent key
+            ctx.extend_from_slice(&7u16.to_le_bytes()); // epoch
+            ctx.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        }
+
+        let mut f = vec![0u8; BODY];
+        let mut body = vec![0u8; 56];
+        body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
+        body[3] = oplock::LEASE; // RequestedOplockLevel
+        let ctx_off = BODY + 56;
+        body[48..52].copy_from_slice(&(ctx_off as u32).to_le_bytes()); // CTX offset
+        body[52..56].copy_from_slice(&(ctx.len() as u32).to_le_bytes()); // CTX length
+        f.extend_from_slice(&body);
+        f.extend_from_slice(&ctx);
+        f
+    }
+
+    #[test]
+    fn parses_lease_v1_context() {
+        let frame = create_with_lease([0x11; 16], lease::RWH, false);
+        let req = CreateReq::parse(&frame).expect("parse");
+        let l = req.lease.expect("lease context present");
+        assert_eq!(l.key, [0x11; 16]);
+        assert_eq!(l.state, lease::RWH);
+        assert!(!l.v2);
+    }
+
+    #[test]
+    fn parses_lease_v2_context() {
+        let frame = create_with_lease([0x22; 16], lease::RH, true);
+        let l = CreateReq::parse(&frame).unwrap().lease.expect("lease");
+        assert!(l.v2);
+        assert_eq!(l.epoch, 7);
+        assert_eq!(l.state, lease::RH);
+    }
+
+    #[test]
+    fn create_response_appends_lease_context() {
+        let grant = LeaseResp { key: [0x33; 16], state: lease::RH, flags: 0, epoch: 1, v2: true };
+        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::LEASE, Some(grant));
+        assert_eq!(body[2], oplock::LEASE, "OplockLevel = lease");
+        let off = u32::from_le_bytes(body[80..84].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(body[84..88].try_into().unwrap()) as usize;
+        assert_eq!(off, BODY + 88, "context offset header-relative");
+        assert_eq!(len, 24 + 52, "v2 context length");
+        // Context sits right after the 88-byte fixed part; name tag "RqLs".
+        assert_eq!(&body[88 + 16..88 + 20], lease::CONTEXT_NAME);
+    }
+
+    #[test]
+    fn lease_break_notification_shape() {
+        let brk = build_lease_break([9; 16], lease::RWH, lease::RH, 2, lease::BREAK_FLAG_ACK_REQUIRED);
+        assert_eq!(brk.len(), 44);
+        assert_eq!(&brk[0..2], &44u16.to_le_bytes(), "StructureSize");
+        assert_eq!(&brk[8..24], &[9u8; 16], "LeaseKey");
+        assert_eq!(u32::from_le_bytes(brk[24..28].try_into().unwrap()), lease::RWH, "Current");
+        assert_eq!(u32::from_le_bytes(brk[28..32].try_into().unwrap()), lease::RH, "New");
+    }
+
+    #[test]
+    fn parses_lease_break_ack() {
+        let mut frame = vec![0u8; BODY];
+        frame.extend_from_slice(&build_lease_break_resp([7; 16], lease::RH));
+        let ack = LeaseBreakAck::parse(&frame).expect("parse");
+        assert_eq!(ack.key, [7; 16]);
+        assert_eq!(ack.state, lease::RH);
+    }
+}
+

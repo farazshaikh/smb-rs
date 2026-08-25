@@ -84,6 +84,7 @@ fn main() {
         locks: Arc::new(state::LockManager::new()),
         share_modes: Arc::new(state::ShareModeTable::new()),
         oplocks: Arc::new(state::OplockTable::new()),
+        leases: Arc::new(state::LeaseTable::new()),
     });
 
     // Single-threaded io_uring runtime: all networking and file I/O run on

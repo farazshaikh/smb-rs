@@ -255,7 +255,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | LOCK byte-range (enforced) | §2.2.26/27 | complete | conflict-matrix unit tests + lock-parse tests | two-client lock race (smbprotocol) ✅ | — | — | locks_granted ✅ |
 | Sharing-mode conflict detection | §3.3.5.10 | complete | share-mode matrix unit tests | two opens same file (smbprotocol) ✅ | — | violation line | sharing_violations ✅ |
 | Oplocks (exclusive) + break notification | [MS-SMB2] §2.2.23/24 | complete | grant+break integration test + codec tests | smbprotocol grant ✅ (break: server test) | oplock latency | break sent lines | oplock_breaks_total ✅ |
-| Leases v2/v3 (directory leases) | §2.2.23.2 | planned | lease table tests | explorer dir cache | — | lease key lines | leases_active |
+| Leases v2/v3 (file leases) | §2.2.23.2 | complete | lease codec tests + grant/break integration tests | smbprotocol lease grant ✅ (break: server test) | — | lease grant/break lines | leases_granted_total ✅ |
 | Durable / persistent handles | §2.2.13.2.4–6 | planned | reconnect test | network-blip resume | — | — | durables_held |
 | Server-side COPYCHUNK (ODX offload) | §2.2.31.6 | complete | copychunk copy + limits integration tests | resume-key→copychunk between two handles | effective MB/s | copychunk debug | copychunk_bytes ✅ |
 | ZERO_DATA / SET_SPARSE | §2.2.31.12/14 | complete | zero_range integration test | punches/zeros a range | — | — | zeroed_bytes ✅ |
@@ -405,15 +405,21 @@ pending op and returns STATUS_CANCELLED on the original.
   `sharing_violations`.
 - **M2.3 Oplocks v1/v2 + leases v2/v3** (item 5): parse lease create-contexts;
   lease table; unsolicited break notifications (needs M2.1) + break-ack.
-  Status: **oplocks done; leases remaining.** Exclusive oplocks granted to the
+  Status: **done.** Exclusive oplocks granted to the
   sole opener (server-wide OplockTable); a contending open breaks the holder
   with a signed/sealed unsolicited OPLOCK_BREAK notification via the async
   writer and gets no oplock; OPLOCK_BREAK acks handled; oplocks released on
-  close/logoff/disconnect. Unit + grant/break integration tests; live
-  smbprotocol grant verified (smbprotocol has no break handling, so the break
-  itself is covered by the server integration test). Fixed nothing pre-existing.
-  Remaining: leases v2/v3 (SMB2_CREATE_REQUEST_LEASE contexts) — needs
-  create-context parse/build infrastructure, then a lease table + lease breaks.
+  close/logoff/disconnect. Leases: CREATE `RqLs` create-context parse/build
+  (v1 32-byte + v2 52-byte), a server-wide `LeaseTable` keyed by path, RWH
+  granted to the sole opener, a contending open with a different lease key
+  gets an unsolicited LEASE_BREAK downgrading the holder to RH (ack dispatched
+  by StructureSize 36 on the shared OPLOCK_BREAK command), same-key reopen
+  shares state without breaking, leases released on close/logoff/disconnect.
+  Unit codec + grant/break integration tests; live smbprotocol lease grant
+  verified (0x07 RWH). Simplifications (documented in `state.rs`): a single
+  primary holder is tracked per path and leases/oplocks are arbitrated
+  independently. Metric `leases_granted_total`, `lease_breaks_total`.
+
 - **M2.4 FSCTL batch** (item 7, independent/synchronous): SRV_REQUEST_RESUME_KEY
   + COPYCHUNK(_WRITE) pair; SET_SPARSE + SET_ZERO_DATA via `fallocate` punch-hole.
   Status: **done** — resume-key registry, chunked server-side copy with

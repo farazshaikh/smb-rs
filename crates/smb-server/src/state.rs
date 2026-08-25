@@ -59,6 +59,9 @@ pub struct ServerShared {
     /// Server-wide oplock table ([MS-SMB2] §2.2.23) — at most one exclusive
     /// oplock per file, broken when a second open contends.
     pub oplocks: Arc<OplockTable>,
+    /// Server-wide lease table ([MS-SMB2] §2.2.23.2) — one caching lease per
+    /// file path, broken down when an open with a different lease key contends.
+    pub leases: Arc<LeaseTable>,
 }
 
 /// Identifies the open that owns a byte-range lock: `(session_id, file_id)`.
@@ -309,6 +312,112 @@ impl OplockTable {
         self.held.lock().unwrap().retain(|_, h| h.session_id != session_id);
     }
 }
+
+/// A granted caching lease and the means to break it ([MS-SMB2] §2.2.23.2).
+pub struct LeaseHolder {
+    /// Client-chosen lease key identifying the shared caching state.
+    pub key: [u8; 16],
+    /// Currently granted lease state (caching bits).
+    pub state: u32,
+    /// Lease epoch (v2), bumped on each downgrade.
+    pub epoch: u16,
+    /// True when the holder negotiated the v2 lease form.
+    pub v2: bool,
+    /// Session that holds the lease.
+    pub session_id: u64,
+    /// File id the lease was granted on (for per-open release).
+    pub file_id: [u8; 16],
+    /// Outbound queue of the holder's connection, to push the break.
+    pub outbound: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// Crypto material to protect the break notification.
+    pub crypto: BreakCrypto,
+}
+
+/// Server-wide lease table: at most one primary lease holder per file path.
+///
+/// Simplified relative to [MS-SMB2] §3.3.1.10: a single holder is tracked per
+/// path (the one that may need breaking), and leases are managed independently
+/// of oplocks. This is sufficient for the common single-writer caching case.
+#[derive(Default)]
+pub struct LeaseTable {
+    held: std::sync::Mutex<HashMap<String, LeaseHolder>>,
+}
+
+impl LeaseTable {
+    /// Create an empty table.
+    pub fn new() -> Self {
+        Self { held: std::sync::Mutex::new(HashMap::new()) }
+    }
+
+    /// Grant a lease on `path` if none is held; returns false if one exists.
+    pub fn grant(&self, path: &str, holder: LeaseHolder) -> bool {
+        let mut held = self.held.lock().unwrap();
+        if held.contains_key(path) {
+            return false;
+        }
+        held.insert(path.to_string(), holder);
+        true
+    }
+
+    /// Snapshot the current holder's identity/state on `path`, if any:
+    /// `(key, state, epoch, v2)`.
+    pub fn peek(&self, path: &str) -> Option<([u8; 16], u32, u16, bool)> {
+        self.held
+            .lock()
+            .unwrap()
+            .get(path)
+            .map(|h| (h.key, h.state, h.epoch, h.v2))
+    }
+
+    /// Break the write-caching bit of the holder on `path` down to `new_state`,
+    /// returning a clone of the notification-relevant fields when a break is
+    /// actually needed (state changed). Bumps the stored epoch and state.
+    pub fn downgrade(
+        &self,
+        path: &str,
+        new_state: u32,
+    ) -> Option<(
+        [u8; 16],
+        u32,
+        u16,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        BreakCrypto,
+    )> {
+        let mut held = self.held.lock().unwrap();
+        let h = held.get_mut(path)?;
+        if h.state == new_state {
+            return None;
+        }
+        let old = h.state;
+        h.state = new_state;
+        h.epoch = h.epoch.wrapping_add(1);
+        Some((h.key, old, h.epoch, h.outbound.clone(), h.crypto.clone()))
+    }
+
+    /// Record the state a holder settled on after acknowledging a break.
+    pub fn set_state(&self, key: [u8; 16], state: u32) {
+        let mut held = self.held.lock().unwrap();
+        if let Some(h) = held.values_mut().find(|h| h.key == key) {
+            h.state = state;
+        }
+    }
+
+    /// Drop the lease held by `owner` on `path` (on close), returning it.
+    pub fn release(&self, path: &str, owner: LockOwner) -> Option<LeaseHolder> {
+        let mut held = self.held.lock().unwrap();
+        if held.get(path).map(|h| (h.session_id, h.file_id)) == Some(owner) {
+            held.remove(path)
+        } else {
+            None
+        }
+    }
+
+    /// Drop every lease held by any open of `session_id`.
+    pub fn release_session(&self, session_id: u64) {
+        self.held.lock().unwrap().retain(|_, h| h.session_id != session_id);
+    }
+}
+
 
 /// Windows share-mode access bits ([MS-SMB2] §2.2.13).
 mod amask {
