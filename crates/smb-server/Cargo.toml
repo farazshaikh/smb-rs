@@ -33,3 +33,4 @@ smb-auth = { path = "../smb-auth", default-features = false }
 ms-ndr = "0.1.1"
 inotify.workspace = true
 futures-util.workspace = true
+win-sd.workspace = true

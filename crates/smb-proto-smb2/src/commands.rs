@@ -781,6 +781,8 @@ pub struct QueryInfoReq {
     pub class: u8,
     /// Maximum bytes the client accepts in the output buffer.
     pub output_len: u32,
+    /// AdditionalInformation (SECURITY_INFORMATION mask for SECURITY queries).
+    pub additional: u32,
     /// Target handle (FILE info type only).
     pub file_id: FileId,
     /// Raw input buffer (rename source path etc.), may be empty.
@@ -804,6 +806,7 @@ impl QueryInfoReq {
             info_type: *frame.get(qinfo_off::INFO_TYPE)?,
             class: *frame.get(qinfo_off::CLASS)?,
             output_len: g32(frame, qinfo_off::OUTPUT_LEN),
+            additional: g32(frame, qinfo_off::ADDITIONAL),
             file_id: FileId(frame.get(qinfo_off::FILE_ID..qinfo_off::FILE_ID + 16)?.try_into().ok()?),
             input,
         })
@@ -842,6 +845,8 @@ pub struct SetInfoReq {
     pub info_type: u8,
     /// File/Fs information class.
     pub class: u8,
+    /// AdditionalInformation (SECURITY_INFORMATION mask for SECURITY sets).
+    pub additional: u32,
     /// Target handle.
     pub file_id: FileId,
     /// Raw info-class payload buffer.
@@ -864,6 +869,7 @@ impl SetInfoReq {
         Some(SetInfoReq {
             info_type: *frame.get(sinfo_off::INFO_TYPE)?,
             class: *frame.get(sinfo_off::CLASS)?,
+            additional: g32(frame, sinfo_off::ADDITIONAL),
             file_id: FileId(frame.get(sinfo_off::FILE_ID..sinfo_off::FILE_ID + 16)?.try_into().ok()?),
             buffer,
         })

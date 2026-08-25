@@ -25,6 +25,9 @@ use tokio_uring::fs::{File, OpenOptions};
 #[derive(Debug)]
 pub struct PosixVfs {
     root: std::path::PathBuf,
+    /// In-memory NT-ACL fallback for filesystems without user xattr support,
+    /// keyed by resolved absolute path. xattr storage is attempted first.
+    sd_cache: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<u8>>>,
 }
 
 /// Backend-private state attached to every open handle.
@@ -56,7 +59,7 @@ impl PosixVfs {
         // `./share`) the stored `./share/foo` would otherwise be treated as
         // share-relative on stat/set_info and double-prefix the root.
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        PosixVfs { root }
+        PosixVfs { root, sd_cache: std::sync::Mutex::new(std::collections::HashMap::new()) }
     }
 
     fn resolve(&self, path: &str) -> std::path::PathBuf {
@@ -467,7 +470,29 @@ impl Vfs for PosixVfs {
         // Static values keep clients happy; real statvfs wiring can come later.
         Ok((100_000, 50_000, 512, 64))
     }
+
+    async fn get_security(&self, rel: &str) -> VfsResult<Option<Vec<u8>>> {
+        let p = self.resolve(rel);
+        if let Ok(Some(bytes)) = xattr::get(&p, NTACL_XATTR) {
+            return Ok(Some(bytes));
+        }
+        Ok(self.sd_cache.lock().unwrap().get(&p).cloned())
+    }
+
+    async fn set_security(&self, rel: &str, descriptor: &[u8]) -> VfsResult<()> {
+        let p = self.resolve(rel);
+        // Persist to an extended attribute when the filesystem supports it;
+        // otherwise fall back to the in-memory cache so the round-trip holds.
+        if xattr::set(&p, NTACL_XATTR, descriptor).is_err() {
+            self.sd_cache.lock().unwrap().insert(p, descriptor.to_vec());
+        }
+        Ok(())
+    }
 }
+
+/// Extended-attribute name under which the raw NT security descriptor is kept
+/// (mirrors Samba's `security.NTACL`, but in the unprivileged `user.` namespace).
+const NTACL_XATTR: &str = "user.rustsmb.ntacl";
 
 #[cfg(test)]
 mod tests {

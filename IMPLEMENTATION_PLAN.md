@@ -280,7 +280,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | QUERY_INFO FS levels (volume/size/device/attr/full-size) | [MS-FSCC] §2.5 | complete | fs encode test | df via smbclient | — | — | — |
 | FileAllInformation 8-byte embedded-struct alignment | [MS-FSCC] §2.4.1 | complete | size+offset asserts | size reported correctly | — | — | — |
 | SET_INFO basic/eof/allocation/disposition/rename/position | §2.2.39/40 | complete | SetOp decode tests | rename/truncate flows | — | — | sets_total |
-| Security descriptors (query/set SECURITY) | [MS-FSCC] §2.4.6 | planned | SD parse tests | acl view/edit | — | — | sd_ops |
+| Security descriptors (query/set SECURITY) | [MS-FSCC] §2.4.6 | complete | SD build/filter + query/set round-trip tests | smbprotocol query→set→query ✅ | — | — | via win-sd crate |
 | Quota query/set | [MS-FSCC] §2.4.14 | planned | — | — | — | — | — |
 | Alternate data streams (enumerate/read/write) | [MS-FSCC] §2.6 | planned | stream VFS tests | ads copy | — | — | streams_io |
 | Case-insensitive resolution + path containment | backend | complete | posix resolve tests | case-twiddled opens | — | — | — |
@@ -441,8 +441,43 @@ regression suite alongside M2.1.
 7. FSCTL batch: SRV_REQUEST_RESUME_KEY, COPYCHUNK, ZERO_DATA/SET_SPARSE.
 
 ### M3 — Completeness & hardening
-8. Security-descriptor stubs, quota stubs, ADS in VFS, 8.3 short names.
-9. Compression capability (LZNT1/PATTERN_V1).
-10. Multichannel + session binding; durable handles.
-11. cargo-fuzz parser targets, cross-client stress harness, Windows soak,
-    criterion benches wired into CI.
+
+Close the remaining practical [MS-SMB2] / [MS-FSCC] surface a standalone
+Windows/macOS/Linux client exercises. Prefer existing crates for marshalling
+(`ms-ndr`, `windows-acl`/`sddl` parsing where viable) and crypto (`RustCrypto`
+suites already vendored via `smb-csp`) over hand-rolled codecs.
+
+8. **Metadata/VFS completeness**
+   - Security descriptors: QUERY/SET_INFO `SECURITY` ([MS-FSCC] §2.4.6,
+     [MS-DTYP] §2.4.6 SECURITY_DESCRIPTOR). Marshal via a self-describing
+     `SECURITY_DESCRIPTOR`/`ACL`/`SID` codec; expose owner/group/DACL in VFS.
+   - Alternate data streams: enumerate/read/write ([MS-FSCC] §2.6); VFS stream
+     handles backed by a naming convention or xattrs.
+   - Quota query/set ([MS-FSCC] §2.4.14) — report-only stubs acceptable first.
+   - 8.3 short-name generation/matching ([MS-FSCC] §2.1.5).
+   - QUERY_DIRECTORY resume-by-index `INDEX_SPECIFIED` (§2.2.33.1).
+9. **Compression** — SMB3 compression capability (LZNT1 / PATTERN_V1) via the
+   `SMB2_COMPRESSION_CAPABILITIES` negotiate context + compressed transform
+   (§2.2.42). Use an existing LZNT1 crate if one exists; else a reviewed impl.
+10. **Advanced handles/connections**
+    - Durable / persistent handles (§2.2.13.2.3–6, DH2Q/DH2C create contexts).
+    - Multichannel + session binding (SMB2_SESSION_FLAG_BINDING).
+    - DFS referrals + `FSCTL_DFS_GET_REFERRALS` (§2.2.31.1) referral response.
+    - `FSCTL_PIPE_WAIT` real wait (currently a stub ack).
+11. **QA / hardening** (no protocol code)
+    - cargo-fuzz parser targets, cross-client concurrency stress harness,
+      Windows-client soak, criterion benches wired into CI.
+
+### M4 — Optional / clustered companion specs
+
+Out-of-scope for a standalone server; each is a separate MS spec and most
+production single-node servers never ship them. Tracked here for completeness.
+
+12. **SMB Direct / RDMA** ([MS-SMBD]) — RDMA transport + credit/SMBDirect
+    framing. Needs RDMA-capable NICs and a Rust RDMA binding.
+13. **Witness protocol** ([MS-SWN]) — cluster resource-change notification RPC.
+14. **Continuous availability** — persistent handles backed by a clustered,
+    crash-consistent handle store (beyond M3's single-node durable handles).
+15. **Full DFS namespace server** ([MS-DFSC]) — namespace hosting beyond the
+    M3 referral-response path.
+

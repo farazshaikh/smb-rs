@@ -106,4 +106,19 @@ pub trait Vfs: Send + Sync {
         }
         Ok(())
     }
+
+    /// Fetch the raw self-relative NT security descriptor stored for `rel`
+    /// ([MS-DTYP] §2.4.6), or `None` when the backend has none (the caller then
+    /// synthesises a default). Default backends store nothing.
+    async fn get_security(&self, rel: &str) -> VfsResult<Option<Vec<u8>>> {
+        let _ = rel;
+        Ok(None)
+    }
+
+    /// Persist a raw self-relative NT security descriptor for `rel`. Default
+    /// backends accept and discard it (no ACL storage).
+    async fn set_security(&self, rel: &str, descriptor: &[u8]) -> VfsResult<()> {
+        let _ = (rel, descriptor);
+        Ok(())
+    }
 }

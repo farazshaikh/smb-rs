@@ -2119,7 +2119,22 @@ async fn query_info(
         c::info_type::FS => {
             info::encode_fs_info(req.class).map(Some).ok_or(Status::NOT_IMPLEMENTED)
         }
-        _ => Ok(None), // SECURITY / QUOTA unsupported for now
+        c::info_type::SECURITY => {
+            let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+            let stored = vfs.get_security(&h.path).await.map_err(vfs_err)?;
+            let additional = if req.additional == 0 {
+                crate::security::sec_info::DEFAULT
+            } else {
+                req.additional
+            };
+            let sd = crate::security::query_security(stored.as_deref(), additional)
+                .ok_or(Status::INVALID_PARAMETER)?;
+            if (req.output_len as usize) < sd.len() {
+                return Err(Status::BUFFER_TOO_SMALL);
+            }
+            Ok(Some(sd))
+        }
+        _ => Ok(None), // QUOTA unsupported for now
     }
 }
 
@@ -2142,6 +2157,10 @@ async fn set_info(
                 return Err(Status::INVALID_HANDLE);
             };
             vfs.set_info_open(h, &op).await.map_err(vfs_err)
+        }
+        c::info_type::SECURITY => {
+            let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+            vfs.set_security(&h.path, &req.buffer).await.map_err(vfs_err)
         }
         _ => Err(Status::NOT_IMPLEMENTED),
     }
@@ -2749,6 +2768,111 @@ mod lease_tests {
         assert!(rx_a.try_recv().is_err(), "no break for same lease key");
 
         std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use win_sd::{AccessMask, SecurityDescriptor, SecurityDescriptorBuilder, Sid};
+
+    fn query_info_frame(info_type: u8, class: u8, output_len: u32, additional: u32, fid: [u8; 16]) -> Vec<u8> {
+        let mut b = vec![0u8; 40];
+        b[0..2].copy_from_slice(&41u16.to_le_bytes()); // StructureSize
+        b[2] = info_type;
+        b[3] = class;
+        b[4..8].copy_from_slice(&output_len.to_le_bytes());
+        b[16..20].copy_from_slice(&additional.to_le_bytes()); // AdditionalInformation
+        b[24..40].copy_from_slice(&fid); // FileId
+        let mut f = vec![0u8; 64];
+        f.extend_from_slice(&b);
+        f
+    }
+
+    fn set_info_frame(info_type: u8, class: u8, additional: u32, fid: [u8; 16], buffer: &[u8]) -> Vec<u8> {
+        let mut b = vec![0u8; 32];
+        b[0..2].copy_from_slice(&33u16.to_le_bytes()); // StructureSize
+        b[2] = info_type;
+        b[3] = class;
+        b[4..8].copy_from_slice(&(buffer.len() as u32).to_le_bytes()); // BufferLength
+        b[8..10].copy_from_slice(&((64 + 32) as u16).to_le_bytes()); // BufferOffset (absolute)
+        b[12..16].copy_from_slice(&additional.to_le_bytes()); // AdditionalInformation
+        b[16..32].copy_from_slice(&fid); // FileId
+        let mut f = vec![0u8; 64];
+        f.extend_from_slice(&b);
+        f.extend_from_slice(buffer);
+        f
+    }
+
+    /// A fresh file yields a synthesised default descriptor; setting a custom
+    /// descriptor and querying it back round-trips through the backend store.
+    #[test]
+    fn security_query_set_round_trip() {
+        tokio_uring::start(async {
+            let dir = std::env::temp_dir().join(format!("rustsmb_sec_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("sec.bin"), b"data").unwrap();
+            let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(&dir));
+            let (tx, _rx) = mpsc::channel(8);
+            let mut conn = Smb2Conn::new([0u8; 8], tx);
+            let (open, _m, _a) = vfs
+                .create("sec.bin", false, 0x8000_0000 | 0x4000_0000, 1, 0, 0)
+                .await
+                .unwrap();
+            let fid = [1u8; 16];
+            conn.handles.insert(fid, open);
+
+            // Default query: parseable, DACL present.
+            let q = query_info_frame(c::info_type::SECURITY, 0, 4096, crate::security::sec_info::DEFAULT, fid);
+            let out = query_info(&mut conn, vfs.clone(), &q).await.unwrap().unwrap();
+            let sd = SecurityDescriptor::from_bytes(&out).expect("default parse");
+            assert!(sd.dacl().is_some(), "default DACL present");
+
+            // Set a custom descriptor, then read the owner back.
+            let custom = SecurityDescriptorBuilder::new()
+                .owner(Sid::local_system())
+                .allow(Sid::everyone(), AccessMask::FILE_GENERIC_READ)
+                .build()
+                .to_bytes()
+                .unwrap();
+            let s = set_info_frame(
+                c::info_type::SECURITY,
+                0,
+                crate::security::sec_info::OWNER | crate::security::sec_info::DACL,
+                fid,
+                &custom,
+            );
+            set_info(&mut conn, vfs.clone(), &s).await.expect("set security");
+
+            let q2 = query_info_frame(c::info_type::SECURITY, 0, 4096, crate::security::sec_info::OWNER, fid);
+            let out2 = query_info(&mut conn, vfs.clone(), &q2).await.unwrap().unwrap();
+            let sd2 = SecurityDescriptor::from_bytes(&out2).expect("stored parse");
+            assert_eq!(sd2.owner(), Some(&Sid::local_system()), "stored owner round-trips");
+
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    /// A too-small output buffer is rejected with STATUS_BUFFER_TOO_SMALL.
+    #[test]
+    fn security_query_rejects_small_buffer() {
+        tokio_uring::start(async {
+            let dir = std::env::temp_dir().join(format!("rustsmb_sec2_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("s.bin"), b"x").unwrap();
+            let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(&dir));
+            let (tx, _rx) = mpsc::channel(8);
+            let mut conn = Smb2Conn::new([0u8; 8], tx);
+            let (open, _m, _a) = vfs.create("s.bin", false, 0x8000_0000, 1, 0, 0).await.unwrap();
+            let fid = [2u8; 16];
+            conn.handles.insert(fid, open);
+
+            let q = query_info_frame(c::info_type::SECURITY, 0, 8, crate::security::sec_info::DEFAULT, fid);
+            let err = query_info(&mut conn, vfs.clone(), &q).await.unwrap_err();
+            assert_eq!(err, Status::BUFFER_TOO_SMALL);
+
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 }

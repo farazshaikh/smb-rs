@@ -45,6 +45,10 @@ metrics-exporter-prometheus = "0.16"
 clap = { version = "4", features = ["derive"] }
 inotify = "0.11"
 futures-util = "0.3"
+# Windows security-descriptor (MS-DTYP) marshalling — pure-Rust, no FFI.
+win-sd = "0.2"
+# Portable extended-attribute access for persisting NT ACLs on POSIX files.
+xattr = "1"
 
 [profile.release]
 opt-level = 2
