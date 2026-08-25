@@ -30,7 +30,13 @@ pub struct PosixInner {
 impl PosixVfs {
     /// Create a backend serving `root`.
     pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        PosixVfs { root: root.into() }
+        let root = root.into();
+        // Canonicalize to an absolute root so paths stored on open handles are
+        // absolute and re-resolve cleanly. With a relative root (e.g.
+        // `./share`) the stored `./share/foo` would otherwise be treated as
+        // share-relative on stat/set_info and double-prefix the root.
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        PosixVfs { root }
     }
 
     fn resolve(&self, path: &str) -> std::path::PathBuf {
@@ -445,5 +451,34 @@ impl Vfs for PosixVfs {
     async fn query_disk(&self) -> VfsResult<(u32, u32, u16, u16)> {
         // Static values keep clients happy; real statvfs wiring can come later.
         Ok((100_000, 50_000, 512, 64))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smb_vfs::Vfs;
+
+    /// A relative share root historically double-prefixed on stat-by-stored
+    /// handle path (the getattrib step of `smbclient get`), returning
+    /// STATUS_OBJECT_PATH_NOT_FOUND. Canonicalizing the root to absolute must
+    /// make the stored handle path re-resolve cleanly.
+    #[tokio::test]
+    async fn stat_by_stored_path_survives_relative_root() {
+        let dir = format!("target/it_share_{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(format!("{dir}/hello.txt"), b"hello!").unwrap();
+
+        let vfs = PosixVfs::new(&dir);
+        // FILE_OPEN (disposition 1), GENERIC_READ access.
+        let (open, _meta, _action) = vfs
+            .create("hello.txt", false, 0x8000_0000, 1, 0, 0)
+            .await
+            .expect("open existing file");
+        // The exact call that used to fail during getattrib.
+        let meta = vfs.stat(&open.path).await.expect("stat by stored handle path");
+        assert_eq!(meta.eof, 6, "reported size matches file contents");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

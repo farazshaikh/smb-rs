@@ -388,8 +388,9 @@ pending op and returns STATUS_CANCELLED on the original.
   unpack; (c) TREE_DISCONNECT is now idempotent; (d) LOGOFF no longer zeroes the
   session id before its (sealed) response is built. Remaining: recursive
   `SMB2_WATCH_TREE`; completed async ops leave a dead cancel-map entry until
-  disconnect. Separate open bug (not this item): `smbclient get` fails a
-  path-based getattrib with STATUS_OBJECT_PATH_NOT_FOUND.
+  disconnect. Fixed alongside: `smbclient get` no longer fails its getattrib —
+  a relative share root (`./share`) double-prefixed on stat-by-stored-path;
+  the POSIX backend now canonicalizes its root to absolute.
 - **M2.2 Byte-range lock enforcement** (item 6): per-open lock table + conflict
   matrix; STATUS_LOCK_NOT_GRANTED / async wait; sharing-violation on CREATE.
 - **M2.3 Oplocks v1/v2 + leases v2/v3** (item 5): parse lease create-contexts;

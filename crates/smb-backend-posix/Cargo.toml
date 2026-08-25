@@ -9,3 +9,6 @@ license.workspace = true
 async-trait.workspace = true
 smb-proto = { path = "../smb-proto" }
 smb-vfs = { path = "../smb-vfs" }
+
+[dev-dependencies]
+tokio = { workspace = true }
