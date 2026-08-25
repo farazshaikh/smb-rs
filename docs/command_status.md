@@ -11,6 +11,13 @@ implemented.
 
 ## SMB2 / SMB3 commands ([MS-SMB2] §2.2)
 
+SMB3 (dialects 3.0 / 3.0.2 / 3.1.1) adds **no new command opcodes** — it
+reuses the SMB2 command set below. Its features ride on existing commands via
+new negotiate contexts (preauth, encryption, compression, signing), create
+contexts (lease v2/v3, durable v2), FSCTLs (validate-negotiate,
+query-network-interface), and the `\xFD` encryption / `\xFC` compression
+transform headers (transport-layer framings, not commands).
+
 All 19 SMB2 command opcodes are dispatched.
 
 | Opcode | Command | Spec | Status | Notes |
