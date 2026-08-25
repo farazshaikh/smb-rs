@@ -37,6 +37,8 @@ fn g16(b: &[u8], o: usize) -> u16 {
 /// Parsed SESSION_SETUP request (§2.2.5.1).
 #[derive(Debug)]
 pub struct Request {
+    /// Session-setup flags; bit 0 is `SMB2_SESSION_FLAG_BINDING`.
+    pub flags: u8,
     /// Security mode requested by client.
     pub security_mode: u16,
     /// Client capabilities word.
@@ -46,6 +48,10 @@ pub struct Request {
     /// SPNEGO/NTLMSSP token bytes.
     pub blob: Vec<u8>,
 }
+
+/// `SMB2_SESSION_FLAG_BINDING` — this setup binds a new channel to an existing
+/// session ([MS-SMB2] §2.2.5).
+pub const FLAG_BINDING: u8 = 0x01;
 
 impl Request {
     /// Parse from the full frame (header included): buffer fields are
@@ -67,6 +73,7 @@ impl Request {
         };
         let blob = frame.get(start..end.min(frame.len())).unwrap_or(&[]).to_vec();
         Some(Request {
+            flags: *b.get(req_off::FLAGS).unwrap_or(&0),
             security_mode: *b.get(req_off::SECURITY_MODE).unwrap_or(&0) as u16,
             capabilities: u32::from_le_bytes(
                 b.get(req_off::CAPABILITIES..req_off::CAPABILITIES + 4)

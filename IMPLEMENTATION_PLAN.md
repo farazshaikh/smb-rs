@@ -204,7 +204,9 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Pre-auth integrity hash (SHA-512 chaining) | §3.3.4.1.1 | complete | sha512 vectors | signed SMB3 session | — | — | preauth_updates |
 | Salt generation per connection | §2.2.3.1.2 | complete | — | — | — | — | — |
 | Capabilities advertisement | §2.2.3.2.5 | complete | — | validate-negotiate echo | — | — | — |
-| Compression capability (LZNT1/PATTERN_V1) | §2.2.3.1.2 ctx 0x0003 | planned | roundtrip vectors | compressed xfer ratio | compress MB/s | algo chosen | comp_ratio |
+| Compression capability (LZNT1/PATTERN_V1) | §2.2.3.1.2 ctx 0x0003 | complete | codec round-trip + negotiate tests | raw-socket negotiate + transform ECHO ✅ | — | algo chosen | via lznt1 crate |
+| Multichannel capability + interface discovery | §2.2.31.4, §3.3.5.15.4 | complete | interface-list encode test | smbprotocol FSCTL_QUERY_NETWORK_INTERFACE_INFO ✅ | — | — | CAP_MULTI_CHANNEL |
+| Session binding (multichannel) | §3.3.5.5.2 | complete | session-table bind/forget test | — (needs multi-NIC client) | — | — | shared SessionTable |
 
 ### Sessions & authentication ([MS-SMB2] §2.2.5, [MS-NLMP])
 
@@ -242,7 +244,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Share resolution, BAD_NETWORK_NAME | §3.3.5.7 | complete | — | typo-share test | — | — | — |
 | ShareType/flags/caps/MaximalAccess response | §2.2.10.2 | complete | body-size test | — | — | — | — |
 | Virtual IPC$ share | §3.3.5.7 | complete | — | tcon ipc$ | — | — | — |
-| DFS referrals | §2.2.31.1 | planned | — | dfs client | — | — | referrals_served |
+| DFS referrals | §2.2.31.1 | complete | — | non-DFS reject (STATUS_NOT_FOUND) | — | — | — |
 
 ### File operations ([MS-SMB2] §2.2.13–§2.2.28)
 
@@ -292,8 +294,8 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 |---|---|---|---|---|---|---|---|
 | FSCTL_VALIDATE_NEGOTIATE_INFO echo | §3.3.5.15 | complete | input-length guard | authenticated SMB3 tcon | — | — | validate_negotiates |
 | FSCTL_LMR_REQ_RESILIENCY ack | §2.2.31.10 | complete | — | resilient-open clients | — | — | — |
-| FSCTL_PIPE_WAIT | §2.2.31.2 | planned (stub ack only) | pipe-wait test | — | — | — | — |
-| FSCTL_DFS_GET_REFERRALS | §2.2.31.1 | planned | — | dfs client | — | — | — |
+| FSCTL_PIPE_WAIT | §2.2.31.2 | complete | — | immediate success (pipes always available) | — | — | — |
+| FSCTL_DFS_GET_REFERRALS | §2.2.31.1 | complete | — | STATUS_NOT_FOUND (non-DFS) | — | — | — |
 | FSCTL_SRV_REQUEST_RESUME_KEY | §2.2.31.4 | complete | resume-key response test | odx source key | — | — | — |
 | FSCTL_COPYCHUNK(_WRITE) | §2.2.31.6/7 | complete | copychunk parse + copy + chunk-limit tests | server-side copy | effective copy MB/s | — | copychunk_bytes ✅ |
 

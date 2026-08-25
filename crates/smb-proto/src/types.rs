@@ -37,6 +37,8 @@ impl Status {
     pub const ACCESS_DENIED: Status = Status(0xC000_0022);
     /// The output buffer was too small to hold the requested data.
     pub const BUFFER_TOO_SMALL: Status = Status(0xC000_0023);
+    /// The requested item was not found (e.g. a non-DFS path for a referral).
+    pub const NOT_FOUND: Status = Status(0xC000_0225);
     /// Another handle holds a conflicting open on the object.
     pub const SHARING_VIOLATION: Status = Status(0xC000_0043);
     /// Deletion has already been requested for this object.

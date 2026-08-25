@@ -20,6 +20,8 @@ pub const SIGNING_ENABLED: u16 = 0x0001;
 pub mod caps {
     /// Large MTU — multi-credit transfers.
     pub const LARGE_MTU: u32 = 0x0000_0004;
+    /// Multiple channels for one session (multichannel).
+    pub const MULTI_CHANNEL: u32 = 0x0000_0008;
 }
 
 /// Negotiate context types (§2.2.3.1.2).
@@ -162,7 +164,13 @@ pub fn build_response_full(
         b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
     }
     b.extend_from_slice(guid); // ServerGuid
-    let caps = if dialect >= DIALECT_210 { caps::LARGE_MTU } else { 0 };
+    let caps = if dialect >= DIALECT_300 {
+        caps::LARGE_MTU | caps::MULTI_CHANNEL
+    } else if dialect >= DIALECT_210 {
+        caps::LARGE_MTU
+    } else {
+        0
+    };
     b.extend_from_slice(&caps.to_le_bytes()); // Capabilities
     b.extend_from_slice(&(1024 * 1024u32).to_le_bytes()); // MaxTransactionSize
     b.extend_from_slice(&(1024 * 1024u32).to_le_bytes()); // MaxReadSize

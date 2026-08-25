@@ -64,6 +64,8 @@ pub struct ServerShared {
     pub leases: Arc<LeaseTable>,
     /// Durable handles preserved across connection drops ([MS-SMB2] §3.3.1.10).
     pub durables: Arc<DurableTable>,
+    /// Established sessions, shared so channels can bind ([MS-SMB2] §3.3.5.5.3).
+    pub sessions: Arc<SessionTable>,
 }
 
 /// Identifies the open that owns a byte-range lock: `(session_id, file_id)`.
@@ -497,6 +499,56 @@ impl DurableTable {
     }
 }
 
+/// Established-session crypto material, shared server-wide so a new connection
+/// can bind another channel to the session ([MS-SMB2] §3.3.5.5.3 multichannel).
+#[derive(Clone)]
+pub struct SessionEntry {
+    /// Exported NTLM session key.
+    pub session_key: Option<[u8; 16]>,
+    /// Dialect-specific signing key.
+    pub signing_key: Option<[u8; 16]>,
+    /// Negotiated dialect.
+    pub dialect: Option<u16>,
+    /// Authenticated user name.
+    pub user: String,
+    /// Whether the session mapped to guest.
+    pub guest: bool,
+    /// Negotiated cipher id.
+    pub cipher: Option<u16>,
+    /// (client-to-server, server-to-client) cipher keys.
+    pub enc_keys: Option<([u8; 16], [u8; 16])>,
+    /// Whether the session forces encryption.
+    pub encrypt_data: bool,
+}
+
+/// Server-wide table of established sessions, keyed by session id.
+#[derive(Default)]
+pub struct SessionTable {
+    sessions: std::sync::Mutex<HashMap<u64, SessionEntry>>,
+}
+
+impl SessionTable {
+    /// Create an empty table.
+    pub fn new() -> Self {
+        Self { sessions: std::sync::Mutex::new(HashMap::new()) }
+    }
+
+    /// Register or refresh an established session.
+    pub fn insert(&self, id: u64, entry: SessionEntry) {
+        self.sessions.lock().unwrap().insert(id, entry);
+    }
+
+    /// Look up a session's crypto material for channel binding.
+    pub fn get(&self, id: u64) -> Option<SessionEntry> {
+        self.sessions.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Forget a session (on logoff).
+    pub fn remove(&self, id: u64) {
+        self.sessions.lock().unwrap().remove(&id);
+    }
+}
+
 
 /// Windows share-mode access bits ([MS-SMB2] §2.2.13).
 mod amask {
@@ -750,5 +802,29 @@ mod share_mode_tests {
         assert!(!t.try_open("f", GENERIC_READ, SHARE_READ, (1, [2; 16])));
         t.close("f", (1, [1; 16]));
         assert!(t.try_open("f", GENERIC_READ, SHARE_READ, (1, [2; 16])), "freed after close");
+    }
+
+    #[test]
+    fn session_table_binds_and_forgets() {
+        let t = SessionTable::new();
+        assert!(t.get(7).is_none(), "unknown session");
+        t.insert(
+            7,
+            SessionEntry {
+                session_key: Some([9u8; 16]),
+                signing_key: Some([8u8; 16]),
+                dialect: Some(0x0311),
+                user: "faraz".into(),
+                guest: false,
+                cipher: Some(2),
+                enc_keys: None,
+                encrypt_data: false,
+            },
+        );
+        let e = t.get(7).expect("session present for binding");
+        assert_eq!(e.signing_key, Some([8u8; 16]), "bound channel reuses signing key");
+        assert_eq!(e.dialect, Some(0x0311));
+        t.remove(7);
+        assert!(t.get(7).is_none(), "forgotten on logoff");
     }
 }

@@ -87,6 +87,7 @@ fn main() {
         oplocks: Arc::new(state::OplockTable::new()),
         leases: Arc::new(state::LeaseTable::new()),
         durables: Arc::new(state::DurableTable::new()),
+        sessions: Arc::new(state::SessionTable::new()),
     });
 
     // Single-threaded io_uring runtime: all networking and file I/O run on

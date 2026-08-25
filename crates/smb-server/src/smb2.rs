@@ -546,7 +546,10 @@ async fn process_single(
             conn.dialect = Some(dialect);
             // Must match the Capabilities word written by
             // build_response_full below so VALIDATE_NEGOTIATE_INFO echoes it.
-            conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
+            conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
+                smb_proto_smb2::negotiate::caps::LARGE_MTU
+                    | smb_proto_smb2::negotiate::caps::MULTI_CHANNEL
+            } else if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
                 smb_proto_smb2::negotiate::caps::LARGE_MTU
             } else {
                 0
@@ -650,6 +653,7 @@ async fn process_single(
             server.share_modes.close_session(conn.session_id);
             server.oplocks.release_session(conn.session_id);
             server.leases.release_session(conn.session_id);
+            server.sessions.remove(conn.session_id);
             conn.trees.clear();
             conn.searches.clear();
             if conn.authenticated {
@@ -838,6 +842,24 @@ async fn process_single(
                 // Linux files are implicitly sparse; accept the hint.
                 c::fsctl::SET_SPARSE => {
                     (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+                }
+                // FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2): our named pipes are
+                // always instantiable, so the wait completes immediately.
+                c::fsctl::PIPE_WAIT => {
+                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+                }
+                // DFS is not offered on this standalone server: a referral
+                // query for any path is answered STATUS_NOT_FOUND so the client
+                // treats the path as non-DFS ([MS-DFSC] §3.1.5.4.2).
+                c::fsctl::DFS_GET_REFERRALS => {
+                    return Some((response(&hdr, Status::NOT_FOUND, Vec::new(), conn.session_id), true));
+                }
+                // Multichannel interface discovery ([MS-SMB2] §3.3.5.15.4):
+                // report the server's network interfaces so the client may open
+                // additional channels for the session.
+                c::fsctl::QUERY_NETWORK_INTERFACE_INFO => {
+                    let out = network_interface_info();
+                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
                 }
                 // Zero a byte range in the target handle ([MS-FSCC] §2.3.79).
                 c::fsctl::SET_ZERO_DATA => {
@@ -1134,6 +1156,28 @@ async fn process_single(
     let mut resp = response(&hdr, status, body, conn.session_id);
     if let Some(new_tid) = resp_tid {
         resp[36..40].copy_from_slice(&new_tid.to_le_bytes()); // TreeId
+    }
+
+    // Register the established session so later channels can bind to it
+    // ([MS-SMB2] §3.3.5.5.3 multichannel session binding).
+    if hdr.command == ss::cmd::SESSION_SETUP
+        && status == Status::SUCCESS
+        && conn.authenticated
+        && conn.session_id != 0
+    {
+        server.sessions.insert(
+            conn.session_id,
+            crate::state::SessionEntry {
+                session_key: conn.session_key,
+                signing_key: conn.signing_key,
+                dialect: conn.dialect,
+                user: conn.user.clone(),
+                guest: conn.guest,
+                cipher: conn.cipher,
+                enc_keys: conn.enc_keys,
+                encrypt_data: conn.encrypt_data,
+            },
+        );
     }
 
     if is_preauth_msg && conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
@@ -1441,6 +1485,17 @@ fn session_setup(
     buf: &[u8],
 ) -> Result<(Status, Vec<u8>), Status> {
     let req = ss::Request::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
+    // Channel binding ([MS-SMB2] §3.3.5.5.2): the setup carries the binding
+    // flag and the header names an existing session to attach this new
+    // connection (channel) to.
+    let hdr_session = buf
+        .get(40..48)
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0);
+    let binding = req.flags & ss::FLAG_BINDING != 0
+        && hdr_session != 0
+        && server.sessions.get(hdr_session).is_some();
     let inner = smb_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
     tracing::trace!(
         blob_len = req.blob.len(),
@@ -1449,8 +1504,9 @@ fn session_setup(
     );
     match smb_auth::ntlm::msg_type(inner) {
         Some(smb_auth::ntlm::MSG_TYPE1) | None => {
-            // Leg 1: issue CHALLENGE under MORE_PROCESSING_REQUIRED.
-            conn.session_id = next_session_id();
+            // Leg 1: issue CHALLENGE under MORE_PROCESSING_REQUIRED. A binding
+            // channel keeps the existing session id instead of allocating one.
+            conn.session_id = if binding { hdr_session } else { next_session_id() };
             let mut t2 =
                 smb_auth::ntlm::build_type2(&conn.challenge, &server.domain, &server.server_name);
             // Grant SIGN|SEAL so clients may negotiate protected sessions
@@ -1511,6 +1567,18 @@ fn session_setup(
             conn.session_key = out.session_key;
             // Dialect-aware signing key ([MS-SMB2] §3.2.5.3.1 / §3.3.5.2.1).
             conn.authenticated = true;
+            // A bound channel reuses the original session's crypto material so
+            // signatures/encryption stay consistent across channels.
+            if binding {
+                if let Some(entry) = server.sessions.get(conn.session_id) {
+                    conn.session_key = entry.session_key;
+                    conn.signing_key = entry.signing_key;
+                    conn.cipher = entry.cipher;
+                    conn.enc_keys = entry.enc_keys;
+                    conn.encrypt_data = entry.encrypt_data;
+                    conn.dialect = entry.dialect.or(conn.dialect);
+                }
+            }
             let flags: u16 = if out.guest { 0x0001 } else { 0x0000 };
             // Close the SPNEGO exchange. When the AUTHENTICATE message
             // carried a mechListMIC (required by --client-protection=encrypt
@@ -1914,6 +1982,50 @@ fn arbitrate_lease(
     server.leases.grant(path, holder);
     counter!("smb_leases_granted_total").increment(1);
     c::LeaseResp { key: lr.key, state: requested, flags: 0, epoch: lr.epoch, v2: lr.v2 }
+}
+
+/// Build a NETWORK_INTERFACE_INFO list ([MS-SMB2] §2.2.32.5) from the host's
+/// interfaces so a multichannel client can discover additional server IPs.
+fn network_interface_info() -> Vec<u8> {
+    let mut entries: Vec<(u32, std::net::IpAddr)> = Vec::new();
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for (i, iface) in ifaces.iter().enumerate() {
+            entries.push((i as u32 + 1, iface.ip()));
+        }
+    }
+    build_interface_list(&entries)
+}
+
+/// Encode NETWORK_INTERFACE_INFO entries (RSS/RDMA both disabled, 10 Gbps),
+/// chaining `Next` links; each entry is a fixed 152 bytes (8-byte aligned).
+fn build_interface_list(entries: &[(u32, std::net::IpAddr)]) -> Vec<u8> {
+    const LINK_SPEED: u64 = 10_000_000_000;
+    let mut out = Vec::new();
+    for (idx, (ifindex, ip)) in entries.iter().enumerate() {
+        let start = out.len();
+        out.extend_from_slice(&0u32.to_le_bytes()); // Next (patched below)
+        out.extend_from_slice(&ifindex.to_le_bytes()); // IfIndex
+        out.extend_from_slice(&0u32.to_le_bytes()); // Capability (no RSS/RDMA)
+        out.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+        out.extend_from_slice(&LINK_SPEED.to_le_bytes()); // LinkSpeed
+        let mut sa = [0u8; 128]; // SOCKADDR_STORAGE
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                sa[0..2].copy_from_slice(&2u16.to_le_bytes()); // AF_INET
+                sa[4..8].copy_from_slice(&v4.octets()); // sin_addr
+            }
+            std::net::IpAddr::V6(v6) => {
+                sa[0..2].copy_from_slice(&23u16.to_le_bytes()); // AF_INET6
+                sa[8..24].copy_from_slice(&v6.octets()); // sin6_addr
+            }
+        }
+        out.extend_from_slice(&sa);
+        if idx + 1 < entries.len() {
+            let next = (out.len() - start) as u32;
+            out[start..start + 4].copy_from_slice(&next.to_le_bytes());
+        }
+    }
+    out
 }
 
 /// Build, protect and enqueue an unsolicited LEASE_BREAK notification
@@ -2675,6 +2787,7 @@ mod oplock_tests {
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
             durables: Arc::new(DurableTable::new()),
+            sessions: Arc::new(SessionTable::new()),
         })
     }
 
@@ -2778,6 +2891,7 @@ mod lease_tests {
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
             durables: Arc::new(DurableTable::new()),
+            sessions: Arc::new(SessionTable::new()),
         })
     }
 
@@ -3057,6 +3171,7 @@ mod durable_tests {
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
             durables: Arc::new(DurableTable::new()),
+            sessions: Arc::new(SessionTable::new()),
         })
     }
 
@@ -3172,5 +3287,29 @@ mod durable_tests {
             assert_eq!(err, Status::OBJECT_NAME_NOT_FOUND);
             std::fs::remove_dir_all(&dir).ok();
         });
+    }
+}
+
+#[cfg(test)]
+mod interface_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn interface_list_chains_and_encodes_sockaddr() {
+        let entries = [
+            (1u32, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))),
+            (2u32, IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        ];
+        let buf = build_interface_list(&entries);
+        assert_eq!(buf.len(), 152 * 2, "two fixed-size entries");
+        // First entry: Next links to the second (152), IfIndex 1, AF_INET.
+        assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 152);
+        assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(buf[24..26].try_into().unwrap()), 2, "AF_INET");
+        assert_eq!(&buf[28..32], &[10, 0, 0, 5], "sin_addr");
+        // Second entry terminates the chain and carries AF_INET6.
+        assert_eq!(u32::from_le_bytes(buf[152..156].try_into().unwrap()), 0);
+        assert_eq!(u16::from_le_bytes(buf[152 + 24..152 + 26].try_into().unwrap()), 23, "AF_INET6");
     }
 }

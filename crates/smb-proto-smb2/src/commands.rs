@@ -1282,12 +1282,14 @@ mod ioctl_off {
 
 /// FSCTL codes used by clients during share access ([MS-SMB2] §2.2.31).
 pub mod fsctl {
-    /// FSCTL_DFS_GET_REFERRALS.
+    /// FSCTL_DFS_GET_REFERRALS ([MS-SMB2] §2.2.31.1).
     pub const DFS_GET_REFERRALS: u32 = 0x0006_0194;
     /// FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2):
-    /// CTL_CODE(FILE_DEVICE_NAMED_PIPE, 60, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    /// = 0x0011C017.
-    pub const PIPE_WAIT: u32 = 0x0011_C017;
+    /// CTL_CODE(FILE_DEVICE_NAMED_PIPE, 6, METHOD_BUFFERED, FILE_ANY_ACCESS).
+    pub const PIPE_WAIT: u32 = 0x0011_0018;
+    /// FSCTL_QUERY_NETWORK_INTERFACE_INFO ([MS-SMB2] §2.2.31.4) — multichannel
+    /// interface discovery.
+    pub const QUERY_NETWORK_INTERFACE_INFO: u32 = 0x0014_01FC;
     /// FSCTL_SRV_REQUEST_RESUME_KEY.
     pub const SRV_REQUEST_RESUME_KEY: u32 = 0x0014_0078;
     /// FSCTL_SRV_COPYCHUNK — server-side copy ([MS-SMB2] §2.2.31.1).
