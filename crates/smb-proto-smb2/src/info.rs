@@ -310,7 +310,7 @@ pub struct FindEntry {
 }
 
 /// Write the fixed fields of one entry after the NextEntryOffset slot.
-fn push_find_fixed(buf: &mut Vec<u8>, class: u8, m: &QueryMeta, name_len: usize) {
+fn push_find_fixed(buf: &mut Vec<u8>, class: u8, m: &QueryMeta, name: &str, name_len: usize) {
     if class == find_class::NAMES {
         // FILE_NAMES_INFORMATION: Next(4) FileIndex(4) NameLen(4).
         buf.extend_from_slice(&0u32.to_le_bytes()); // FileIndex
@@ -331,9 +331,7 @@ fn push_find_fixed(buf: &mut Vec<u8>, class: u8, m: &QueryMeta, name_len: usize)
         }
         file_class::BOTH_DIRECTORY => {
             buf.extend_from_slice(&0u32.to_le_bytes()); // EaSize
-            buf.push(0); // ShortNameLength
-            buf.push(0); // Reserved
-            buf.extend_from_slice(&[0u8; 24]); // ShortName
+            push_short_name(buf, name);
         }
         find_class::ID_FULL_DIRECTORY => {
             buf.extend_from_slice(&0u32.to_le_bytes()); // Reserved
@@ -341,14 +339,72 @@ fn push_find_fixed(buf: &mut Vec<u8>, class: u8, m: &QueryMeta, name_len: usize)
         }
         find_class::ID_BOTH_DIRECTORY => {
             buf.extend_from_slice(&0u32.to_le_bytes()); // EaSize
-            buf.push(0); // ShortNameLength
-            buf.push(0); // Reserved
-            buf.extend_from_slice(&[0u8; 24]); // ShortName
+            push_short_name(buf, name);
             buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved2
             buf.extend_from_slice(&0u64.to_le_bytes()); // FileId
         }
         _ => {}
     }
+}
+
+/// Encode the 8.3 ShortName field (ShortNameLength(1) Reserved(1) ShortName(24))
+/// of a BOTH_DIRECTORY entry, generating a short name for non-8.3 long names.
+fn push_short_name(buf: &mut Vec<u8>, name: &str) {
+    let short = short_name_8_3(name);
+    let units: Vec<u16> = short.encode_utf16().collect();
+    buf.push((units.len() * 2) as u8); // ShortNameLength (bytes)
+    buf.push(0); // Reserved
+    let mut field = [0u8; 24];
+    for (i, u) in units.iter().take(12).enumerate() {
+        field[i * 2..i * 2 + 2].copy_from_slice(&u.to_le_bytes());
+    }
+    buf.extend_from_slice(&field);
+}
+
+/// Characters permitted (besides A-Z 0-9) in a DOS 8.3 name.
+const SHORT_NAME_SYMBOLS: &str = "!#$%&'()-@^_`{}~";
+
+/// Generate a DOS 8.3 short name for a long name ([MS-FSCC] §2.1.5.2.1 style):
+/// uppercased, invalid characters dropped, base truncated to 6 plus `~1`, and a
+/// 3-character extension. Returns `""` when `name` is already a valid 8.3 name
+/// (Windows then reports no short name).
+pub fn short_name_8_3(name: &str) -> String {
+    if is_valid_8_3(name) {
+        return String::new();
+    }
+    let (base, ext) = match name.rsplit_once('.') {
+        Some((b, e)) if !b.is_empty() => (b, e),
+        _ => (name, ""),
+    };
+    let clean = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || SHORT_NAME_SYMBOLS.contains(*c))
+            .map(|c| c.to_ascii_uppercase())
+            .collect()
+    };
+    let b: String = clean(base).chars().take(6).collect();
+    let e: String = clean(ext).chars().take(3).collect();
+    let b = if b.is_empty() { "_".to_string() } else { b };
+    if e.is_empty() {
+        format!("{b}~1")
+    } else {
+        format!("{b}~1.{e}")
+    }
+}
+
+/// Whether `name` already fits the 8.3 form (case-insensitively), in which case
+/// no short name is generated for it.
+fn is_valid_8_3(name: &str) -> bool {
+    let (base, ext) = match name.rsplit_once('.') {
+        Some((b, e)) => (b, e),
+        None => (name, ""),
+    };
+    let ok = |s: &str, max: usize| -> bool {
+        s.len() <= max
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || SHORT_NAME_SYMBOLS.contains(c))
+    };
+    !base.is_empty() && ok(base, 8) && ok(ext, 3)
 }
 
 /// Encode directory entries into the NextEntryOffset-chained form used by
@@ -367,7 +423,7 @@ pub fn encode_find_entries(entries: &[FindEntry], class: u8) -> Vec<u8> {
         let next_pos = buf.len();
         buf.extend_from_slice(&0u32.to_le_bytes()); // NextEntryOffset slot
 
-        push_find_fixed(&mut buf, class, &e.meta, name_bytes.len());
+        push_find_fixed(&mut buf, class, &e.meta, &e.name, name_bytes.len());
         buf.extend_from_slice(&name_bytes);
 
         let stride = buf.len() - start;
@@ -408,5 +464,19 @@ mod stream_info_tests {
     #[test]
     fn empty_list_is_empty_buffer() {
         assert!(encode_stream_info(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod short_name_tests {
+    use super::*;
+
+    #[test]
+    fn generates_8_3_for_long_names() {
+        assert_eq!(short_name_8_3("LongFileName.txtx"), "LONGFI~1.TXT");
+        assert_eq!(short_name_8_3("noext_longname"), "NOEXT_~1");
+        // Already a valid 8.3 name yields no short name.
+        assert_eq!(short_name_8_3("READ.ME"), "");
+        assert_eq!(short_name_8_3("A.B"), "");
     }
 }

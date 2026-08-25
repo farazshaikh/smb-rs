@@ -2444,7 +2444,10 @@ async fn query_info(
             }
             Ok(Some(sd))
         }
-        _ => Ok(None), // QUOTA unsupported for now
+        // Disk quotas are not tracked on this volume ([MS-FSCC] §2.4.33):
+        // report the standard "quotas not enabled" status.
+        c::info_type::QUOTA => Err(Status::INVALID_DEVICE_REQUEST),
+        _ => Ok(None),
     }
 }
 
@@ -2472,6 +2475,8 @@ async fn set_info(
             let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
             vfs.set_security(&h.path, &req.buffer).await.map_err(vfs_err)
         }
+        // Disk quotas are not tracked on this volume ([MS-FSCC] §2.4.33).
+        c::info_type::QUOTA => Err(Status::INVALID_DEVICE_REQUEST),
         _ => Err(Status::NOT_IMPLEMENTED),
     }
 }

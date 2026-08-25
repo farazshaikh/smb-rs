@@ -271,7 +271,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Continuation queue + RESTART/REOPEN/SCAN flags | §3.3.5.24 | complete | restart-flag unit test | multi-page ls | — | — | enum_restarts |
 | RETURN_SINGLE_ENTRY | §2.2.33.1 | complete | — | — | — | — | — |
 | Resume-by-index (INDEX_SPECIFIED) | §2.2.33.1 | complete | file_index parse test | index-resumed page walk | — | — | — |
-| 8.3 short-name generation/matching | [MS-FSCC] §2.1.5 | planned | name-gen tests | dos-style lookup | — | — | — |
+| 8.3 short-name generation/matching | [MS-FSCC] §2.1.5 | complete (generation) | short-name gen tests | ShortName in BOTH_DIRECTORY listing ✅ | — | — | — |
 | CHANGE_NOTIFY (recursive/non-recursive) | §2.2.35/36 | complete | parse/build + inotify watch + recursive-subdir tests | smbprotocol watch→create→notify over encryption ✅ | — | notify fire lines | notifies_sent ✅ |
 | DOS wildcard matcher (* ?) | [MS-CIFS] §2.2.8.1 | complete | wildcard unit tests | patterned ls | — | — | — |
 
@@ -284,7 +284,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | FileAllInformation 8-byte embedded-struct alignment | [MS-FSCC] §2.4.1 | complete | size+offset asserts | size reported correctly | — | — | — |
 | SET_INFO basic/eof/allocation/disposition/rename/position | §2.2.39/40 | complete | SetOp decode tests | rename/truncate flows | — | — | sets_total |
 | Security descriptors (query/set SECURITY) | [MS-FSCC] §2.4.6 | complete | SD build/filter + query/set round-trip tests | smbprotocol query→set→query ✅ | — | — | via win-sd crate |
-| Quota query/set | [MS-FSCC] §2.4.14 | planned | — | — | — | — | — |
+| Quota query/set | [MS-FSCC] §2.4.14 | complete | — | STATUS_INVALID_DEVICE_REQUEST (quotas not enabled) | — | — | — |
 | Alternate data streams (enumerate/read/write) | [MS-FSCC] §2.6 | complete | stream_info codec + backend round-trip tests | smbprotocol ADS write/read + FileStreamInformation enum ✅ | — | — | xattr-backed |
 | Case-insensitive resolution + path containment | backend | complete | posix resolve tests | case-twiddled opens | — | — | — |
 
