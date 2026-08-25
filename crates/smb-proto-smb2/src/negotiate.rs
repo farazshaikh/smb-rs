@@ -15,6 +15,8 @@ pub const DIALECT_311: u16 = 0x0311;
 /// SecurityMode bits (§2.2.3.1.1).
 /// Signing is supported but not required.
 pub const SIGNING_ENABLED: u16 = 0x0001;
+/// Signing is required by the server.
+pub const SIGNING_REQUIRED: u16 = 0x0002;
 
 /// Capability bits (§2.2.3.2.5).
 pub mod caps {
@@ -151,10 +153,12 @@ pub fn build_response_full(
     salt: &[u8; 32],
     chosen_cipher: u16,
     compression: &[u16],
+    require_signing: bool,
 ) -> Vec<u8> {
     let mut b = Vec::with_capacity(128);
     b.extend_from_slice(&65u16.to_le_bytes()); // StructureSize
-    b.extend_from_slice(&1u16.to_le_bytes()); // SecurityMode: signing enabled
+    let sec_mode = SIGNING_ENABLED | if require_signing { SIGNING_REQUIRED } else { 0 };
+    b.extend_from_slice(&sec_mode.to_le_bytes()); // SecurityMode
     b.extend_from_slice(&dialect.to_le_bytes());
     if dialect == DIALECT_311 {
         // PREAUTH + SIGNING + ENCRYPTION, plus COMPRESSION when negotiated.
@@ -238,5 +242,5 @@ const BODY_START_FIXED: usize = 64 + 64;
 /// pre-3.1.1 dialects (where the spec marks it Reserved); every real-world
 /// parser expects the field's presence.
 pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
-    build_response_full(dialect, guid, now, &[0u8; 32], 0, &[])
+    build_response_full(dialect, guid, now, &[0u8; 32], 0, &[], false)
 }

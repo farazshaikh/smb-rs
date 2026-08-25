@@ -510,13 +510,21 @@ async fn process_single(
     // the signature requirement is satisfied by encryption there.
     if server.require_signing
         && !pre_session
+        && hdr.command != ss::cmd::SESSION_SETUP
         && !conn.guest
         && !conn.encrypt_data
         && conn.signing_key.is_some()
-        && !hdr.is_signed()
     {
-        counter!("smb_reject_unsigned_total").increment(1);
-        return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
+        let key = conn.signing_key.unwrap();
+        if !hdr.is_signed() {
+            counter!("smb_reject_unsigned_total").increment(1);
+            return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
+        }
+        // A signed request with a bad signature is a tamper/forgery attempt.
+        if !verify_pdu_signature(buf, &key, conn.dialect) {
+            counter!("smb_reject_bad_signature_total").increment(1);
+            return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
+        }
     }
 
     // TREE_CONNECT overrides the response TreeId with the fresh value.
@@ -622,6 +630,7 @@ async fn process_single(
                     &salt,
                     chosen.unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM),
                     &comp_algos,
+                    server.require_signing,
                 ),
             )
         }
@@ -777,7 +786,13 @@ async fn process_single(
                     // ([MS-SMB2] §3.3.5.15).
                     out.extend_from_slice(&conn.advertised_caps.to_le_bytes());
                     out.extend_from_slice(&server.guid);
-                    out.extend_from_slice(&1u16.to_le_bytes()); // SecurityMode
+                    let sec_mode = smb_proto_smb2::negotiate::SIGNING_ENABLED
+                        | if server.require_signing {
+                            smb_proto_smb2::negotiate::SIGNING_REQUIRED
+                        } else {
+                            0
+                        };
+                    out.extend_from_slice(&sec_mode.to_le_bytes()); // SecurityMode
                     out.extend_from_slice(
                         &conn.dialect.unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
                             .to_le_bytes(),
@@ -1231,6 +1246,30 @@ fn sign_pdu(resp: &mut [u8], key: &[u8; 16], dialect: Option<u16>) {
         s
     };
     resp[48..64].copy_from_slice(&sig);
+}
+
+/// Verify a request PDU's signature against `key` for `dialect`: recompute the
+/// AES-CMAC (3.x) / HMAC-SHA256 (2.x) over the PDU with the signature field
+/// zeroed and compare to the header's Signature ([MS-SMB2] §3.3.5.2.4).
+fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>) -> bool {
+    if buf.len() < 64 {
+        return false;
+    }
+    let mut msg = Vec::with_capacity(buf.len());
+    msg.extend_from_slice(&buf[..48]);
+    msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
+    msg.extend_from_slice(&buf[64..]);
+    let expected: [u8; 16] = if matches!(
+        dialect,
+        Some(smb_proto_smb2::negotiate::DIALECT_300
+            | smb_proto_smb2::negotiate::DIALECT_302
+            | smb_proto_smb2::negotiate::DIALECT_311)
+    ) {
+        smb_auth::crypto::aes128_cmac(key, &msg)[..16].try_into().unwrap()
+    } else {
+        smb_auth::crypto::hmac_sha256(key, &msg)[..16].try_into().unwrap()
+    };
+    expected == buf[48..64]
 }
 
 /// Per-session crypto material an async completion needs to sign/seal a frame
@@ -3388,5 +3427,29 @@ mod interface_tests {
         // Second entry terminates the chain and carries AF_INET6.
         assert_eq!(u32::from_le_bytes(buf[152..156].try_into().unwrap()), 0);
         assert_eq!(u16::from_le_bytes(buf[152 + 24..152 + 26].try_into().unwrap()), 23, "AF_INET6");
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+
+    #[test]
+    fn sign_then_verify_round_trips_and_detects_tamper() {
+        let key = [0x42u8; 16];
+        let dialect = Some(smb_proto_smb2::negotiate::DIALECT_311);
+        let mut pdu = vec![0u8; 96];
+        pdu[0..4].copy_from_slice(&smb_proto_smb2::SMB2_MAGIC);
+        for (i, b) in pdu[64..].iter_mut().enumerate() {
+            *b = i as u8; // arbitrary body bytes
+        }
+        sign_pdu(&mut pdu, &key, dialect);
+        assert!(verify_pdu_signature(&pdu, &key, dialect), "valid signature verifies");
+        // Tamper with the body: verification must fail.
+        pdu[70] ^= 0xFF;
+        assert!(!verify_pdu_signature(&pdu, &key, dialect), "tampered body rejected");
+        // Wrong key: fails.
+        pdu[70] ^= 0xFF;
+        assert!(!verify_pdu_signature(&pdu, &[0u8; 16], dialect), "wrong key rejected");
     }
 }

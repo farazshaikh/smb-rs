@@ -234,7 +234,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Encryption transform AES-GCM/CCM (TF header §2.2.41) | §3.3.5.16 | complete | csp AEAD roundtrip+tamper+NIST ✅ | smbclient --client-protection=encrypt green on 3.1.1 + 3.0.2 (ls/put/get/rm); open: encrypt+require-signing combo, CCM live | target >500 MB/s | enc on/off per msg | enc_bytes_total |
 | Cipher key derivation (C2S/S2C labels + preauth ctx) | §3.1.4.1 | complete | kdf vectors | encrypted tree-connect/read/write round-trips | — | — | — |
 | Compression transform + COMPRESSION_CAPABILITIES ctx (LZNT1/Pattern_V1) | §2.2.42, §2.2.3.1.3 | complete | codec round-trip + negotiate tests | raw-socket negotiate ctx + \xFCSMB ECHO decompress ✅ | — | — | via lznt1 crate |
-| Require-signing server policy (--require-signing) / require-encryption | §3.3.5.2.3 | in_progress | gate unit test (todo) | unsigned client rejected (todo) | — | rejects logged + counted | rejects_total ✅ |
+| Require-signing server policy (--require-signing) / require-encryption | §3.3.5.2.3 | complete | sign/verify round-trip test | unsigned client rejected; signed verified | — | rejects logged + counted | rejects_total ✅ |
 
 ### Tree connects & shares ([MS-SMB2] §2.2.9–§2.2.11)
 
