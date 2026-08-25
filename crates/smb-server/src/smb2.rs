@@ -622,6 +622,8 @@ async fn process_single(
         }
         ss::cmd::LOGOFF => {
             close_all_handles(conn);
+            server.locks.release_session(conn.session_id);
+            server.share_modes.close_session(conn.session_id);
             conn.trees.clear();
             conn.searches.clear();
             if conn.authenticated {
@@ -650,7 +652,7 @@ async fn process_single(
                         return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
                     }
                 };
-                match create(conn, vfs, buf).await {
+                match create(conn, vfs, &server.share_modes, buf).await {
                     Ok(body) => (Status::SUCCESS, body),
                     Err(status) => (status, Vec::new()),
                 }
@@ -697,8 +699,17 @@ async fn process_single(
                         return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
                     }
                 };
+                let close_path = c::CloseReq::parse(buf)
+                    .and_then(|r| conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone())));
                 match close(conn, vfs, buf).await {
-                    Ok(body) => (Status::SUCCESS, body),
+                    Ok(body) => {
+                        // Drop this open's byte-range locks and share-mode entry.
+                        if let Some((fid, path)) = close_path {
+                            server.locks.release_owner((conn.session_id, fid));
+                            server.share_modes.close(&path, (conn.session_id, fid));
+                        }
+                        (Status::SUCCESS, body)
+                    }
                     Err(status) => (status, Vec::new()),
                 }
             }
@@ -820,10 +831,66 @@ async fn process_single(
                 _ => (Status::NOT_IMPLEMENTED, Vec::new()),
             }
         }
-        ss::cmd::LOCK => match c::LockReq::parse(buf) {
-            Some(_) => (Status::SUCCESS, c::build_lock_resp()),
-            None => (Status::INVALID_PARAMETER, Vec::new()),
-        },
+        ss::cmd::LOCK => {
+            let Some(req) = c::LockReq::parse(buf) else {
+                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
+            };
+            let Some(h) = conn.handles.get(&req.file_id.0) else {
+                return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+            };
+            let path = h.path.clone();
+            let owner = (conn.session_id, req.file_id.0);
+
+            // Unlocks first, then acquisitions ([MS-SMB2] §3.3.5.14).
+            for l in req.locks.iter().filter(|l| l.unlock) {
+                server.locks.release(&path, &[(l.offset, l.length)], owner);
+            }
+            let acquires: Vec<(u64, u64, bool)> = req
+                .locks
+                .iter()
+                .filter(|l| !l.unlock)
+                .map(|l| (l.offset, l.length, l.exclusive))
+                .collect();
+
+            if acquires.is_empty() || server.locks.try_acquire(&path, &acquires, owner) {
+                (Status::SUCCESS, c::build_lock_resp())
+            } else if req.locks.iter().any(|l| l.fail_immediately) {
+                (Status::LOCK_NOT_GRANTED, Vec::new())
+            } else {
+                // Blocking lock ([MS-SMB2] §3.3.5.14): interim STATUS_PENDING,
+                // then retry as conflicting locks are released.
+                let async_id = conn.alloc_async_id();
+                let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
+                let (cancel_tx, cancel_rx) = oneshot::channel();
+                conn.async_cancels.insert(async_id, cancel_tx);
+                gauge!("smb_async_pending").increment(1.0);
+                tokio::spawn(run_lock_wait(
+                    server.locks.clone(),
+                    path,
+                    acquires,
+                    owner,
+                    crypto,
+                    hdr.message_id,
+                    async_id,
+                    conn.outbound.clone(),
+                    cancel_rx,
+                ));
+                let mut interim = build_async_frame(
+                    conn.session_id,
+                    hdr.message_id,
+                    async_id,
+                    ss::cmd::LOCK,
+                    Status::PENDING,
+                    &error_resp(),
+                );
+                if hdr.is_signed() {
+                    if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
+                        sign_pdu(&mut interim, &key, conn.dialect);
+                    }
+                }
+                return Some((interim, true));
+            }
+        }
         ss::cmd::CHANGE_NOTIFY => {
             let Some(req) = c::ChangeNotifyReq::parse(buf) else {
                 return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
@@ -852,10 +919,11 @@ async fn process_single(
                 cancel_rx,
             ));
 
-            let mut interim = build_async_notify_frame(
+            let mut interim = build_async_frame(
                 conn.session_id,
                 hdr.message_id,
                 async_id,
+                ss::cmd::CHANGE_NOTIFY,
                 Status::PENDING,
                 &error_resp(),
             );
@@ -1097,13 +1165,14 @@ impl AsyncCrypto {
     }
 }
 
-/// Build a CHANGE_NOTIFY frame with an async header ([MS-SMB2] §2.2.35 async
-/// mode): SERVER_TO_REDIR|ASYNC_COMMAND flags with the AsyncId occupying the
+/// Build an async-header frame ([MS-SMB2] §3.3.4.2 async mode):
+/// SERVER_TO_REDIR|ASYNC_COMMAND flags with the AsyncId occupying the
 /// Reserved+TreeId slot. Returned unsigned and unsealed.
-fn build_async_notify_frame(
+fn build_async_frame(
     session_id: u64,
     message_id: u64,
     async_id: u64,
+    command: u16,
     status: Status,
     body: &[u8],
 ) -> Vec<u8> {
@@ -1112,7 +1181,7 @@ fn build_async_notify_frame(
     f.extend_from_slice(&64u16.to_le_bytes()); // StructureSize
     f.extend_from_slice(&1u16.to_le_bytes()); // CreditCharge
     f.extend_from_slice(&status.raw().to_le_bytes());
-    f.extend_from_slice(&ss::cmd::CHANGE_NOTIFY.to_le_bytes());
+    f.extend_from_slice(&command.to_le_bytes());
     f.extend_from_slice(&1u16.to_le_bytes()); // CreditResponse
     f.extend_from_slice(&0x0000_0003u32.to_le_bytes()); // SERVER_TO_REDIR|ASYNC_COMMAND
     f.extend_from_slice(&0u32.to_le_bytes()); // NextCommand
@@ -1142,6 +1211,47 @@ fn finalize_async(crypto: &AsyncCrypto, mut frame: Vec<u8>) -> Vec<u8> {
     frame
 }
 
+/// Block until a conflicting byte-range lock is released and the requested
+/// ranges can be acquired, then emit the final LOCK response ([MS-SMB2]
+/// §3.3.5.14). Cancellation yields STATUS_CANCELLED.
+#[allow(clippy::too_many_arguments)]
+async fn run_lock_wait(
+    locks: Arc<crate::state::LockManager>,
+    path: String,
+    ranges: Vec<(u64, u64, bool)>,
+    owner: crate::state::LockOwner,
+    crypto: AsyncCrypto,
+    message_id: u64,
+    async_id: u64,
+    outbound: mpsc::Sender<Vec<u8>>,
+    mut cancel: oneshot::Receiver<()>,
+) {
+    let granted = loop {
+        // Register for the wakeup before trying, so a release between the try
+        // and the await is not lost.
+        let notified = locks.released().notified();
+        if locks.try_acquire(&path, &ranges, owner) {
+            break true;
+        }
+        tokio::select! {
+            _ = notified => {}
+            _ = &mut cancel => break false,
+        }
+    };
+    let (status, body) = if granted {
+        counter!("smb_locks_granted_total").increment(1);
+        (Status::SUCCESS, c::build_lock_resp())
+    } else {
+        (Status::CANCELLED, Vec::new())
+    };
+    let frame = finalize_async(
+        &crypto,
+        build_async_frame(crypto.session_id, message_id, async_id, ss::cmd::LOCK, status, &body),
+    );
+    let _ = outbound.send(frame).await;
+    gauge!("smb_async_pending").decrement(1.0);
+}
+
 /// Watch `dir_path` for one filesystem change (or cancellation) and emit the
 /// final CHANGE_NOTIFY response ([MS-SMB2] §2.2.36) on the outbound queue.
 async fn run_change_notify(
@@ -1161,12 +1271,13 @@ async fn run_change_notify(
             let buf = c::build_file_notify_information(&pairs);
             let body = c::build_change_notify_resp(&buf);
             counter!("smb_notifies_sent").increment(1);
-            build_async_notify_frame(crypto.session_id, message_id, async_id, Status::SUCCESS, &body)
+            build_async_frame(crypto.session_id, message_id, async_id, ss::cmd::CHANGE_NOTIFY, Status::SUCCESS, &body)
         }
-        None => build_async_notify_frame(
+        None => build_async_frame(
             crypto.session_id,
             message_id,
             async_id,
+            ss::cmd::CHANGE_NOTIFY,
             Status::CANCELLED,
             &c::build_change_notify_resp(&[]),
         ),
@@ -1492,6 +1603,7 @@ fn tree_connect(
 async fn create(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
+    share_modes: &crate::state::ShareModeTable,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::CreateReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
@@ -1521,6 +1633,17 @@ async fn create(
     open.delete_on_close |= req.options & OPT_DELETE_ON_CLOSE != 0;
 
     let fid_bytes = next_file_id();
+    // Sharing-violation check ([MS-FSA] §2.1.5.1): reject an open whose access
+    // or share flags conflict with an existing open on the same file. Undo the
+    // just-opened handle on rejection. Directories are not share-checked.
+    if !open.is_dir
+        && !share_modes.try_open(&open.path, req.desired_access, req.share_access, (conn.session_id, fid_bytes))
+    {
+        let _ = vfs.close(open).await;
+        counter!("smb_sharing_violations_total").increment(1);
+        return Err(Status::SHARING_VIOLATION);
+    }
+
     let fid = c::FileId(fid_bytes);
     conn.searches.remove(&fid_bytes);
     conn.handles.insert(fid_bytes, open);
@@ -1982,7 +2105,7 @@ mod async_notify_tests {
 
     #[test]
     fn async_frame_sets_async_flag_and_ids() {
-        let f = build_async_notify_frame(0xABCD, 42, 7, Status::PENDING, &[0u8; 8]);
+        let f = build_async_frame(0xABCD, 42, 7, ss::cmd::CHANGE_NOTIFY, Status::PENDING, &[0u8; 8]);
         assert_eq!(&f[0..4], &smb_proto_smb2::SMB2_MAGIC);
         let flags = u32::from_le_bytes(f[16..20].try_into().unwrap());
         assert_eq!(flags & 0x2, 0x2, "ASYNC_COMMAND set");

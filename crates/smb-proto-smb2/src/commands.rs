@@ -697,7 +697,9 @@ pub struct LockElem {
     pub fail_immediately: bool,
 }
 
-/// LOCK request (§2.2.26) — parsed but unenforced, mirroring SMB1 LOCKING_ANDX.
+/// LOCK request (§2.2.26). The 24-byte header (StructureSize, LockCount,
+/// LockSequence, FileId) is followed by `LockCount` 24-byte lock elements;
+/// StructureSize is fixed at 48 (header + one element) per the SMB2 convention.
 #[derive(Debug)]
 pub struct LockReq {
     /// Locked handle.
@@ -716,15 +718,19 @@ impl LockReq {
         let fid = FileId(frame.get(BODY + 8..BODY + 24)?.try_into().ok()?);
         let mut locks = Vec::with_capacity(count.min(1024));
         for i in 0..count {
-            let base = BODY + 48 + i * 24;
+            // Lock elements begin right after the 24-byte header.
+            let base = BODY + 24 + i * 24;
             let e = frame.get(base..base + 24)?;
+            // Flags is a 32-bit field at offset 16 ([MS-SMB2] §2.2.26.1):
+            // SHARED 0x1, EXCLUSIVE 0x2, UNLOCK 0x4, FAIL_IMMEDIATELY 0x10.
+            let flags = g32(e, 16);
             locks.push(LockElem {
                 offset: g64(e, 0),
                 length: g64(e, 8),
-                shared: e[16] & 0x01 != 0,
-                exclusive: e[16] & 0x02 != 0,
-                unlock: e[16] & 0x08 != 0,
-                fail_immediately: e[17] & 0x02 != 0,
+                shared: flags & 0x01 != 0,
+                exclusive: flags & 0x02 != 0,
+                unlock: flags & 0x04 != 0,
+                fail_immediately: flags & 0x10 != 0,
             });
         }
         Some(LockReq { file_id: fid, locks })
@@ -1254,5 +1260,49 @@ mod fsctl_tests {
         input.extend_from_slice(&8192u64.to_le_bytes());
         assert_eq!(parse_zero_data(&input), Some((4096, 8192)));
         assert!(parse_zero_data(&input[..8]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    fn lock_request(file_id: [u8; 16], elems: &[(u64, u64, u32)]) -> Vec<u8> {
+        let mut f = vec![0u8; BODY];
+        f.extend_from_slice(&48u16.to_le_bytes()); // StructureSize
+        f.extend_from_slice(&(elems.len() as u16).to_le_bytes()); // LockCount
+        f.extend_from_slice(&0u32.to_le_bytes()); // LockSequence
+        f.extend_from_slice(&file_id); // FileId (BODY+8..BODY+24)
+        for &(off, len, flags) in elems {
+            f.extend_from_slice(&off.to_le_bytes());
+            f.extend_from_slice(&len.to_le_bytes());
+            f.extend_from_slice(&flags.to_le_bytes());
+            f.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+        }
+        f
+    }
+
+    #[test]
+    fn parses_lock_elements_at_correct_offset() {
+        // Elements start at BODY+24 (24-byte header), not BODY+48.
+        let fid = [9u8; 16];
+        let frame = lock_request(fid, &[(0, 10, 0x02 | 0x10)]); // EXCLUSIVE|FAIL_IMMEDIATELY
+        let req = LockReq::parse(&frame).expect("parse");
+        assert_eq!(req.file_id.0, fid);
+        assert_eq!(req.locks.len(), 1);
+        assert_eq!(req.locks[0].offset, 0);
+        assert_eq!(req.locks[0].length, 10);
+        assert!(req.locks[0].exclusive);
+        assert!(req.locks[0].fail_immediately);
+        assert!(!req.locks[0].unlock);
+    }
+
+    #[test]
+    fn parses_unlock_and_shared_flags() {
+        let frame = lock_request([0u8; 16], &[(5, 5, 0x01), (5, 5, 0x04)]); // SHARED, UNLOCK
+        let req = LockReq::parse(&frame).expect("parse");
+        assert_eq!(req.locks.len(), 2);
+        assert!(req.locks[0].shared && !req.locks[0].unlock);
+        assert!(req.locks[1].unlock && !req.locks[1].shared);
     }
 }

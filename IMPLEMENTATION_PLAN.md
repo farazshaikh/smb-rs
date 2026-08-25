@@ -252,8 +252,8 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | WRITE | §2.2.21 | complete | write codec test | put battery | — | trace: write | bytes_written_total ✅ |
 | CLOSE (+post-close attrs) | §2.2.15/16 | complete | — | del-on-close flow | — | counter on close | closes_total ✅ |
 | FLUSH | §2.2.17 | complete | — | — | — | — | flushes_total |
-| LOCK byte-range (enforced) | §2.2.26/27 | in_progress | conflict-matrix tests (todo) | two-client lock race (todo) | — | — | locks_active |
-| Sharing-mode conflict detection | §3.3.5.10 | planned | sharing matrix tests | two opens same file | — | violation line | sharing_violations |
+| LOCK byte-range (enforced) | §2.2.26/27 | complete | conflict-matrix unit tests + lock-parse tests | two-client lock race (smbprotocol) ✅ | — | — | locks_granted ✅ |
+| Sharing-mode conflict detection | §3.3.5.10 | complete | share-mode matrix unit tests | two opens same file (smbprotocol) ✅ | — | violation line | sharing_violations ✅ |
 | Oplocks v1/v2 + break notification | [MS-SMB] §2.2.4.50, §2.2.24 | planned | break state machine | two-client cache race | oplock latency | break sent lines | breaks_sent |
 | Leases v2/v3 (directory leases) | §2.2.23.2 | planned | lease table tests | explorer dir cache | — | lease key lines | leases_active |
 | Durable / persistent handles | §2.2.13.2.4–6 | planned | reconnect test | network-blip resume | — | — | durables_held |
@@ -393,6 +393,16 @@ pending op and returns STATUS_CANCELLED on the original.
   the POSIX backend now canonicalizes its root to absolute.
 - **M2.2 Byte-range lock enforcement** (item 6): per-open lock table + conflict
   matrix; STATUS_LOCK_NOT_GRANTED / async wait; sharing-violation on CREATE.
+  Status: **done** — server-wide `LockManager` (keyed by path, owned by
+  session+file id) with exclusive/shared conflict matrix; FAIL_IMMEDIATELY →
+  STATUS_LOCK_NOT_GRANTED, blocking locks wait async and complete when the
+  conflict clears; locks released on close/logoff/disconnect. Sharing-violation
+  on CREATE via a server-wide `ShareModeTable` ([MS-FSA] §2.1.5.1). Fixed two
+  pre-existing `LockReq` parse bugs (element offset BODY+24 not BODY+48; flags
+  UNLOCK=0x4 / FAIL_IMMEDIATELY=0x10) exposed once locks were enforced. Unit
+  tests (lock + share-mode matrices, lock parse) + live smbprotocol two-client
+  lock-conflict and sharing-violation checks. Metrics `locks_granted`,
+  `sharing_violations`.
 - **M2.3 Oplocks v1/v2 + leases v2/v3** (item 5): parse lease create-contexts;
   lease table; unsolicited break notifications (needs M2.1) + break-ack.
 - **M2.4 FSCTL batch** (item 7, independent/synchronous): SRV_REQUEST_RESUME_KEY
