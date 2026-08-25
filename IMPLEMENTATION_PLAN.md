@@ -301,7 +301,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | feature | specsection | status | unittest | systemtest | benchmarking | logging | metric |
 |---|---|---|---|---|---|---|---|
 | Pipe create/read/write over IPC$ (srvsvc, lanman) | §2.1.2.1 | complete | pipe open/write/read/close tests | impacket + smbclient -L | — | pipe opened/write/read debug | pipe_writes/reads_total |
-| srvsvc NetShareEnum (share enumeration) | [MS-SRVS] §3.1.4.10 | in_progress | stub layout unit test (todo: golden) | smbclient -L ✅ (replay mode) | — | debug: opnum/resp len | enums_served |
+| srvsvc NetShareEnum (share enumeration) | [MS-SRVS] §3.1.4.10 | complete | NDR round-trip decode unit tests | smbclient -L ✅ (dynamic encoder, `ms-ndr` crate) | — | debug: opnum/resp len | enums_served |
 | RPC bind/transact over named pipes ([MS-RPCE]) | [MS-RPCE] §2 | complete | bind ack + auth3 + frag reassembly tests | impacket DCERPC bind+request ✓ | — | — | pipe_msgs_total |
 
 ### Ergonomics
@@ -343,7 +343,8 @@ All items resolved:
 - ✅ Encryption transform: encrypt green on 3.1.1 + 3.0.2 + CCM (RUSTSMB_CIPHER=ccm);
   encrypt+require-signing combo fixed via AEAD-integrity exemption
 - ✅ srvsvc NetShareEnum over IPC$ named pipes: `smbclient -L` works (encrypted +
-  plaintext); uses replayed smbd stub template — dynamic NDR encoder is M2 stretch
+  plaintext); dynamic NDR encoder built on the `ms-ndr` crate (no template replay) —
+  marshals any share set with correct deferred-string layout, verified live
 - ✅ Credit accounting: lenient spend/refund tracking; multi-credit large R/W verified
   (16 MB encrypted round-trip); Large-MTU advertised for ≥2.1.0; NBSS 3-byte length fixed
 - ✅ Regressions triaged: SMB2(2.02) tree-connect fixed (VNI caps echo + cipher gate);
@@ -352,9 +353,10 @@ All items resolved:
   VALIDATE_NEGOTIATE_INFO echoes advertised caps/dialect exactly
 
 ### M1 residual polish (non-blocking)
-- ✅ srvsvc dynamic NDR encoder: verified — impacket parses our stub correctly,
-  smbclient -L shows shares over encrypted sessions
-- ✅ Throughput: 8 MB encrypted round-trip verified (~390 MB/s put)
+- ✅ srvsvc dynamic NDR encoder: adopted the `ms-ndr` primitive crate for referent
+  ids, alignment and conformant-varying wstrings; `smbclient -L` enumerates a
+  dynamic share set (public/docs/IPC$) live, round-trip unit tests green
+- ✅ Throughput: 64 MB encrypted PUT ~403 MB/s, GET ~291 MB/s (loopback, AES-GCM)
 - ⬜ impacket-based integration tests as CI regression suite (M2 item)
 
 ### M2 — Real-server semantics

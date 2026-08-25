@@ -29,3 +29,4 @@ smb-transport = { path = "../smb-transport" }
 smb-vfs = { path = "../smb-vfs" }
 smb-backend-posix = { path = "../smb-backend-posix" }
 smb-auth = { path = "../smb-auth", default-features = false }
+ms-ndr = "0.1.1"

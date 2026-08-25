@@ -881,6 +881,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ms-ndr"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b39bbc72af3a4ab742a7ce215365b4b63dd8e56b3e0e7d75ae07f74384324b"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1302,6 +1311,7 @@ dependencies = [
  "clap",
  "metrics",
  "metrics-exporter-prometheus",
+ "ms-ndr",
  "smb-auth",
  "smb-backend-posix",
  "smb-proto",
