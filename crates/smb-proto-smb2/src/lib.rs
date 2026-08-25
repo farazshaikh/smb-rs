@@ -17,6 +17,7 @@
 pub const SMB2_MAGIC: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
 pub mod commands;
+pub mod compress;
 pub mod consts;
 pub mod info;
 pub mod negotiate;

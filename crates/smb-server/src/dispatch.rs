@@ -112,17 +112,38 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
 
             counter!("smb_nbss_frames_total").increment(1);
 
-            // SMB2/3 frames (\xFESMB magic) and encrypted transform frames
-            // (\xFD"SMB" — [MS-SMB2] §2.2.41).
-            if frame.0[0] == 0xFE || frame.0[0] == 0xFD || conn.upgraded_smb2 {
+            // SMB2/3 frames (\xFESMB magic), encrypted transform frames
+            // (\xFD"SMB" — [MS-SMB2] §2.2.41) and compressed transform frames
+            // (\xFC"SMB" — §2.2.42).
+            if frame.0[0] == 0xFE || frame.0[0] == 0xFD || frame.0[0] == 0xFC || conn.upgraded_smb2 {
                 if smb2_conn.is_none() {
                     smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge(), out_tx.clone()));
                 }
                 let c2 = smb2_conn.as_mut().unwrap();
+                // Decompress an SMB3 compressed transform before dispatch.
+                let decompressed;
+                let msg: &[u8] = if frame.0[0] == 0xFC {
+                    match smb_proto_smb2::compress::decompress_message(&frame.0) {
+                        Some(d) => {
+                            decompressed = d;
+                            &decompressed
+                        }
+                        None => continue,
+                    }
+                } else {
+                    &frame.0
+                };
                 let start = std::time::Instant::now();
-                if let Some(resp) =
-                    crate::smb2::process_frame(&server, c2, &frame.0).await
-                {
+                if let Some(mut resp) = crate::smb2::process_frame(&server, c2, msg).await {
+                    // Opportunistically compress large plaintext responses when
+                    // the peer negotiated compression (never a sealed frame).
+                    if let Some(algo) = c2.compress_algo {
+                        if resp.len() > 1024 && resp.first() != Some(&0xFD) {
+                            if let Some(packed) = smb_proto_smb2::compress::compress_message(&resp, algo) {
+                                resp = packed;
+                            }
+                        }
+                    }
                     histogram!("smb_frame_duration_us").record(start.elapsed().as_micros() as f64);
                     counter!("smb_responses_total").increment(1);
                     if out_tx.send(resp).await.is_err() {

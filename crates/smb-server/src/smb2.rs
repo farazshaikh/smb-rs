@@ -89,6 +89,9 @@ pub struct Smb2Conn {
     /// Durable handles granted on this connection, keyed by FileId, preserved
     /// into the server table when the connection drops ([MS-SMB2] §3.3.1.10).
     pub durable: HashMap<[u8; 16], crate::state::DurableEntry>,
+    /// Negotiated outbound compression algorithm ([MS-SMB2] §2.2.42), if the
+    /// client and server share one; `None` disables compressed responses.
+    pub compress_algo: Option<u16>,
 }
 
 impl Smb2Conn {
@@ -122,6 +125,7 @@ impl Smb2Conn {
             async_cancels: HashMap::new(),
             resume_keys: HashMap::new(),
             durable: HashMap::new(),
+            compress_algo: None,
         }
     }
 
@@ -591,6 +595,21 @@ async fn process_single(
             if dialect == smb_proto_smb2::negotiate::DIALECT_311 && !client_ciphers.is_empty() {
                 conn.cipher = chosen;
             }
+            // Compression: intersect the client's advertised algorithms with
+            // ours; a common set enables compressed transforms both ways.
+            let comp_algos = req
+                .contexts
+                .iter()
+                .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION)
+                .map(|c| smb_proto_smb2::compress::negotiate_algos(
+                    &smb_proto_smb2::compress::parse_compression_caps(&c.data),
+                ))
+                .unwrap_or_default();
+            if dialect == smb_proto_smb2::negotiate::DIALECT_311
+                && comp_algos.contains(&smb_proto_smb2::compress::algo::LZNT1)
+            {
+                conn.compress_algo = Some(smb_proto_smb2::compress::algo::LZNT1);
+            }
             (
                 Status::SUCCESS,
                 smb_proto_smb2::negotiate::build_response_full(
@@ -599,6 +618,7 @@ async fn process_single(
                     smb_proto::types::FileTime::now().0,
                     &salt,
                     chosen.unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM),
+                    &comp_algos,
                 ),
             )
         }

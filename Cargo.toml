@@ -49,6 +49,8 @@ futures-util = "0.3"
 win-sd = "0.2"
 # Portable extended-attribute access for persisting NT ACLs on POSIX files.
 xattr = "1"
+# LZNT1 compression codec for SMB3 compressed transforms (pure Rust).
+lznt1 = "0.1"
 
 [profile.release]
 opt-level = 2

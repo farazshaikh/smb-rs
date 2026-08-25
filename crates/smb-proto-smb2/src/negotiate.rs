@@ -28,6 +28,8 @@ pub mod ctx_type {
     pub const PREAUTH_INTEGRITY: u16 = 0x0001;
     /// ENCRYPTION_CAPABILITIES.
     pub const ENCRYPTION: u16 = 0x0002;
+    /// COMPRESSION_CAPABILITIES.
+    pub const COMPRESSION: u16 = 0x0003;
     /// SIGNING_CAPABILITIES.
     pub const SIGNING: u16 = 0x0008;
     /// SIGNING_ALGORITHM values: AES-128-CMAC.
@@ -146,13 +148,16 @@ pub fn build_response_full(
     now: u64,
     salt: &[u8; 32],
     chosen_cipher: u16,
+    compression: &[u16],
 ) -> Vec<u8> {
     let mut b = Vec::with_capacity(128);
     b.extend_from_slice(&65u16.to_le_bytes()); // StructureSize
     b.extend_from_slice(&1u16.to_le_bytes()); // SecurityMode: signing enabled
     b.extend_from_slice(&dialect.to_le_bytes());
     if dialect == DIALECT_311 {
-        b.extend_from_slice(&3u16.to_le_bytes()); // NegotiateContextCount
+        // PREAUTH + SIGNING + ENCRYPTION, plus COMPRESSION when negotiated.
+        let count = 3 + u16::from(!compression.is_empty());
+        b.extend_from_slice(&count.to_le_bytes()); // NegotiateContextCount
     } else {
         b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
     }
@@ -201,6 +206,12 @@ pub fn build_response_full(
         let enc = [1u16.to_le_bytes(), chosen_cipher.to_le_bytes()].concat();
         push_ctx(&mut ctx, ctx_type::ENCRYPTION, &enc);
 
+        // COMPRESSION_CAPABILITIES: advertise the negotiated algorithm set.
+        if !compression.is_empty() {
+            let comp = crate::compress::build_compression_caps(compression);
+            push_ctx(&mut ctx, ctx_type::COMPRESSION, &comp);
+        }
+
         let ctx_off = BODY_START_FIXED; // absolute offset of contexts
         b[60..64].copy_from_slice(&(ctx_off as u32).to_le_bytes()); // NegotiateContextOffset
         b.extend_from_slice(&ctx);
@@ -219,5 +230,5 @@ const BODY_START_FIXED: usize = 64 + 64;
 /// pre-3.1.1 dialects (where the spec marks it Reserved); every real-world
 /// parser expects the field's presence.
 pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
-    build_response_full(dialect, guid, now, &[0u8; 32], 0)
+    build_response_full(dialect, guid, now, &[0u8; 32], 0, &[])
 }
