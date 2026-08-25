@@ -73,9 +73,11 @@ copychunk, compound frames, IPC$ named pipes with srvsvc share enumeration,
 and compression. Unsupported requests are rejected cleanly with proper NT
 status codes.
 
-Per-feature detail (spec section, status, unit/system tests, benchmarking,
-logging, metrics) lives in
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)'s **Feature Matrix**.
+A command-by-command status table (every SMB1/SMB2 opcode and FSCTL) lives
+in [docs/command_status.md](docs/command_status.md). Per-feature detail
+(spec section, status, unit/system tests, benchmarking, logging, metrics)
+lives in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)'s **Feature
+Matrix**.
 
 ### Roadmap
 
