@@ -85,4 +85,20 @@ pub trait Vfs: Send + Sync {
 
     /// Query disk `(total_units, free_units, sectors_per_unit, bytes_per_sector)`.
     async fn query_disk(&self) -> VfsResult<(u32, u32, u16, u16)>;
+
+    /// Zero the byte range `[offset, offset + len)` of an open handle
+    /// (FSCTL_SET_ZERO_DATA). The default writes zeros through [`Vfs::write`];
+    /// backends may override to punch a sparse hole.
+    async fn zero_range(&self, open: &mut OpenFile, offset: u64, len: u64) -> VfsResult<()> {
+        let zeros = vec![0u8; 64 * 1024];
+        let mut pos = offset;
+        let mut remaining = len;
+        while remaining > 0 {
+            let n = remaining.min(zeros.len() as u64) as usize;
+            self.write(open, pos, &zeros[..n], false).await?;
+            pos += n as u64;
+            remaining -= n as u64;
+        }
+        Ok(())
+    }
 }

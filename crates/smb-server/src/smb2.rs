@@ -83,6 +83,9 @@ pub struct Smb2Conn {
     /// In-flight async operations keyed by async id; sending on the channel
     /// cancels the background task (used by CANCEL, §2.2.30).
     pub async_cancels: HashMap<u64, oneshot::Sender<()>>,
+    /// Server-side-copy resume keys → source FileId ([MS-SMB2] §2.2.32.3);
+    /// handed out by FSCTL_SRV_REQUEST_RESUME_KEY and consumed by COPYCHUNK.
+    pub resume_keys: HashMap<[u8; 24], [u8; 16]>,
 }
 
 impl Smb2Conn {
@@ -114,6 +117,7 @@ impl Smb2Conn {
             outbound,
             next_async_id: 1,
             async_cancels: HashMap::new(),
+            resume_keys: HashMap::new(),
         }
     }
 
@@ -758,6 +762,60 @@ async fn process_single(
                     let out_hex = hex_str(&out);
                     tracing::debug!(out_len = out.len(), %out_hex, "pipe transact");
                     (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+                }
+                // Server-side copy: hand the client a resume key naming this
+                // open so a later COPYCHUNK can use it as the source.
+                c::fsctl::SRV_REQUEST_RESUME_KEY => {
+                    if !conn.handles.contains_key(&req.file_id.0) {
+                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                    }
+                    let mut key = [0u8; 24];
+                    key[..16].copy_from_slice(&req.file_id.0);
+                    key[16..24].copy_from_slice(&next_resume_nonce().to_le_bytes());
+                    conn.resume_keys.insert(key, req.file_id.0);
+                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &c::build_resume_key_resp(&key)))
+                }
+                // Server-side copy: read from the source open (named by the
+                // resume key in the input) and write into this target handle.
+                c::fsctl::SRV_COPYCHUNK | c::fsctl::SRV_COPYCHUNK_WRITE => {
+                    let vfs = match share_vfs(server, conn, tid) {
+                        Some(v) => v,
+                        None => return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true)),
+                    };
+                    match do_copychunk(conn, vfs, &req).await {
+                        Ok(out) => {
+                            counter!("smb_copychunk_bytes_total").increment(copychunk_total(&out) as u64);
+                            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+                        }
+                        Err((status, out)) => {
+                            let body = c::build_ioctl_resp(req.file_id, req.ctl_code, &out);
+                            return Some((response(&hdr, status, body, conn.session_id), true));
+                        }
+                    }
+                }
+                // Linux files are implicitly sparse; accept the hint.
+                c::fsctl::SET_SPARSE => {
+                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+                }
+                // Zero a byte range in the target handle ([MS-FSCC] §2.3.79).
+                c::fsctl::SET_ZERO_DATA => {
+                    let vfs = match share_vfs(server, conn, tid) {
+                        Some(v) => v,
+                        None => return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true)),
+                    };
+                    let Some((start, end)) = c::parse_zero_data(&req.input).filter(|(s, e)| e >= s) else {
+                        return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
+                    };
+                    let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
+                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+                    };
+                    match vfs.zero_range(h, start, end - start).await {
+                        Ok(()) => {
+                            counter!("smb_zeroed_bytes_total").increment(end - start);
+                            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+                        }
+                        Err(e) => (vfs_err(e), Vec::new()),
+                    }
                 }
                 _ => (Status::NOT_IMPLEMENTED, Vec::new()),
             }
@@ -1792,6 +1850,68 @@ fn share_vfs(
     conn.trees.get(&tid).and_then(|n| server.shares.get(n)).map(|s| s.vfs.clone())
 }
 
+/// Server-side-copy nonce appended to a resume key so repeated keys on one
+/// open stay distinct.
+fn next_resume_nonce() -> u64 {
+    static N: AtomicU64 = AtomicU64::new(0x5253_554d_4b45_5900);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Read the TotalBytesWritten field out of a SRV_COPYCHUNK_RESPONSE body.
+fn copychunk_total(resp: &[u8]) -> u32 {
+    resp.get(8..12)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .unwrap_or(0)
+}
+
+/// Perform a server-side copy: for each chunk read from the source open named
+/// by the resume key and write into the target handle. Returns the
+/// SRV_COPYCHUNK_RESPONSE body, or `(status, body)` where the body carries the
+/// server limits on a limits violation ([MS-SMB2] §3.3.5.15.6).
+async fn do_copychunk(
+    conn: &mut Smb2Conn,
+    vfs: Arc<dyn smb_vfs::Vfs>,
+    req: &c::IoctlReq,
+) -> Result<Vec<u8>, (Status, Vec<u8>)> {
+    use smb_proto_smb2::commands::copychunk_limits as lim;
+    let cc = c::CopyChunkCopy::parse(&req.input).ok_or((Status::INVALID_PARAMETER, Vec::new()))?;
+
+    let total: u64 = cc.chunks.iter().map(|k| k.length as u64).sum();
+    if cc.chunks.len() as u32 > lim::MAX_CHUNKS
+        || cc.chunks.iter().any(|k| k.length > lim::MAX_CHUNK_SIZE)
+        || total > lim::MAX_TOTAL_SIZE as u64
+    {
+        let limits = c::build_copychunk_resp(lim::MAX_CHUNKS, lim::MAX_CHUNK_SIZE, lim::MAX_TOTAL_SIZE);
+        return Err((Status::INVALID_PARAMETER, limits));
+    }
+
+    let src_fid = *conn
+        .resume_keys
+        .get(&cc.source_key)
+        .ok_or((Status::OBJECT_NAME_NOT_FOUND, Vec::new()))?;
+    let tgt_fid = req.file_id.0;
+
+    let mut chunks_written = 0u32;
+    let mut total_written = 0u32;
+    for k in &cc.chunks {
+        let data = {
+            let src = conn.handles.get_mut(&src_fid).ok_or((Status::INVALID_HANDLE, Vec::new()))?;
+            vfs.read(src, k.source_offset, k.length as usize)
+                .await
+                .map_err(|e| (vfs_err(e), Vec::new()))?
+        };
+        let tgt = conn.handles.get_mut(&tgt_fid).ok_or((Status::INVALID_HANDLE, Vec::new()))?;
+        let w = vfs
+            .write(tgt, k.target_offset, &data, false)
+            .await
+            .map_err(|e| (vfs_err(e), Vec::new()))?;
+        total_written += w as u32;
+        chunks_written += 1;
+    }
+    // On success ChunkBytesWritten is 0 ([MS-SMB2] §2.2.32.1).
+    Ok(c::build_copychunk_resp(chunks_written, 0, total_written))
+}
+
 fn vfs_err(e: smb_vfs::VfsError) -> Status {
     use smb_vfs::VfsError as E;
     match e {
@@ -1909,6 +2029,124 @@ mod async_notify_tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         tx.send(()).unwrap();
         assert!(watch.await.unwrap().is_none(), "cancelled watch yields no events");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod fsctl_tests {
+    use super::*;
+
+    fn conn_with_vfs(dir: &std::path::Path) -> (Smb2Conn, Arc<dyn smb_vfs::Vfs>) {
+        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+        let (tx, _rx) = mpsc::channel(8);
+        (Smb2Conn::new([0u8; 8], tx), vfs)
+    }
+
+    /// Server-side copy reads from the source open (named by a resume key) and
+    /// writes into the target handle; the target file ends up with the bytes.
+    #[tokio::test]
+    async fn copychunk_copies_between_handles() {
+        let dir = std::env::temp_dir().join(format!("rustsmb_cc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("src.txt"), b"hello copychunk world").unwrap();
+        std::fs::write(dir.join("dst.txt"), b"").unwrap();
+
+        let (mut conn, vfs) = conn_with_vfs(&dir);
+        let (src, _m, _a) = vfs.create("src.txt", false, 0x8000_0000, 1, 0, 0).await.unwrap();
+        let (dst, _m, _a) = vfs.create("dst.txt", false, 0x4000_0000, 1, 0, 0).await.unwrap();
+        let (src_fid, dst_fid) = ([1u8; 16], [2u8; 16]);
+        conn.handles.insert(src_fid, src);
+        conn.handles.insert(dst_fid, dst);
+
+        let mut key = [0u8; 24];
+        key[..16].copy_from_slice(&src_fid);
+        conn.resume_keys.insert(key, src_fid);
+
+        let mut input = Vec::new();
+        input.extend_from_slice(&key);
+        input.extend_from_slice(&1u32.to_le_bytes()); // ChunkCount
+        input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+        input.extend_from_slice(&0u64.to_le_bytes()); // SourceOffset
+        input.extend_from_slice(&0u64.to_le_bytes()); // TargetOffset
+        input.extend_from_slice(&21u32.to_le_bytes()); // Length
+        input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+
+        let req = c::IoctlReq {
+            ctl_code: c::fsctl::SRV_COPYCHUNK,
+            file_id: c::FileId(dst_fid),
+            input,
+            max_output: 4096,
+            is_fsctl: true,
+        };
+        let out = do_copychunk(&mut conn, vfs.clone(), &req).await.expect("copychunk");
+        assert_eq!(&out[0..4], &1u32.to_le_bytes(), "ChunksWritten");
+        assert_eq!(&out[8..12], &21u32.to_le_bytes(), "TotalBytesWritten");
+
+        let dst = conn.handles.remove(&dst_fid).unwrap();
+        vfs.close(dst).await.unwrap();
+        assert_eq!(std::fs::read(dir.join("dst.txt")).unwrap(), b"hello copychunk world");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A request past the server limits is rejected with the limits echoed.
+    #[tokio::test]
+    async fn copychunk_rejects_oversized_request() {
+        use smb_proto_smb2::commands::copychunk_limits as lim;
+        let dir = std::env::temp_dir().join(format!("rustsmb_cc_lim_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), b"x").unwrap();
+        let (mut conn, vfs) = conn_with_vfs(&dir);
+        let (f, _m, _a) = vfs.create("f", false, 0x8000_0000, 1, 0, 0).await.unwrap();
+        let fid = [3u8; 16];
+        conn.handles.insert(fid, f);
+        let mut key = [0u8; 24];
+        key[..16].copy_from_slice(&fid);
+        conn.resume_keys.insert(key, fid);
+
+        let mut input = Vec::new();
+        input.extend_from_slice(&key);
+        input.extend_from_slice(&1u32.to_le_bytes());
+        input.extend_from_slice(&0u32.to_le_bytes());
+        input.extend_from_slice(&0u64.to_le_bytes());
+        input.extend_from_slice(&0u64.to_le_bytes());
+        input.extend_from_slice(&(lim::MAX_CHUNK_SIZE + 1).to_le_bytes()); // over per-chunk cap
+        input.extend_from_slice(&0u32.to_le_bytes());
+
+        let req = c::IoctlReq {
+            ctl_code: c::fsctl::SRV_COPYCHUNK,
+            file_id: c::FileId(fid),
+            input,
+            max_output: 4096,
+            is_fsctl: true,
+        };
+        let err = do_copychunk(&mut conn, vfs, &req).await.unwrap_err();
+        assert_eq!(err.0, Status::INVALID_PARAMETER);
+        assert_eq!(&err.1[4..8], &lim::MAX_CHUNK_SIZE.to_le_bytes(), "limits echoed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// FSCTL_SET_ZERO_DATA zeros the requested byte range.
+    #[tokio::test]
+    async fn zero_range_zeros_bytes() {
+        let dir = std::env::temp_dir().join(format!("rustsmb_zd_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("z.bin"), vec![0xFFu8; 16]).unwrap();
+        let (mut conn, vfs) = conn_with_vfs(&dir);
+        let (f, _m, _a) = vfs.create("z.bin", false, 0x4000_0000, 1, 0, 0).await.unwrap();
+        let fid = [4u8; 16];
+        conn.handles.insert(fid, f);
+
+        let h = conn.handles.get_mut(&fid).map(|b| &mut **b).unwrap();
+        vfs.zero_range(h, 4, 8).await.expect("zero range");
+        let f = conn.handles.remove(&fid).unwrap();
+        vfs.close(f).await.unwrap();
+
+        let mut expected = vec![0xFFu8; 16];
+        for b in &mut expected[4..12] {
+            *b = 0;
+        }
+        assert_eq!(std::fs::read(dir.join("z.bin")).unwrap(), expected);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

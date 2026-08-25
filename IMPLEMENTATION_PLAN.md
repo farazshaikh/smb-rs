@@ -257,8 +257,8 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Oplocks v1/v2 + break notification | [MS-SMB] §2.2.4.50, §2.2.24 | planned | break state machine | two-client cache race | oplock latency | break sent lines | breaks_sent |
 | Leases v2/v3 (directory leases) | §2.2.23.2 | planned | lease table tests | explorer dir cache | — | lease key lines | leases_active |
 | Durable / persistent handles | §2.2.13.2.4–6 | planned | reconnect test | network-blip resume | — | — | durables_held |
-| Server-side COPYCHUNK (ODX offload) | §2.2.31.6 | planned | — | windows copy offload | effective MB/s | — | offload_bytes |
-| ZERO_DATA / SET_SPARSE | §2.2.31.12/14 | planned | — | fallocate check | — | — | zeroed_bytes |
+| Server-side COPYCHUNK (ODX offload) | §2.2.31.6 | complete | copychunk copy + limits integration tests | resume-key→copychunk between two handles | effective MB/s | copychunk debug | copychunk_bytes ✅ |
+| ZERO_DATA / SET_SPARSE | §2.2.31.12/14 | complete | zero_range integration test | punches/zeros a range | — | — | zeroed_bytes ✅ |
 
 ### Directories ([MS-SMB2] §2.2.33–§2.2.36)
 
@@ -293,8 +293,8 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | FSCTL_LMR_REQ_RESILIENCY ack | §2.2.31.10 | complete | — | resilient-open clients | — | — | — |
 | FSCTL_PIPE_WAIT | §2.2.31.2 | planned (stub ack only) | pipe-wait test | — | — | — | — |
 | FSCTL_DFS_GET_REFERRALS | §2.2.31.1 | planned | — | dfs client | — | — | — |
-| FSCTL_SRV_REQUEST_RESUME_KEY | §2.2.31.4 | planned | resume-key tests | odx prerequisite | — | — | — |
-| FSCTL_COPYCHUNK(_WRITE) | §2.2.31.6/7 | planned | chunk-limit tests | server-side copy | effective copy MB/s | — | copychunk_bytes |
+| FSCTL_SRV_REQUEST_RESUME_KEY | §2.2.31.4 | complete | resume-key response test | odx source key | — | — | — |
+| FSCTL_COPYCHUNK(_WRITE) | §2.2.31.6/7 | complete | copychunk parse + copy + chunk-limit tests | server-side copy | effective copy MB/s | — | copychunk_bytes ✅ |
 
 ### IPC$ / named pipes ([MS-SMB2] §2.1.2.1, [MS-SRVS])
 
@@ -397,6 +397,12 @@ pending op and returns STATUS_CANCELLED on the original.
   lease table; unsolicited break notifications (needs M2.1) + break-ack.
 - **M2.4 FSCTL batch** (item 7, independent/synchronous): SRV_REQUEST_RESUME_KEY
   + COPYCHUNK(_WRITE) pair; SET_SPARSE + SET_ZERO_DATA via `fallocate` punch-hole.
+  Status: **done** — resume-key registry, chunked server-side copy with
+  [MS-SMB2] §3.3.5.15.6 limits enforcement, SET_SPARSE accepted, SET_ZERO_DATA
+  zeros a range (VFS `zero_range`, default writes zeros). Proto codec unit tests
+  + server integration tests (copy between handles, limits rejection, zero range);
+  smbclient/smbprotocol regressions still green. Metrics `copychunk_bytes`,
+  `zeroed_bytes`.
 
 Sequencing: M2.1 first (unblocks all) → M2.4 in parallel (independent) →
 M2.2 (needs async wait) → M2.3 (needs async breaks). Cross-cutting: extend the

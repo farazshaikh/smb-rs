@@ -871,6 +871,14 @@ pub mod fsctl {
     pub const PIPE_WAIT: u32 = 0x0011_C017;
     /// FSCTL_SRV_REQUEST_RESUME_KEY.
     pub const SRV_REQUEST_RESUME_KEY: u32 = 0x0014_0078;
+    /// FSCTL_SRV_COPYCHUNK — server-side copy ([MS-SMB2] §2.2.31.1).
+    pub const SRV_COPYCHUNK: u32 = 0x0014_40F2;
+    /// FSCTL_SRV_COPYCHUNK_WRITE — server-side copy, write handle.
+    pub const SRV_COPYCHUNK_WRITE: u32 = 0x0014_80F2;
+    /// FSCTL_SET_SPARSE ([MS-FSCC] §2.3.67).
+    pub const SET_SPARSE: u32 = 0x0009_00C4;
+    /// FSCTL_SET_ZERO_DATA ([MS-FSCC] §2.3.79) — punch a zero range.
+    pub const SET_ZERO_DATA: u32 = 0x0009_80C8;
     /// FSCTL_LMR_REQ_RESILIENCY.
     pub const LMR_REQUEST_RESILIENCY: u32 = 0x0014_01D4;
     /// FSCTL_PIPE_TRANSACT ([MS-SMB2] §2.2.31.10 "Transact named pipe"):
@@ -943,6 +951,92 @@ pub fn build_ioctl_resp(file_id: FileId, ctl_code: u32, output: &[u8]) -> Vec<u8
     b.extend_from_slice(output);
     debug_assert_eq!(b.len(), FIXED + output.len());
     b
+}
+
+// ---------------- Server-side copy ([MS-SMB2] §2.2.31.1 / §2.2.32.1) ----------
+
+/// Server-side copy limits ([MS-SMB2] §3.3.5.15.6).
+pub mod copychunk_limits {
+    /// Maximum chunks per request.
+    pub const MAX_CHUNKS: u32 = 16;
+    /// Maximum bytes per chunk (1 MiB).
+    pub const MAX_CHUNK_SIZE: u32 = 1_048_576;
+    /// Maximum total bytes per request (16 MiB).
+    pub const MAX_TOTAL_SIZE: u32 = 16_777_216;
+}
+
+/// One SRV_COPYCHUNK entry ([MS-SMB2] §2.2.31.1).
+#[derive(Debug, Clone, Copy)]
+pub struct CopyChunk {
+    /// Byte offset in the source file.
+    pub source_offset: u64,
+    /// Byte offset in the target file.
+    pub target_offset: u64,
+    /// Number of bytes to copy.
+    pub length: u32,
+}
+
+/// Parsed SRV_COPYCHUNK_COPY request ([MS-SMB2] §2.2.31.1): a 24-byte source
+/// resume key followed by a chunk list.
+#[derive(Debug)]
+pub struct CopyChunkCopy {
+    /// Resume key identifying the source open ([`build_resume_key_resp`]).
+    pub source_key: [u8; 24],
+    /// Copy operations to perform.
+    pub chunks: Vec<CopyChunk>,
+}
+
+impl CopyChunkCopy {
+    /// Parse from the IOCTL input buffer.
+    pub fn parse(input: &[u8]) -> Option<CopyChunkCopy> {
+        if input.len() < 32 {
+            return None;
+        }
+        let source_key: [u8; 24] = input[0..24].try_into().ok()?;
+        let chunk_count = g32(input, 24) as usize;
+        // Reserved at [28..32].
+        let mut chunks = Vec::with_capacity(chunk_count.min(64));
+        for i in 0..chunk_count {
+            let base = 32 + i * 24;
+            let e = input.get(base..base + 24)?;
+            chunks.push(CopyChunk {
+                source_offset: g64(e, 0),
+                target_offset: g64(e, 8),
+                length: g32(e, 16),
+            });
+        }
+        Some(CopyChunkCopy { source_key, chunks })
+    }
+}
+
+/// Build the SRV_REQUESTED_RESUME_KEY response ([MS-SMB2] §2.2.32.3): the
+/// 24-byte key then a zero ContextLength.
+pub fn build_resume_key_resp(key: &[u8; 24]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(32);
+    b.extend_from_slice(key);
+    b.extend_from_slice(&0u32.to_le_bytes()); // ContextLength
+    b.extend_from_slice(&0u32.to_le_bytes()); // Context (empty, padded)
+    b
+}
+
+/// Build the SRV_COPYCHUNK_RESPONSE ([MS-SMB2] §2.2.32.1). On success it
+/// reports chunks/bytes written; on a limits violation the caller sends it
+/// with STATUS_INVALID_PARAMETER carrying the server's maximums.
+pub fn build_copychunk_resp(chunks_written: u32, chunk_bytes_written: u32, total_bytes_written: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(12);
+    b.extend_from_slice(&chunks_written.to_le_bytes());
+    b.extend_from_slice(&chunk_bytes_written.to_le_bytes());
+    b.extend_from_slice(&total_bytes_written.to_le_bytes());
+    b
+}
+
+/// Parse FILE_ZERO_DATA_INFORMATION ([MS-FSCC] §2.3.79): `(FileOffset,
+/// BeyondFinalZero)`. The zeroed range is `[FileOffset, BeyondFinalZero)`.
+pub fn parse_zero_data(input: &[u8]) -> Option<(u64, u64)> {
+    if input.len() < 16 {
+        return None;
+    }
+    Some((g64(input, 0), g64(input, 8)))
 }
 
 // ---------------- Encryption transform header ([MS-SMB2] §2.2.41) ----------------
@@ -1109,5 +1203,56 @@ mod change_notify_tests {
             assert_eq!(&body[0..2], &4u16.to_le_bytes(), "{name} StructureSize=4");
             assert_eq!(&body[2..4], &0u16.to_le_bytes(), "{name} Reserved=0");
         }
+    }
+}
+
+#[cfg(test)]
+mod fsctl_tests {
+    use super::*;
+
+    #[test]
+    fn parses_copychunk_copy() {
+        let key = [0xABu8; 24];
+        let mut input = Vec::new();
+        input.extend_from_slice(&key);
+        input.extend_from_slice(&2u32.to_le_bytes()); // ChunkCount
+        input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+        for (so, to, len) in [(0u64, 100u64, 10u32), (10, 110, 20)] {
+            input.extend_from_slice(&so.to_le_bytes());
+            input.extend_from_slice(&to.to_le_bytes());
+            input.extend_from_slice(&len.to_le_bytes());
+            input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+        }
+        let cc = CopyChunkCopy::parse(&input).expect("parse");
+        assert_eq!(cc.source_key, key);
+        assert_eq!(cc.chunks.len(), 2);
+        assert_eq!(cc.chunks[1].source_offset, 10);
+        assert_eq!(cc.chunks[1].target_offset, 110);
+        assert_eq!(cc.chunks[1].length, 20);
+    }
+
+    #[test]
+    fn copychunk_response_fields() {
+        let r = build_copychunk_resp(3, 0, 999);
+        assert_eq!(&r[0..4], &3u32.to_le_bytes(), "ChunksWritten");
+        assert_eq!(&r[4..8], &0u32.to_le_bytes(), "ChunkBytesWritten");
+        assert_eq!(&r[8..12], &999u32.to_le_bytes(), "TotalBytesWritten");
+    }
+
+    #[test]
+    fn resume_key_response_carries_key() {
+        let key = [7u8; 24];
+        let r = build_resume_key_resp(&key);
+        assert_eq!(&r[0..24], &key);
+        assert_eq!(&r[24..28], &0u32.to_le_bytes(), "ContextLength=0");
+    }
+
+    #[test]
+    fn parses_zero_data_range() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&4096u64.to_le_bytes());
+        input.extend_from_slice(&8192u64.to_le_bytes());
+        assert_eq!(parse_zero_data(&input), Some((4096, 8192)));
+        assert!(parse_zero_data(&input[..8]).is_none());
     }
 }
