@@ -190,8 +190,8 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Compound request/response chains | [MS-SMB2] §3.3.5.2 | complete | — (todo: parser fuzz) | smbd parallel_read path | — | tracing::debug per frame | compounded_msgs_total ✅ |
 | Credit accounting (grant/charge, multi-credit) | [MS-SMB2] §3.3.1.1 | planned | charge calc unit tests | large-file copy ≥64 KiB chunks | large-R/W MB/s | credits granted per resp | credits_granted |
 | Large MTU (>64 KiB single R/W) | §2.2.3.1.1 CAP_LARGE_MTU | planned | — | dd through mount | bulk MB/s | — | max_rw_seen |
-| Async processing (STATUS_PENDING, async id) | §2.2.1.1, §3.3.4.2 | planned | state-machine tests | notify long-poll | — | pending count | async_pending |
-| CANCEL | §2.2.30 | complete | — | ctrl-c mid-read | — | cancel received | cancels_total |
+| Async processing (STATUS_PENDING, async id) | §2.2.1.1, §3.3.4.2 | complete | async-frame + inotify watch/cancel tests | smbprotocol notify over encryption ✅ | — | pending gauge | async_pending ✅ |
+| CANCEL | §2.2.30 | complete | cancel-stops-watch test | ctrl-c mid-read | — | cancel received | cancels_total ✅ |
 | NetBIOS 139 + datagram browsing | RFC 1001/1002 | planned | — | Windows Network browse | — | — | — |
 
 ### Negotiation ([MS-SMB2] §2.2.3)
@@ -269,7 +269,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | RETURN_SINGLE_ENTRY | §2.2.33.1 | complete | — | — | — | — | — |
 | Resume-by-index (INDEX_SPECIFIED) | §2.2.33.1 | planned | index resume tests | huge-dir page walk | — | — | — |
 | 8.3 short-name generation/matching | [MS-FSCC] §2.1.5 | planned | name-gen tests | dos-style lookup | — | — | — |
-| CHANGE_NOTIFY (recursive/non-recursive) | §2.2.35/36 | planned | filter map tests | touch → notify wait | — | notify fire lines | notifies_sent |
+| CHANGE_NOTIFY (recursive/non-recursive) | §2.2.35/36 | complete (non-recursive) | parse/build + real inotify watch tests | smbprotocol watch→create→notify over encryption ✅ | — | notify fire lines | notifies_sent ✅ |
 | DOS wildcard matcher (* ?) | [MS-CIFS] §2.2.8.1 | complete | wildcard unit tests | patterned ls | — | — | — |
 
 ### Information levels & metadata ([MS-FSCC])
@@ -360,6 +360,49 @@ All items resolved:
 - ⬜ impacket-based integration tests as CI regression suite (M2 item)
 
 ### M2 — Real-server semantics
+
+**Architectural crux — async send path (must land first).** The dispatch loop
+is synchronous `recv → process → single send`; the transport is `&mut`-owned by
+the serve loop so nothing can push an unsolicited/interim frame. Every M2
+feature needs this (STATUS_PENDING interim, oplock/lease breaks, CHANGE_NOTIFY
+completion, lock-wait wakeups). `TcpTransport::recv` uses `read_exact` and is
+**not** cancel-safe, so a `select!`-drop approach would corrupt the stream — the
+fix is to **split** the transport into read/write halves with a dedicated writer
+task draining an outbound `mpsc`. Background tasks and handlers hold a
+`Sender<Vec<u8>>`; async requests get an `AsyncId` ([MS-SMB2] §3.3.4.2) tracked
+in a per-connection `async_id → CancellationToken` map; CANCEL cancels the
+pending op and returns STATUS_CANCELLED on the original.
+
+- **M2.1 Async/PENDING + CHANGE_NOTIFY** (item 4): split-transport writer + async
+  tracking, then CHANGE_NOTIFY ([MS-SMB2] §2.2.35/36) via `inotify`; fix CANCEL
+  to signal pending ops. Metrics `async_pending`, `notifies_sent`.
+  Status: **done and live-validated** — interim STATUS_PENDING then signed/sealed
+  async final, non-recursive inotify watcher, CANCEL wired. Verified end-to-end
+  over an **encrypted** `smbprotocol` session (watch → create file → notification
+  received → clean teardown, exit 0), plus proto unit tests and real-OS inotify
+  integration tests. Interop fixes landed to get there: (a) derive cipher keys
+  whenever a cipher is negotiated — not only under `--encrypt` — so the server
+  can decrypt client-initiated sealed traffic, and seal replies to sealed
+  requests; (b) TREE_DISCONNECT/LOGOFF/ECHO/FLUSH/LOCK response bodies were 2
+  bytes but must be 4 (StructureSize + Reserved) — strict clients failed to
+  unpack; (c) TREE_DISCONNECT is now idempotent; (d) LOGOFF no longer zeroes the
+  session id before its (sealed) response is built. Remaining: recursive
+  `SMB2_WATCH_TREE`; completed async ops leave a dead cancel-map entry until
+  disconnect. Separate open bug (not this item): `smbclient get` fails a
+  path-based getattrib with STATUS_OBJECT_PATH_NOT_FOUND.
+- **M2.2 Byte-range lock enforcement** (item 6): per-open lock table + conflict
+  matrix; STATUS_LOCK_NOT_GRANTED / async wait; sharing-violation on CREATE.
+- **M2.3 Oplocks v1/v2 + leases v2/v3** (item 5): parse lease create-contexts;
+  lease table; unsolicited break notifications (needs M2.1) + break-ack.
+- **M2.4 FSCTL batch** (item 7, independent/synchronous): SRV_REQUEST_RESUME_KEY
+  + COPYCHUNK(_WRITE) pair; SET_SPARSE + SET_ZERO_DATA via `fallocate` punch-hole.
+
+Sequencing: M2.1 first (unblocks all) → M2.4 in parallel (independent) →
+M2.2 (needs async wait) → M2.3 (needs async breaks). Cross-cutting: extend the
+`Vfs` trait with inotify-watch and `fallocate`/punch-hole/sparse methods;
+background tasks must stop when the connection drops; land the impacket CI
+regression suite alongside M2.1.
+
 4. Async/PENDING scaffolding → CHANGE_NOTIFY via inotify → CANCEL.
 5. Oplocks v1/v2 + leases v2/v3 with break notifications.
 6. Byte-range lock enforcement + sharing-violation detection.

@@ -42,4 +42,30 @@ pub trait Transport: Send {
 
     /// Human-readable peer description for logs.
     fn peer(&self) -> String;
+
+    /// Split into independent read and write halves.
+    ///
+    /// The server drives the read half from its accept loop while a dedicated
+    /// writer task drains an outbound queue into the write half. This lets
+    /// background work (async STATUS_PENDING completions, oplock/lease breaks,
+    /// CHANGE_NOTIFY) emit unsolicited frames without cancelling the blocking
+    /// `recv` — critical because `recv` is not cancel-safe.
+    fn split(self: Box<Self>) -> (Box<dyn FrameSource>, Box<dyn FrameSink>);
+}
+
+/// Read half of a split [`Transport`].
+#[async_trait]
+pub trait FrameSource: Send {
+    /// Receive the next frame. `Ok(None)` signals a clean end of stream.
+    async fn recv(&mut self) -> Result<Option<Frame>, TransportError>;
+
+    /// Human-readable peer description for logs.
+    fn peer(&self) -> String;
+}
+
+/// Write half of a split [`Transport`]. Owned by the per-connection writer task.
+#[async_trait]
+pub trait FrameSink: Send {
+    /// Transmit one frame.
+    async fn send(&mut self, data: &[u8]) -> Result<(), TransportError>;
 }

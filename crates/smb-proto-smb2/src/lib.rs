@@ -107,9 +107,9 @@ impl Header2 {
         self.flags & 0x0000_0008 != 0
     }
 
-    /// True when the async (bit 0 of flags word 2 → 0x1000... ) flag is set:
-    /// `Flags & SMB2_FLAGS_ASYNC_COMMAND`.
+    /// True when the async flag is set: `Flags & SMB2_FLAGS_ASYNC_COMMAND`
+    /// (0x00000002, [MS-SMB2] §2.2.1.2).
     pub fn is_async(&self) -> bool {
-        self.flags & 0x0000_0004 != 0
+        self.flags & 0x0000_0002 != 0
     }
 }

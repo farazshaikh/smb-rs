@@ -10,10 +10,11 @@ use smb_proto::types::Status;
 use smb_proto_smb1::consts;
 use smb_proto_smb1::header::{build_response, parse_header, Header, RespBody, HDR_LEN};
 
-use smb_transport::Transport;
+use smb_transport::{FrameSink, Transport};
 use smb_proto_smb1::consts::flags2;
 
 use metrics::{counter, histogram};
+use tokio::sync::mpsc;
 
 use crate::state::{next_uid, ServerShared, ConnState, Session};
 
@@ -73,52 +74,77 @@ impl<'a> ReqView<'a> {
 }
 
 /// Serve one client connection until EOF or transport error.
-pub async fn serve_client(server: Arc<crate::state::ServerShared>, mut transport: Box<dyn Transport>) {
-    let challenge = rand_challenge();
-    let mut conn = ConnState::new(challenge);
-
-    let mut smb2_conn: Option<crate::smb2::Smb2Conn> = None;
-
-    loop {
-        let Some(frame) = (match transport.recv().await {
-            Ok(Some(f)) => Some(f),
-            Ok(None) | Err(_) => return,
-        }) else {
-            return;
-        };
-        if frame.0.len() < 4 {
-            continue;
+/// Drain the outbound frame queue into the connection's write half. Runs as a
+/// dedicated task so background work can emit unsolicited frames (async
+/// STATUS_PENDING completions, oplock/lease breaks, CHANGE_NOTIFY) while the
+/// reader blocks on `recv`. Ends when every [`mpsc::Sender`] clone is dropped.
+pub(crate) async fn writer_loop(
+    mut writer: Box<dyn FrameSink>,
+    mut out_rx: mpsc::Receiver<Vec<u8>>,
+) {
+    while let Some(frame) = out_rx.recv().await {
+        if writer.send(&frame).await.is_err() {
+            break;
         }
+    }
+}
 
-        counter!("smb_nbss_frames_total").increment(1);
+pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Box<dyn Transport>) {
+    let (mut reader, writer) = transport.split();
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
+    let writer_task = tokio::spawn(writer_loop(writer, out_rx));
 
-        // SMB2/3 frames (\xFESMB magic) and encrypted transform frames
-        // (\xFD"SMB" — [MS-SMB2] §2.2.41).
-        if frame.0[0] == 0xFE || frame.0[0] == 0xFD || conn.upgraded_smb2 {
-            if smb2_conn.is_none() {
-                smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge()));
+    {
+        let challenge = rand_challenge();
+        let mut conn = ConnState::new(challenge);
+        let mut smb2_conn: Option<crate::smb2::Smb2Conn> = None;
+
+        loop {
+            let Some(frame) = (match reader.recv().await {
+                Ok(Some(f)) => Some(f),
+                Ok(None) | Err(_) => break,
+            }) else {
+                break;
+            };
+            if frame.0.len() < 4 {
+                continue;
             }
-            let c2 = smb2_conn.as_mut().unwrap();
-            let start = std::time::Instant::now();
-            if let Some(resp) =
-                crate::smb2::process_frame(&server, c2, &frame.0).await
-            {
-                histogram!("smb_frame_duration_us").record(start.elapsed().as_micros() as f64);
-                counter!("smb_responses_total").increment(1);
-                if transport.send(&resp).await.is_err() {
-                    return;
+
+            counter!("smb_nbss_frames_total").increment(1);
+
+            // SMB2/3 frames (\xFESMB magic) and encrypted transform frames
+            // (\xFD"SMB" — [MS-SMB2] §2.2.41).
+            if frame.0[0] == 0xFE || frame.0[0] == 0xFD || conn.upgraded_smb2 {
+                if smb2_conn.is_none() {
+                    smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge(), out_tx.clone()));
                 }
+                let c2 = smb2_conn.as_mut().unwrap();
+                let start = std::time::Instant::now();
+                if let Some(resp) =
+                    crate::smb2::process_frame(&server, c2, &frame.0).await
+                {
+                    histogram!("smb_frame_duration_us").record(start.elapsed().as_micros() as f64);
+                    counter!("smb_responses_total").increment(1);
+                    if out_tx.send(resp).await.is_err() {
+                        break;
+                    }
+                }
+                continue;
             }
-            continue;
-        }
 
-        // SMB1 frames.
-        if let Some(resp) = process_frame(&server, &mut conn, &frame.0).await {
-            if transport.send(&resp).await.is_err() {
-                return;
+            // SMB1 frames.
+            if let Some(resp) = process_frame(&server, &mut conn, &frame.0).await {
+                if out_tx.send(resp).await.is_err() {
+                    break;
+                }
             }
         }
     }
+
+    // The read loop has ended: drop our sender so the writer task sees every
+    // clone gone and shuts down, then join it.
+    drop(out_tx);
+    let _ = writer_task.await;
 }
 
 /// Cryptographically random per-connection NTLM challenge.

@@ -3,10 +3,11 @@
 
 use async_trait::async_trait;
 use std::io;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::{Frame, Transport, TransportError};
+use crate::{Frame, FrameSink, FrameSource, Transport, TransportError};
 
 /// NetBIOS session-service message types we care about ([RFC 1002] §4).
 mod nb_type {
@@ -45,8 +46,8 @@ impl TcpTransport {
     }
 }
 
-async fn read_exact_or_none(
-    stream: &mut TcpStream,
+async fn read_exact_or_none<R: AsyncRead + Unpin>(
+    stream: &mut R,
     buf: &mut [u8],
 ) -> Result<Option<()>, TransportError> {
     match stream.read_exact(buf).await {
@@ -62,6 +63,72 @@ async fn read_exact_or_none(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Read one NBSS session-message frame from a read half, skipping control
+/// frames (keepalive, legacy session-request). Returns `Ok(None)` at EOF.
+/// Unlike [`TcpTransport::recv`] this never writes, so it is safe to own in a
+/// split read half; legacy port-139 SESSION_REQUEST handshakes (unused on the
+/// 445 direct-hosting path) are logged and skipped rather than answered.
+async fn read_nbss_frame<R: AsyncRead + Unpin>(
+    rd: &mut R,
+) -> Result<Option<Frame>, TransportError> {
+    loop {
+        let mut hdr = [0u8; 4];
+        if read_exact_or_none(rd, &mut hdr).await?.is_none() {
+            return Ok(None);
+        }
+        let len = ((hdr[1] as usize & 0x01) << 16)
+            | ((hdr[2] as usize) << 8)
+            | hdr[3] as usize;
+        match hdr[0] {
+            nb_type::SESSION_MESSAGE => {
+                if len > 0x20_0000 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "oversized NBSS frame",
+                    )
+                    .into());
+                }
+                let mut body = vec![0u8; len];
+                if read_exact_or_none(rd, &mut body).await?.is_none() {
+                    return Ok(None);
+                }
+                return Ok(Some(Frame(body)));
+            }
+            other => {
+                // Control frame (keepalive, legacy port-139 session-request):
+                // drain any payload and keep reading. SESSION_REQUEST is not
+                // answered here — the split read half cannot write, and the
+                // 445 direct-hosting path we serve never sends it.
+                let _ = other;
+                if len > 0 {
+                    let mut junk = vec![0u8; len];
+                    if read_exact_or_none(rd, &mut junk).await?.is_none() {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write one NBSS session-message frame to a write half.
+async fn write_nbss_frame<W: AsyncWrite + Unpin>(
+    wr: &mut W,
+    data: &[u8],
+) -> Result<(), TransportError> {
+    let mut hdr = [0u8; 4];
+    hdr[0] = nb_type::SESSION_MESSAGE;
+    // 3-byte big-endian length: frames above 64 KiB (multi-credit
+    // reads/writes, sealed transform payloads) need the middle byte.
+    hdr[1] = (data.len() >> 16) as u8;
+    hdr[2] = (data.len() >> 8) as u8;
+    hdr[3] = (data.len() & 0xff) as u8;
+    wr.write_all(&hdr).await?;
+    wr.write_all(data).await?;
+    wr.flush().await?;
+    Ok(())
 }
 
 #[async_trait]
@@ -109,20 +176,49 @@ impl Transport for TcpTransport {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        let mut hdr = [0u8; 4];
-        hdr[0] = nb_type::SESSION_MESSAGE;
-        // 3-byte big-endian length: frames above 64 KiB (multi-credit
-        // reads/writes, sealed transform payloads) need the middle byte.
-        hdr[1] = (data.len() >> 16) as u8;
-        hdr[2] = (data.len() >> 8) as u8;
-        hdr[3] = (data.len() & 0xff) as u8;
-        self.stream.write_all(&hdr).await?;
-        self.stream.write_all(data).await?;
-        self.stream.flush().await?;
-        Ok(())
+        write_nbss_frame(&mut self.stream, data).await
     }
 
     fn peer(&self) -> String {
         self.peer.clone()
+    }
+
+    fn split(self: Box<Self>) -> (Box<dyn FrameSource>, Box<dyn FrameSink>) {
+        let (rd, wr) = self.stream.into_split();
+        (
+            Box::new(TcpSource { rd, peer: self.peer }),
+            Box::new(TcpSink { wr }),
+        )
+    }
+}
+
+/// Read half of a split [`TcpTransport`].
+#[derive(Debug)]
+pub struct TcpSource {
+    rd: OwnedReadHalf,
+    peer: String,
+}
+
+#[async_trait]
+impl FrameSource for TcpSource {
+    async fn recv(&mut self) -> Result<Option<Frame>, TransportError> {
+        read_nbss_frame(&mut self.rd).await
+    }
+
+    fn peer(&self) -> String {
+        self.peer.clone()
+    }
+}
+
+/// Write half of a split [`TcpTransport`].
+#[derive(Debug)]
+pub struct TcpSink {
+    wr: OwnedWriteHalf,
+}
+
+#[async_trait]
+impl FrameSink for TcpSink {
+    async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        write_nbss_frame(&mut self.wr, data).await
     }
 }

@@ -42,6 +42,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 clap = { version = "4", features = ["derive"] }
+inotify = "0.11"
+futures-util = "0.3"
 
 [profile.release]
 opt-level = 2

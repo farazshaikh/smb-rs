@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use metrics::{counter, gauge};
+use tokio::sync::{mpsc, oneshot};
 
 use smb_proto::types::Status;
 use smb_proto_smb2::commands as c;
@@ -55,6 +56,10 @@ pub struct Smb2Conn {
     /// True once every subsequent message for this session must be wrapped
     /// in a transform header (SMB2_SESSION_FLAG_ENCRYPT_DATA).
     pub encrypt_data: bool,
+    /// True once the peer has sent at least one encrypted (transform) frame,
+    /// so async replies must be sealed even when the server does not force
+    /// encryption on the session.
+    pub peer_encrypts: bool,
     /// SPNEGO exchange blobs: (init request, authenticate request).
     pub ntlm_blobs: Option<(Vec<u8>, Vec<u8>)>,
     /// Challenge token sent during leg 1 (for the mechListMIC input).
@@ -68,11 +73,22 @@ pub struct Smb2Conn {
     pub pipes: HashMap<[u8; 16], crate::srvsvc::Pipe>,
     /// Directory-enumeration continuation queues keyed by directory FileId.
     pub searches: HashMap<[u8; 16], VecDeque<info::FindEntry>>,
+    /// Outbound frame queue drained by the per-connection writer task. Async
+    /// handlers and background tasks (CHANGE_NOTIFY, oplock/lease breaks) clone
+    /// this to emit unsolicited frames without blocking the reader.
+    pub outbound: mpsc::Sender<Vec<u8>>,
+    /// Next async id to hand out for a STATUS_PENDING operation
+    /// ([MS-SMB2] §3.3.4.2).
+    pub next_async_id: u64,
+    /// In-flight async operations keyed by async id; sending on the channel
+    /// cancels the background task (used by CANCEL, §2.2.30).
+    pub async_cancels: HashMap<u64, oneshot::Sender<()>>,
 }
 
 impl Smb2Conn {
-    /// Create SMB2 connection state with the given NTLM challenge.
-    pub fn new(challenge: [u8; 8]) -> Self {
+    /// Create SMB2 connection state with the given NTLM challenge and the
+    /// outbound queue its writer task drains.
+    pub fn new(challenge: [u8; 8], outbound: mpsc::Sender<Vec<u8>>) -> Self {
         Smb2Conn {
             dialect: None,
             session_id: 0,
@@ -88,13 +104,29 @@ impl Smb2Conn {
             cipher: None,
             enc_keys: None,
             encrypt_data: false,
+            peer_encrypts: false,
             ntlm_blobs: None,
             ntlm_targ: None,
             trees: HashMap::new(),
             handles: HashMap::new(),
             pipes: HashMap::new(),
             searches: HashMap::new(),
+            outbound,
+            next_async_id: 1,
+            async_cancels: HashMap::new(),
         }
+    }
+
+    /// Clone the outbound frame sender for a background/async task.
+    pub fn outbound(&self) -> mpsc::Sender<Vec<u8>> {
+        self.outbound.clone()
+    }
+
+    /// Allocate a fresh per-connection async id for a STATUS_PENDING op.
+    pub fn alloc_async_id(&mut self) -> u64 {
+        let id = self.next_async_id;
+        self.next_async_id += 1;
+        id
     }
 }
 
@@ -121,28 +153,36 @@ fn next_tree_id() -> u32 {
 /// starts life directly in SMB2 rather than upgrading through SMB1).
 pub async fn serve_client(
     server: Arc<ServerShared>,
-    mut transport: Box<dyn Transport>,
+    transport: Box<dyn Transport>,
     mut pending: Option<Vec<u8>>,
 ) {
-    let mut conn = Smb2Conn::new(crate::dispatch::rand_challenge_pub());
-    loop {
-        let frame = if let Some(f) = pending.take() {
-            f
-        } else {
-            match transport.recv().await {
-                Ok(Some(f)) => f.0,
-                _ => return,
+    let (mut reader, writer) = transport.split();
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
+    let writer_task = tokio::spawn(crate::dispatch::writer_loop(writer, out_rx));
+
+    {
+        let mut conn = Smb2Conn::new(crate::dispatch::rand_challenge_pub(), out_tx.clone());
+        loop {
+            let frame = if let Some(f) = pending.take() {
+                f
+            } else {
+                match reader.recv().await {
+                    Ok(Some(f)) => f.0,
+                    _ => break,
+                }
+            };
+            if frame.len() < 64 || frame[0..4] != smb_proto_smb2::SMB2_MAGIC {
+                continue;
             }
-        };
-        if frame.len() < 64 || frame[0..4] != smb_proto_smb2::SMB2_MAGIC {
-            continue;
-        }
-        if let Some(resp) = process_frame(&server, &mut conn, &frame).await {
-            if transport.send(&resp).await.is_err() {
-                return;
+            if let Some(resp) = process_frame(&server, &mut conn, &frame).await {
+                if out_tx.send(resp).await.is_err() {
+                    break;
+                }
             }
         }
     }
+    drop(out_tx);
+    let _ = writer_task.await;
 }
 
 /// Respond to an SMB1 multi-protocol NEGOTIATE that carries the `\xFESMB`
@@ -190,10 +230,13 @@ pub(crate) async fn process_frame(
     // A failed open means tampering or key desync — drop the connection.
     let plaintext: Vec<u8>;
     let mut buf = buf;
+    let mut request_encrypted = false;
     if buf.len() >= 4 && buf[..4] == smb_proto_smb2::commands::TF_MAGIC {
         let pt = decrypt_transform(conn, buf)?;
         plaintext = pt;
         buf = &plaintext;
+        request_encrypted = true;
+        conn.peer_encrypts = true;
     }
 
     let mut parts: Vec<(Vec<u8>, bool)> = Vec::new(); // (resp, may_wrap)
@@ -242,10 +285,11 @@ pub(crate) async fn process_frame(
         out[pos..pos + 4].copy_from_slice(&(next as u32).to_le_bytes());
     }
 
-    // Seal the whole reply when the session requires encryption
-    // ([MS-SMB2] §3.3.5.16); the enabling SESSION_SETUP response itself
-    // always travels in the clear.
-    if conn.encrypt_data && parts.iter().all(|(_, w)| *w) {
+    // Seal the whole reply when the session requires encryption, or when the
+    // request itself arrived encrypted ([MS-SMB2] §3.3.5.16 — a sealed request
+    // is answered with a sealed response even if the server does not force it).
+    // The enabling SESSION_SETUP response itself always travels in the clear.
+    if (conn.encrypt_data || request_encrypted) && parts.iter().all(|(_, w)| *w) {
         let sealed = encrypt_response(conn, &out)?;
         return Some(sealed);
     }
@@ -259,18 +303,28 @@ fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
     let _ = (conn, msg);
     None
 }
+#[cfg(not(feature = "lib"))]
+fn seal_pdu(session_id: u64, enc_keys: ([u8; 16], [u8; 16]), cipher: u16, msg: &[u8]) -> Option<Vec<u8>> {
+    let _ = (session_id, enc_keys, cipher, msg);
+    None
+}
 #[cfg(not(feature = "handrolled"))]
 fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
-    let (c2s, s2c) = conn.enc_keys?;
-    let _ = c2s;
-    let cipher = conn.cipher?;
+    seal_pdu(conn.session_id, conn.enc_keys?, conn.cipher?, msg)
+}
+/// Seal `msg` into a transform frame with explicit key material so both the
+/// request path and background async tasks can encrypt without borrowing the
+/// whole connection.
+#[cfg(not(feature = "handrolled"))]
+fn seal_pdu(session_id: u64, enc_keys: ([u8; 16], [u8; 16]), cipher: u16, msg: &[u8]) -> Option<Vec<u8>> {
+    let (_c2s, s2c) = enc_keys;
     let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
     let iv_size = if gcm { 12 } else { 11 };
 
     let mut nonce_field = [0u8; 16];
     nonce_field[..iv_size].copy_from_slice(&crate::dispatch::rand_bytes(iv_size));
 
-    let mut tf = smb_proto_smb2::commands::build_transform(conn.session_id, &nonce_field, msg.len());
+    let mut tf = smb_proto_smb2::commands::build_transform(session_id, &nonce_field, msg.len());
     // AAD region: everything after the Nonce field ([MS-SMB2] §3.1.4.2).
     let sealed = if gcm {
         smb_auth::crypto::aes128gcm_seal(
@@ -557,11 +611,10 @@ async fn process_single(
             Err(status) => (status, Vec::new()),
         },
         ss::cmd::TREE_DISCONNECT => {
-            if conn.trees.remove(&tid).is_none() {
-                (Status::INVALID_PARAMETER, Vec::new())
-            } else {
-                (Status::SUCCESS, c::build_tree_disconnect_resp())
-            }
+            // Idempotent ([MS-SMB2] §3.3.5.8): tearing down a tree that is
+            // already gone still satisfies the client's intent, so ack it.
+            conn.trees.remove(&tid);
+            (Status::SUCCESS, c::build_tree_disconnect_resp())
         }
         ss::cmd::LOGOFF => {
             close_all_handles(conn);
@@ -571,7 +624,10 @@ async fn process_single(
                 gauge!("smb_sessions_active").decrement(1.0);
             }
             conn.authenticated = false;
-            conn.session_id = 0;
+            // Keep session_id and cipher keys so this LOGOFF response still
+            // carries the right SessionId and can be sealed when the request
+            // arrived encrypted ([MS-SMB2] §3.3.5.6). A logged-off session is
+            // gated by `authenticated`, not by clearing the id.
             counter!("smb_logoffs_total").increment(1);
             (Status::SUCCESS, c::build_logoff_resp())
         }
@@ -710,6 +766,48 @@ async fn process_single(
             Some(_) => (Status::SUCCESS, c::build_lock_resp()),
             None => (Status::INVALID_PARAMETER, Vec::new()),
         },
+        ss::cmd::CHANGE_NOTIFY => {
+            let Some(req) = c::ChangeNotifyReq::parse(buf) else {
+                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
+            };
+            let Some(open) = conn.handles.get(&req.file_id.0) else {
+                return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
+            };
+            let dir_path = open.path.clone();
+
+            // Register the async operation and hand it to a background watcher;
+            // reply immediately with an interim STATUS_PENDING ([MS-SMB2]
+            // §3.3.4.2). The final response fires from run_change_notify.
+            let async_id = conn.alloc_async_id();
+            let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            conn.async_cancels.insert(async_id, cancel_tx);
+            gauge!("smb_async_pending").increment(1.0);
+            tokio::spawn(run_change_notify(
+                dir_path,
+                req.watch_tree,
+                req.filter,
+                crypto,
+                hdr.message_id,
+                async_id,
+                conn.outbound.clone(),
+                cancel_rx,
+            ));
+
+            let mut interim = build_async_notify_frame(
+                conn.session_id,
+                hdr.message_id,
+                async_id,
+                Status::PENDING,
+                &error_resp(),
+            );
+            if hdr.is_signed() {
+                if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
+                    sign_pdu(&mut interim, &key, conn.dialect);
+                }
+            }
+            return Some((interim, true));
+        }
         ss::cmd::QUERY_DIRECTORY => {
             let vfs = match share_vfs(server, conn, tid) {
                 Some(v) => v,
@@ -749,12 +847,19 @@ async fn process_single(
             }
         }
         ss::cmd::CANCEL => {
-            // Best-effort cancel ([MS-SMB2] §3.3.5.14): all our handlers are
-            // synchronous today, so there is nothing to signal; ack it.
+            // Async CANCEL ([MS-SMB2] §3.3.5.14): signal the pending op keyed
+            // by the AsyncId in the header so its task completes with
+            // STATUS_CANCELLED. CANCEL itself carries no response.
             counter!("smb_cancels_total").increment(1);
-            (Status::SUCCESS, 2u16.to_le_bytes().to_vec())
+            if hdr.is_async() && buf.len() >= 40 {
+                let async_id = u64::from_le_bytes(buf[32..40].try_into().unwrap());
+                if let Some(tx) = conn.async_cancels.remove(&async_id) {
+                    let _ = tx.send(());
+                }
+            }
+            return None;
         }
-        ss::cmd::ECHO => (Status::SUCCESS, 4u16.to_le_bytes().to_vec()),
+        ss::cmd::ECHO => (Status::SUCCESS, c::build_echo_resp()),
         _ => (Status::NOT_IMPLEMENTED, Vec::new()),
     };
 
@@ -799,9 +904,12 @@ async fn process_single(
     let sealing_available = true;
     #[cfg(not(feature = "lib"))]
     let sealing_available = false;
+    // Derive cipher keys whenever a cipher was negotiated — even when the
+    // server does not *require* encryption — so we can decrypt client-initiated
+    // sealed traffic ([MS-SMB2] §3.1.5.1: a client may encrypt once a cipher is
+    // agreed). `--encrypt` only controls whether we force-seal the session.
     if hdr.command == ss::cmd::SESSION_SETUP
         && status == Status::SUCCESS
-        && server.encrypt
         && sealing_available
         && conn.authenticated
         && !conn.guest
@@ -829,14 +937,18 @@ async fn process_single(
                     .unwrap()
             };
             conn.enc_keys = Some((kdf(c2s_label, c2s_ctx), kdf(s2c_label, s2c_ctx)));
-            conn.encrypt_data = true;
+            // Only *require* encryption (force-seal + set ENCRYPT_DATA on this
+            // response) when the operator asked for it.
+            if server.encrypt {
+                conn.encrypt_data = true;
+                seal_session = true;
+            }
             tracing::info!(
                 cipher = format!("{:#x}", conn.cipher.unwrap()),
                 dialect = format!("{:#06x}", conn.dialect.unwrap_or(0)),
-                "encryption enabled for session"
+                required = server.encrypt,
+                "cipher keys derived"
             );
-
-            seal_session = true;
         }
     }
 
@@ -865,27 +977,215 @@ async fn process_single(
         hdr.command == ss::cmd::SESSION_SETUP && status == Status::SUCCESS && conn.authenticated;
     if hdr.is_signed() || final_setup_leg {
         if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
-            resp[16] |= 0x08; // SMB2_FLAGS_SIGNED in response flags
-            let mut msg = Vec::with_capacity(resp.len());
-            msg.extend_from_slice(&resp[..48]);
-            msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
-            msg.extend_from_slice(&resp[64..]);
-            let sig =
-                if matches!(conn.dialect, Some(smb_proto_smb2::negotiate::DIALECT_300 | smb_proto_smb2::negotiate::DIALECT_302 | smb_proto_smb2::negotiate::DIALECT_311)) {
-                    let t = smb_auth::crypto::aes128_cmac(&key, &msg);
-                    let mut s = [0u8; 16];
-                    s.copy_from_slice(&t);
-                    s
-                } else {
-                    let t = smb_auth::crypto::hmac_sha256(&key, &msg);
-                    let mut s = [0u8; 16];
-                    s.copy_from_slice(&t[..16]);
-                    s
-                };
-            resp[48..64].copy_from_slice(&sig);
+            sign_pdu(&mut resp, &key, conn.dialect);
         }
     }
     Some((resp, allow_wrap))
+}
+
+/// Stamp an SMB2 signature over `resp` in place ([MS-SMB2] §3.3.4.1.1):
+/// AES-CMAC for 3.x dialects, HMAC-SHA256 for 2.x. Sets the SIGNED flag and
+/// fills the 16-byte Signature field (bytes 48..64).
+fn sign_pdu(resp: &mut [u8], key: &[u8; 16], dialect: Option<u16>) {
+    resp[16] |= 0x08; // SMB2_FLAGS_SIGNED
+    let mut msg = Vec::with_capacity(resp.len());
+    msg.extend_from_slice(&resp[..48]);
+    msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
+    msg.extend_from_slice(&resp[64..]);
+    let sig = if matches!(
+        dialect,
+        Some(smb_proto_smb2::negotiate::DIALECT_300
+            | smb_proto_smb2::negotiate::DIALECT_302
+            | smb_proto_smb2::negotiate::DIALECT_311)
+    ) {
+        let t = smb_auth::crypto::aes128_cmac(key, &msg);
+        let mut s = [0u8; 16];
+        s.copy_from_slice(&t);
+        s
+    } else {
+        let t = smb_auth::crypto::hmac_sha256(key, &msg);
+        let mut s = [0u8; 16];
+        s.copy_from_slice(&t[..16]);
+        s
+    };
+    resp[48..64].copy_from_slice(&sig);
+}
+
+/// Per-session crypto material an async completion needs to sign/seal a frame
+/// off the request path (snapshotted at request time so the background task
+/// never borrows the connection).
+#[derive(Clone)]
+struct AsyncCrypto {
+    dialect: Option<u16>,
+    signing_key: Option<[u8; 16]>,
+    enc_keys: Option<([u8; 16], [u8; 16])>,
+    cipher: Option<u16>,
+    session_id: u64,
+    encrypt: bool,
+    signed: bool,
+}
+
+impl AsyncCrypto {
+    fn snapshot(conn: &Smb2Conn, request_signed: bool) -> Self {
+        Self {
+            dialect: conn.dialect,
+            signing_key: conn.signing_key.or(conn.session_key),
+            enc_keys: conn.enc_keys,
+            cipher: conn.cipher,
+            session_id: conn.session_id,
+            encrypt: conn.encrypt_data || conn.peer_encrypts,
+            signed: request_signed,
+        }
+    }
+}
+
+/// Build a CHANGE_NOTIFY frame with an async header ([MS-SMB2] §2.2.35 async
+/// mode): SERVER_TO_REDIR|ASYNC_COMMAND flags with the AsyncId occupying the
+/// Reserved+TreeId slot. Returned unsigned and unsealed.
+fn build_async_notify_frame(
+    session_id: u64,
+    message_id: u64,
+    async_id: u64,
+    status: Status,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut f = Vec::with_capacity(64 + body.len());
+    f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
+    f.extend_from_slice(&64u16.to_le_bytes()); // StructureSize
+    f.extend_from_slice(&1u16.to_le_bytes()); // CreditCharge
+    f.extend_from_slice(&status.raw().to_le_bytes());
+    f.extend_from_slice(&ss::cmd::CHANGE_NOTIFY.to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes()); // CreditResponse
+    f.extend_from_slice(&0x0000_0003u32.to_le_bytes()); // SERVER_TO_REDIR|ASYNC_COMMAND
+    f.extend_from_slice(&0u32.to_le_bytes()); // NextCommand
+    f.extend_from_slice(&message_id.to_le_bytes());
+    f.extend_from_slice(&async_id.to_le_bytes()); // AsyncId
+    f.extend_from_slice(&session_id.to_le_bytes());
+    f.extend_from_slice(&[0u8; 16]); // Signature
+    f.extend_from_slice(body);
+    f
+}
+
+/// Sign then (optionally) seal a fully-built async frame per the session's
+/// protection, mirroring the request path's sign-then-encrypt order.
+fn finalize_async(crypto: &AsyncCrypto, mut frame: Vec<u8>) -> Vec<u8> {
+    if crypto.signed {
+        if let Some(key) = crypto.signing_key {
+            sign_pdu(&mut frame, &key, crypto.dialect);
+        }
+    }
+    if crypto.encrypt {
+        if let (Some(keys), Some(cipher)) = (crypto.enc_keys, crypto.cipher) {
+            if let Some(sealed) = seal_pdu(crypto.session_id, keys, cipher, &frame) {
+                return sealed;
+            }
+        }
+    }
+    frame
+}
+
+/// Watch `dir_path` for one filesystem change (or cancellation) and emit the
+/// final CHANGE_NOTIFY response ([MS-SMB2] §2.2.36) on the outbound queue.
+async fn run_change_notify(
+    dir_path: String,
+    _watch_tree: bool,
+    filter: u32,
+    crypto: AsyncCrypto,
+    message_id: u64,
+    async_id: u64,
+    outbound: mpsc::Sender<Vec<u8>>,
+    mut cancel: oneshot::Receiver<()>,
+) {
+    let frame = match watch_one_event(&dir_path, filter, &mut cancel).await {
+        Some(entries) => {
+            let pairs: Vec<(u32, &str)> =
+                entries.iter().map(|(a, n)| (*a, n.as_str())).collect();
+            let buf = c::build_file_notify_information(&pairs);
+            let body = c::build_change_notify_resp(&buf);
+            counter!("smb_notifies_sent").increment(1);
+            build_async_notify_frame(crypto.session_id, message_id, async_id, Status::SUCCESS, &body)
+        }
+        None => build_async_notify_frame(
+            crypto.session_id,
+            message_id,
+            async_id,
+            Status::CANCELLED,
+            &c::build_change_notify_resp(&[]),
+        ),
+    };
+    let _ = outbound.send(finalize_async(&crypto, frame)).await;
+    gauge!("smb_async_pending").decrement(1.0);
+}
+
+/// Await the first inotify event on `dir_path` (mapped from the SMB completion
+/// filter) or a cancellation. Returns the `(action, name)` list, or `None` on
+/// cancel/setup error.
+async fn watch_one_event(
+    dir_path: &str,
+    filter: u32,
+    cancel: &mut oneshot::Receiver<()>,
+) -> Option<Vec<(u32, String)>> {
+    use futures_util::StreamExt;
+    use inotify::Inotify;
+
+    let inotify = Inotify::init().ok()?;
+    inotify.watches().add(dir_path, filter_to_mask(filter)).ok()?;
+    let mut buf = [0u8; 4096];
+    let mut stream = inotify.into_event_stream(&mut buf).ok()?;
+
+    tokio::select! {
+        ev = stream.next() => {
+            let ev = ev?.ok()?;
+            let name = ev
+                .name
+                .as_ref()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Some(vec![(mask_to_action(ev.mask), name)])
+        }
+        _ = cancel => None,
+    }
+}
+
+/// Translate an SMB completion filter ([MS-SMB2] §2.2.35) into an inotify
+/// watch mask.
+fn filter_to_mask(filter: u32) -> inotify::WatchMask {
+    use inotify::WatchMask as M;
+    use smb_proto_smb2::commands::notify_filter as nf;
+
+    let mut m = M::empty();
+    if filter & (nf::FILE_NAME | nf::DIR_NAME) != 0 {
+        m |= M::CREATE | M::DELETE | M::MOVED_FROM | M::MOVED_TO;
+    }
+    if filter & nf::ATTRIBUTES != 0 {
+        m |= M::ATTRIB;
+    }
+    if filter & (nf::SIZE | nf::LAST_WRITE) != 0 {
+        m |= M::MODIFY | M::CLOSE_WRITE;
+    }
+    if m.is_empty() {
+        m = M::CREATE | M::DELETE | M::MODIFY | M::MOVED_FROM | M::MOVED_TO;
+    }
+    m
+}
+
+/// Map an inotify event mask to a FILE_NOTIFY_INFORMATION action
+/// ([MS-FSCC] §2.7.1).
+fn mask_to_action(mask: inotify::EventMask) -> u32 {
+    use inotify::EventMask as E;
+    use smb_proto_smb2::commands::notify_action as na;
+
+    if mask.contains(E::CREATE) {
+        na::ADDED
+    } else if mask.contains(E::DELETE) {
+        na::REMOVED
+    } else if mask.contains(E::MOVED_FROM) {
+        na::RENAMED_OLD_NAME
+    } else if mask.contains(E::MOVED_TO) {
+        na::RENAMED_NEW_NAME
+    } else {
+        na::MODIFIED
+    }
 }
 
 /// Build the wildcard-dialect NEGOTIATE response used to answer the
@@ -1554,4 +1854,61 @@ pub(crate) fn response(
     debug_assert_eq!(f.len(), 64);
     f.extend_from_slice(&body);
     f
+}
+
+#[cfg(test)]
+mod async_notify_tests {
+    use super::*;
+
+    #[test]
+    fn async_frame_sets_async_flag_and_ids() {
+        let f = build_async_notify_frame(0xABCD, 42, 7, Status::PENDING, &[0u8; 8]);
+        assert_eq!(&f[0..4], &smb_proto_smb2::SMB2_MAGIC);
+        let flags = u32::from_le_bytes(f[16..20].try_into().unwrap());
+        assert_eq!(flags & 0x2, 0x2, "ASYNC_COMMAND set");
+        assert_eq!(flags & 0x1, 0x1, "SERVER_TO_REDIR set");
+        assert_eq!(u64::from_le_bytes(f[24..32].try_into().unwrap()), 42, "MessageId");
+        assert_eq!(u64::from_le_bytes(f[32..40].try_into().unwrap()), 7, "AsyncId");
+        assert_eq!(u64::from_le_bytes(f[40..48].try_into().unwrap()), 0xABCD, "SessionId");
+        assert_eq!(u32::from_le_bytes(f[8..12].try_into().unwrap()), Status::PENDING.raw());
+    }
+
+    /// End-to-end of the real inotify watcher: arm a watch on a temp dir, drop
+    /// a file in, and confirm we surface a FILE_ACTION_ADDED for its name.
+    #[tokio::test]
+    async fn watch_reports_created_file() {
+        let dir = std::env::temp_dir().join(format!("rustsmb_notify_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+
+        let (_tx, mut rx) = oneshot::channel();
+        let watch = tokio::spawn(async move {
+            watch_one_event(&path, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        std::fs::write(dir.join("created.txt"), b"hi").unwrap();
+
+        let events = watch.await.unwrap().expect("event fired");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
+        assert_eq!(events[0].1, "created.txt");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cancelling the watch resolves the watcher with no events.
+    #[tokio::test]
+    async fn cancel_stops_watch() {
+        let dir = std::env::temp_dir().join(format!("rustsmb_notify_cancel_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+
+        let (tx, mut rx) = oneshot::channel();
+        let watch = tokio::spawn(async move {
+            watch_one_event(&path, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tx.send(()).unwrap();
+        assert!(watch.await.unwrap().is_none(), "cancelled watch yields no events");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

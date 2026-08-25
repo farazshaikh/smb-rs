@@ -366,7 +366,10 @@ impl FlushReq {
 
 /// FLUSH response body (§2.2.17.1): StructureSize=4 only.
 pub fn build_flush_resp() -> Vec<u8> {
-    4u16.to_le_bytes().to_vec()
+    let mut b = Vec::with_capacity(4);
+    b.extend_from_slice(&4u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    b
 }
 
 // ---------------- QUERY_DIRECTORY (§2.2.33 / §2.2.34) ----------------
@@ -621,14 +624,29 @@ pub fn build_tree_connect_resp(share_type: u8) -> Vec<u8> {
     b
 }
 
-/// TREE_DISCONNECT response body (§2.2.11.2): StructureSize=4.
+/// TREE_DISCONNECT response body (§2.2.11): StructureSize=4 then 2-byte
+/// Reserved — the whole structure is 4 bytes.
 pub fn build_tree_disconnect_resp() -> Vec<u8> {
-    4u16.to_le_bytes().to_vec()
+    let mut b = Vec::with_capacity(4);
+    b.extend_from_slice(&4u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    b
 }
 
-/// LOGOFF response body (§2.2.7.2): StructureSize=4.
+/// LOGOFF response body (§2.2.8): StructureSize=4 then 2-byte Reserved.
 pub fn build_logoff_resp() -> Vec<u8> {
-    4u16.to_le_bytes().to_vec()
+    let mut b = Vec::with_capacity(4);
+    b.extend_from_slice(&4u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    b
+}
+
+/// ECHO response body (§2.2.29): StructureSize=4 then 2-byte Reserved.
+pub fn build_echo_resp() -> Vec<u8> {
+    let mut b = Vec::with_capacity(4);
+    b.extend_from_slice(&4u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    b
 }
 
 /// TREE_CONNECT request fixed-part offsets (§2.2.9).
@@ -715,7 +733,105 @@ impl LockReq {
 
 /// LOCK response body (§2.2.27): StructureSize=4.
 pub fn build_lock_resp() -> Vec<u8> {
-    4u16.to_le_bytes().to_vec()
+    let mut b = Vec::with_capacity(4);
+    b.extend_from_slice(&4u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    b
+}
+
+// ---------------- CHANGE_NOTIFY (§2.2.35 / §2.2.36) ----------------
+
+/// CHANGE_NOTIFY completion-filter bits ([MS-SMB2] §2.2.35, [MS-FSCC] §2.7.1).
+pub mod notify_filter {
+    /// Renames, additions or deletions of a file name.
+    pub const FILE_NAME: u32 = 0x0000_0001;
+    /// Renames, additions or deletions of a directory name.
+    pub const DIR_NAME: u32 = 0x0000_0002;
+    /// Attribute changes.
+    pub const ATTRIBUTES: u32 = 0x0000_0004;
+    /// Size changes.
+    pub const SIZE: u32 = 0x0000_0008;
+    /// Last-write timestamp changes.
+    pub const LAST_WRITE: u32 = 0x0000_0010;
+}
+
+/// FILE_NOTIFY_INFORMATION action codes ([MS-FSCC] §2.7.1).
+pub mod notify_action {
+    /// A file was added to the directory.
+    pub const ADDED: u32 = 0x0000_0001;
+    /// A file was removed from the directory.
+    pub const REMOVED: u32 = 0x0000_0002;
+    /// A file was modified (size, attributes, timestamps).
+    pub const MODIFIED: u32 = 0x0000_0003;
+    /// The old name of a renamed file.
+    pub const RENAMED_OLD_NAME: u32 = 0x0000_0004;
+    /// The new name of a renamed file.
+    pub const RENAMED_NEW_NAME: u32 = 0x0000_0005;
+}
+
+/// SMB2_WATCH_TREE — recurse into subdirectories ([MS-SMB2] §2.2.35).
+pub const WATCH_TREE: u16 = 0x0001;
+
+/// CHANGE_NOTIFY request (§2.2.35).
+#[derive(Debug)]
+pub struct ChangeNotifyReq {
+    /// Watched directory handle.
+    pub file_id: FileId,
+    /// Watch the whole subtree rather than just the directory.
+    pub watch_tree: bool,
+    /// Maximum bytes of FILE_NOTIFY_INFORMATION the client will accept.
+    pub output_len: u32,
+    /// Completion filter selecting which changes fire ([`notify_filter`]).
+    pub filter: u32,
+}
+
+impl ChangeNotifyReq {
+    /// Parse from the complete frame.
+    pub fn parse(frame: &[u8]) -> Option<ChangeNotifyReq> {
+        if frame.len() < BODY + 32 || g16(frame, BODY) != 32 {
+            return None;
+        }
+        Some(ChangeNotifyReq {
+            file_id: FileId(frame.get(BODY + 8..BODY + 24)?.try_into().ok()?),
+            watch_tree: g16(frame, BODY + 2) & WATCH_TREE != 0,
+            output_len: g32(frame, BODY + 4),
+            filter: g32(frame, BODY + 24),
+        })
+    }
+}
+
+/// Build a FILE_NOTIFY_INFORMATION list ([MS-FSCC] §2.7.1) from `(action,
+/// name)` pairs. Names are directory-relative, UTF-16LE, no terminator; each
+/// record is 4-byte aligned and chained through `NextEntryOffset`.
+pub fn build_file_notify_information(entries: &[(u32, &str)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, (action, name)) in entries.iter().enumerate() {
+        let rec = out.len();
+        let name16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        out.extend_from_slice(&0u32.to_le_bytes()); // NextEntryOffset (patched)
+        out.extend_from_slice(&action.to_le_bytes());
+        out.extend_from_slice(&(name16.len() as u32).to_le_bytes());
+        out.extend_from_slice(&name16);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        if i + 1 < entries.len() {
+            let next = (out.len() - rec) as u32;
+            out[rec..rec + 4].copy_from_slice(&next.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// CHANGE_NOTIFY response body (§2.2.36): StructureSize=9, then the
+/// FILE_NOTIFY_INFORMATION buffer at offset 72 from the header start.
+pub fn build_change_notify_resp(buffer: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + buffer.len());
+    b.extend_from_slice(&9u16.to_le_bytes()); // StructureSize
+    b.extend_from_slice(&72u16.to_le_bytes()); // OutputBufferOffset (64 + 8)
+    b.extend_from_slice(&(buffer.len() as u32).to_le_bytes());
+    b.extend_from_slice(buffer);
+    b
 }
 
 // ---------------- IOCTL (§2.2.31 / §2.2.32) ----------------
@@ -908,4 +1024,90 @@ pub fn build_transform(
     t.extend_from_slice(&session_id.to_le_bytes());
     debug_assert_eq!(t.len(), tf_off::HDR_SIZE);
     t
+}
+
+#[cfg(test)]
+mod change_notify_tests {
+    use super::*;
+
+    fn change_notify_request(file_id: [u8; 16], watch_tree: bool, filter: u32) -> Vec<u8> {
+        let mut f = vec![0u8; BODY + 32];
+        f[BODY..BODY + 2].copy_from_slice(&32u16.to_le_bytes()); // StructureSize
+        let flags: u16 = if watch_tree { WATCH_TREE } else { 0 };
+        f[BODY + 2..BODY + 4].copy_from_slice(&flags.to_le_bytes());
+        f[BODY + 4..BODY + 8].copy_from_slice(&65536u32.to_le_bytes()); // OutputBufferLength
+        f[BODY + 8..BODY + 24].copy_from_slice(&file_id);
+        f[BODY + 24..BODY + 28].copy_from_slice(&filter.to_le_bytes());
+        f
+    }
+
+    #[test]
+    fn parses_change_notify_request() {
+        let fid = [7u8; 16];
+        let frame = change_notify_request(fid, true, notify_filter::FILE_NAME | notify_filter::LAST_WRITE);
+        let req = ChangeNotifyReq::parse(&frame).expect("parse");
+        assert_eq!(req.file_id.0, fid);
+        assert!(req.watch_tree);
+        assert_eq!(req.output_len, 65536);
+        assert_eq!(req.filter, notify_filter::FILE_NAME | notify_filter::LAST_WRITE);
+    }
+
+    #[test]
+    fn rejects_wrong_structure_size() {
+        let mut frame = change_notify_request([0u8; 16], false, 0);
+        frame[BODY..BODY + 2].copy_from_slice(&31u16.to_le_bytes());
+        assert!(ChangeNotifyReq::parse(&frame).is_none());
+    }
+
+    #[test]
+    fn single_notify_record_is_self_terminating() {
+        let buf = build_file_notify_information(&[(notify_action::ADDED, "new.txt")]);
+        // NextEntryOffset = 0 (last), Action = ADDED, FileNameLength = 14 bytes.
+        assert_eq!(&buf[0..4], &0u32.to_le_bytes());
+        assert_eq!(&buf[4..8], &notify_action::ADDED.to_le_bytes());
+        assert_eq!(&buf[8..12], &14u32.to_le_bytes());
+        assert_eq!(&buf[12..26], &"new.txt".encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<_>>()[..]);
+        assert_eq!(buf.len() % 4, 0);
+    }
+
+    #[test]
+    fn chained_notify_records_link_via_next_offset() {
+        let buf = build_file_notify_information(&[
+            (notify_action::ADDED, "a.txt"),
+            (notify_action::REMOVED, "b.txt"),
+        ]);
+        let next = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+        assert_ne!(next, 0, "first record must point to the second");
+        assert_eq!(next % 4, 0, "records are 4-byte aligned");
+        assert_eq!(&buf[next..next + 4], &0u32.to_le_bytes(), "second record terminates");
+        assert_eq!(&buf[next + 4..next + 8], &notify_action::REMOVED.to_le_bytes());
+    }
+
+    #[test]
+    fn change_notify_response_header_offsets() {
+        let notify = build_file_notify_information(&[(notify_action::MODIFIED, "x")]);
+        let body = build_change_notify_resp(&notify);
+        assert_eq!(&body[0..2], &9u16.to_le_bytes(), "StructureSize");
+        assert_eq!(&body[2..4], &72u16.to_le_bytes(), "OutputBufferOffset");
+        assert_eq!(&body[4..8], &(notify.len() as u32).to_le_bytes(), "OutputBufferLength");
+        assert_eq!(&body[8..], &notify[..]);
+    }
+
+    /// Fixed-size response bodies whose SMB2 StructureSize is 4 must be a full
+    /// 4 bytes on the wire (StructureSize + 2-byte Reserved); a 2-byte body
+    /// makes strict clients fail to unpack the Reserved field.
+    #[test]
+    fn fixed_four_byte_responses_carry_reserved() {
+        for (name, body) in [
+            ("tree_disconnect", build_tree_disconnect_resp()),
+            ("logoff", build_logoff_resp()),
+            ("echo", build_echo_resp()),
+            ("flush", build_flush_resp()),
+            ("lock", build_lock_resp()),
+        ] {
+            assert_eq!(body.len(), 4, "{name} response must be 4 bytes");
+            assert_eq!(&body[0..2], &4u16.to_le_bytes(), "{name} StructureSize=4");
+            assert_eq!(&body[2..4], &0u16.to_le_bytes(), "{name} Reserved=0");
+        }
+    }
 }
