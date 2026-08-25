@@ -16,7 +16,7 @@ built directly against the public Microsoft Open Specifications — [MS-CIFS],
 network to standard clients (`smbclient`, Windows Explorer, macOS, the Linux
 kernel CIFS upcall) with real NTLMv2 challenge/response authentication,
 message signing on every dialect, and SMB 3.x negotiate contexts including
-pre-authentication integrity.
+pre-authentication integrity and applied AES-GCM/CCM encryption.
 
 It is organised as a focused cargo workspace (protocol codecs, transport,
 VFS abstraction, POSIX backend, auth, crypto service provider, server) so
@@ -33,12 +33,21 @@ each layer stays readable and independently testable.
 |---|---|
 | **Dialects** | NT LM 0.12 (SMB1) · 2.0.2 · 2.1.0 · 3.0 · 3.0.2 · **3.1.1** |
 | **Auth** | NTLMv2 verification, NTLMv1 fallback, RC4 key exchange, guest/anonymous mapping, multi-user DB |
-| **Signing** | HMAC-SHA256 (SMB 2.x) and AES-CMAC (SMB 3.x) — responses signed, verified by Samba clients |
+| **Signing** | HMAC-SHA256 (SMB 2.x) and AES-CMAC (SMB 3.x) — responses signed, verified by Samba clients; optional `--require-signing` enforcement |
+| **Encryption** | SMB3 transform applied to traffic — AES-128-GCM and AES-128-CCM, C2S/S2C key derivation bound to the pre-auth hash |
+| **Compression** | SMB3 compression transform + `COMPRESSION_CAPABILITIES` context (LZNT1 / Pattern_V1) |
 | **Pre-auth integrity** | SHA-512 chaining over all NEGOTIATE/SESSION_SETUP frames (3.1.1) |
-| **File I/O** | Create/open (all six dispositions), read, write, close, flush, truncate, delete-on-close |
-| **Directories** | Wildcard enumeration across six find-information levels, mkdir/rmdir, rename incl. rename-by-handle |
-| **Info levels** | Query/set for file & filesystem classes ([MS-FSCC]) |
-| **IOCTLs** | `VALIDATE_NEGOTIATE_INFO`, `LMR_REQ_RESILIENCY` |
+| **File I/O** | Create/open (all six dispositions), read, write, close, flush, truncate, delete-on-close; large-MTU (>64 KiB) single-op reads/writes with multi-credit accounting |
+| **Locking** | Byte-range locks **enforced** with a conflict matrix; share-mode conflict detection |
+| **Oplocks & leases** | Exclusive oplocks and file leases (v2/v3) with break notifications |
+| **Durable handles** | Durable / persistent handle grant and reconnect (DH2Q / DH2C) |
+| **Directories** | Wildcard enumeration across six find-information levels, continuation + restart/resume-by-index, mkdir/rmdir, rename incl. rename-by-handle |
+| **Change notify** | `CHANGE_NOTIFY` (recursive and non-recursive) backed by inotify |
+| **Info levels** | Query/set for file & filesystem classes ([MS-FSCC]), security descriptors, alternate data streams, 8.3 short-name generation |
+| **Server-side copy** | `FSCTL_SRV_REQUEST_RESUME_KEY` + `COPYCHUNK` (ODX offload), set-sparse / zero-data |
+| **IOCTLs** | `VALIDATE_NEGOTIATE_INFO`, `LMR_REQ_RESILIENCY`, `PIPE_WAIT`, `DFS_GET_REFERRALS`, `QUERY_NETWORK_INTERFACE_INFO` |
+| **Multichannel** | Interface discovery + session binding capability advertised |
+| **IPC$ / named pipes** | srvsvc `NetShareEnum` share enumeration, RPC bind/transact over named pipes ([MS-RPCE]) |
 | **Compounding** | Multi-request frames handled with 8-byte-aligned chained replies |
 | **Observability** | `tracing` structured logs (EnvFilter) + Prometheus metrics endpoint |
 
@@ -46,24 +55,45 @@ Verified interoperable against:
 
 | Client | Dialects exercised | Status |
 |---|---|---|
-| Samba `smbclient` 4.x | NT1 · SMB2 · SMB3 (guest *and* authenticated+signed) | ✅ full suite |
-| Impacket `SMB` / `SMB3` classes | 2.1 + 3.x flows | ✅ full suite |
+| Samba `smbclient` 4.x | NT1 · SMB2 · SMB3 (guest, authenticated+signed, `--client-protection=encrypt`) | ✅ full suite |
+| Impacket `SMB` / `SMB3` classes | 2.1 + 3.x flows, DCERPC bind/request | ✅ full suite |
+| `smbprotocol` (Python) | 3.x create/read/write, locks, leases, durable, notify, ADS, security, large-MTU | ✅ feature battery |
 
-## Status — what works today, and what's next
+## Status & roadmap
 
-Working end-to-end today: negotiation (all dialects above), session setup
-with SPNEGO/NTLMSSP (both legs), tree connects, create/open, read, write,
-close, flush, byte-range lock *parsing*, directory enumeration with
-continuation, query/set information, delete/rename/mkdir/rmdir, echo,
-logoff/tree-disconnect, compound frames, and message signing.
+The **core `[MS-SMB2]` protocol is fully implemented** and verified
+end-to-end against real clients. Working today: negotiation (all dialects
+above), SPNEGO/NTLMSSP session setup (both legs), signing on every dialect
+and SMB3 encryption applied to traffic, tree connects, create/open, read,
+write (incl. large-MTU multi-credit), close, flush, **enforced** byte-range
+locks and share-mode conflict detection, oplocks, leases, durable handles,
+directory enumeration with continuation/resume, query/set information,
+security descriptors, alternate data streams, `CHANGE_NOTIFY`, server-side
+copychunk, compound frames, IPC$ named pipes with srvsvc share enumeration,
+and compression. Unsupported requests are rejected cleanly with proper NT
+status codes.
 
-Known gaps (tracked in detail in
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)'s **Feature Matrix**):
-the SMB3 encryption transform is negotiated but not yet applied to traffic,
-byte-range locks are accepted but not enforced, there are no
-oplocks/leases/durable handles, no CHANGE_NOTIFY yet, and IPC$ serves no
-named pipes (share enumeration via srvsvc is on the roadmap). Unsupported
-requests are rejected cleanly with proper NT status codes.
+Per-feature detail (spec section, status, unit/system tests, benchmarking,
+logging, metrics) lives in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)'s **Feature Matrix**.
+
+### Roadmap
+
+Remaining work is outside the core `[MS-SMB2]` request set:
+
+| Milestone | Item | Spec | Status |
+|---|---|---|---|
+| **Core hardening** | Malformed-frame parser fuzzing (`cargo-fuzz`) | — | planned |
+| | Cross-client concurrency / lock-race stress harness | — | planned |
+| | Windows-client soak battery | — | planned |
+| | Criterion throughput benchmarks (sign / encrypt / find) | — | planned |
+| | 8.3 short-name **matching / resolution** (generation done) | [MS-FSCC] §2.1.5 | partial |
+| **Legacy transport** | NetBIOS :139 + datagram browsing | RFC 1001/1002 | planned |
+| **Extended auth** | Kerberos / non-NTLM SPNEGO mechs | [MS-KILE] | planned |
+| **M4 — scale-out** | RDMA transport (SMB Direct) | [MS-SMBD] | planned |
+| | Witness protocol (failover notification) | [MS-SWN] | planned |
+| | Continuous availability (persistent handles + failover) | [MS-SMB2] §3.3.5.9 | planned |
+| | Full DFS namespace (referrals beyond clean reject) | [MS-DFSC] | planned |
 
 Run it on trusted networks; treat it as an interoperability/reference
 implementation that is steadily growing production features.
@@ -227,9 +257,11 @@ crates/
 
 ## Security considerations
 
-Single-factor auth (NTLM), no ACL enforcement, byte-range locks accepted but
-not enforced, and SMB3 encryption is negotiated but not yet applied to
-traffic. Fine for labs and trusted networks; harden before exposing more
+Single-factor auth (NTLM only — no Kerberos), and while security descriptors
+are stored and served, the backend does not yet enforce ACLs against the
+authenticated user. SMB3 encryption and message signing (incl. optional
+`--require-signing`) are applied, and byte-range / share-mode locks are
+enforced. Fine for labs and trusted networks; harden before exposing more
 widely. See the Feature Matrix for exactly where the edges are.
 
 ## References
