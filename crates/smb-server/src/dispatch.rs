@@ -141,12 +141,19 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
         }
 
         // Connection closing: drop any byte-range locks this session held.
-        if let Some(c2) = &smb2_conn {
+        if let Some(c2) = &mut smb2_conn {
             if c2.session_id != 0 {
                 server.locks.release_session(c2.session_id);
                 server.share_modes.close_session(c2.session_id);
                 server.oplocks.release_session(c2.session_id);
                 server.leases.release_session(c2.session_id);
+            }
+            // Preserve durable handles so a later connection can reclaim them
+            // ([MS-SMB2] §3.3.7.1).
+            for (_fid, mut entry) in c2.durable.drain() {
+                entry.deadline = std::time::Instant::now()
+                    + std::time::Duration::from_millis(entry.timeout as u64);
+                server.durables.insert(entry);
             }
         }
     }

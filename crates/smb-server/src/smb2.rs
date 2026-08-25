@@ -86,6 +86,9 @@ pub struct Smb2Conn {
     /// Server-side-copy resume keys → source FileId ([MS-SMB2] §2.2.32.3);
     /// handed out by FSCTL_SRV_REQUEST_RESUME_KEY and consumed by COPYCHUNK.
     pub resume_keys: HashMap<[u8; 24], [u8; 16]>,
+    /// Durable handles granted on this connection, keyed by FileId, preserved
+    /// into the server table when the connection drops ([MS-SMB2] §3.3.1.10).
+    pub durable: HashMap<[u8; 16], crate::state::DurableEntry>,
 }
 
 impl Smb2Conn {
@@ -118,6 +121,7 @@ impl Smb2Conn {
             next_async_id: 1,
             async_cancels: HashMap::new(),
             resume_keys: HashMap::new(),
+            durable: HashMap::new(),
         }
     }
 
@@ -711,6 +715,9 @@ async fn process_single(
                             server.share_modes.close(&path, (conn.session_id, fid));
                             server.oplocks.release(&path, (conn.session_id, fid));
                             server.leases.release(&path, (conn.session_id, fid));
+                            // An explicit close ends any durable-handle lease.
+                            conn.durable.remove(&fid);
+                            server.durables.remove(&fid);
                         }
                         (Status::SUCCESS, body)
                     }
@@ -1638,6 +1645,12 @@ async fn create(
     const OPT_NON_DIRECTORY_FILE: u32 = 0x40;
     const OPT_DELETE_ON_CLOSE: u32 = 0x1000;
 
+    // Durable reconnect ([MS-SMB2] §3.3.5.9.7/§3.3.5.9.12): reclaim a preserved
+    // handle instead of opening fresh.
+    if let Some((id, guid)) = durable_reconnect_ids(&req.durable) {
+        return durable_reconnect(conn, vfs, server, id, guid).await;
+    }
+
     let rel = req.name.trim_start_matches(['\\', '/']).to_string();
     let want_dir = req.options & OPT_DIRECTORY_FILE != 0;
 
@@ -1722,6 +1735,19 @@ async fn create(
         oplock = granted, lease = ?lease_grant.map(|l| l.state), "create"
     );
     counter!("smb_creates_total").increment(1);
+
+    // Grant a durable handle when the client requested one.
+    let durable_grant = grant_durable(conn, &req, fid_bytes, &rel, is_dir);
+
+    // Assemble create-context responses (lease grant, durable-handle grant).
+    let mut ctx_entries: Vec<(&[u8], Vec<u8>)> = Vec::new();
+    if let Some(l) = &lease_grant {
+        ctx_entries.push((c::lease::CONTEXT_NAME, c::lease_context_data(l)));
+    }
+    if let Some(d) = &durable_grant {
+        ctx_entries.push((d.0, d.1.clone()));
+    }
+    let contexts = c::encode_create_contexts(&ctx_entries);
     Ok(c::build_create_resp(
         fid,
         action,
@@ -1731,8 +1757,103 @@ async fn create(
         meta.eof,
         meta.is_dir,
         granted,
-        lease_grant,
+        &contexts,
     ))
+}
+
+/// Extract `(persistent_id, create_guid)` when a CREATE carries a durable
+/// reconnect context.
+fn durable_reconnect_ids(d: &Option<c::DurableReq>) -> Option<([u8; 16], Option<[u8; 16]>)> {
+    match d {
+        Some(c::DurableReq::ReconnectV2 { file_id, create_guid }) => Some((*file_id, Some(*create_guid))),
+        Some(c::DurableReq::ReconnectV1 { file_id }) => Some((*file_id, None)),
+        _ => None,
+    }
+}
+
+/// Reclaim a preserved durable handle and re-open the file under its persistent
+/// id (single-node durable model: the on-disk file, not a live fd, is durable).
+async fn durable_reconnect(
+    conn: &mut Smb2Conn,
+    vfs: Arc<dyn smb_vfs::Vfs>,
+    server: &Arc<ServerShared>,
+    id: [u8; 16],
+    guid: Option<[u8; 16]>,
+) -> Result<Vec<u8>, Status> {
+    let entry = server.durables.reclaim(id, guid).ok_or(Status::OBJECT_NAME_NOT_FOUND)?;
+    // FILE_OPEN (disposition 1): the file already exists.
+    let (mut open, meta, _action) = vfs
+        .create(&entry.rel, entry.is_dir, entry.access, 1, entry.options, 0)
+        .await
+        .map_err(vfs_err)?;
+    open.delete_on_close = false;
+    conn.handles.insert(id, open);
+    let mut again = entry.clone();
+    again.session_id = conn.session_id;
+    conn.durable.insert(id, again);
+    counter!("smb_durable_reconnects_total").increment(1);
+
+    let (name, data): (&[u8], Vec<u8>) = if guid.is_some() {
+        let flags = if entry.persistent { c::durable::FLAG_PERSISTENT } else { 0 };
+        (c::durable::REQ_V2, c::durable_v2_resp_data(entry.timeout, flags))
+    } else {
+        (c::durable::REQ_V1, c::durable_v1_resp_data())
+    };
+    let contexts = c::encode_create_contexts(&[(name, data)]);
+    Ok(c::build_create_resp(
+        c::FileId(id),
+        1, // FILE_OPENED
+        [meta.times[0].0, meta.times[1].0, meta.times[2].0, meta.times[3].0],
+        meta.attrs.0,
+        meta.alloc,
+        meta.eof,
+        meta.is_dir,
+        c::oplock::NONE,
+        &contexts,
+    ))
+}
+
+/// Record a durable-handle grant on the connection and return the response
+/// create-context to echo. Directories and one-shot deletes are ineligible.
+fn grant_durable(
+    conn: &mut Smb2Conn,
+    req: &c::CreateReq,
+    fid: [u8; 16],
+    rel: &str,
+    is_dir: bool,
+) -> Option<(&'static [u8], Vec<u8>)> {
+    /// Fallback handle timeout when the client requests 0 (60 s).
+    const DEFAULT_TIMEOUT_MS: u32 = 60_000;
+    let make = |create_guid: [u8; 16], persistent: bool, timeout: u32| crate::state::DurableEntry {
+        persistent_id: fid,
+        create_guid,
+        rel: rel.to_string(),
+        is_dir,
+        access: req.desired_access,
+        options: req.options,
+        session_id: conn.session_id,
+        persistent,
+        timeout,
+        deadline: std::time::Instant::now(),
+    };
+    match req.durable {
+        Some(c::DurableReq::RequestV2 { timeout, flags, create_guid }) => {
+            let persistent = flags & c::durable::FLAG_PERSISTENT != 0;
+            let to = if timeout == 0 { DEFAULT_TIMEOUT_MS } else { timeout };
+            conn.durable.insert(fid, make(create_guid, persistent, to));
+            counter!("smb_durables_granted_total").increment(1);
+            Some((
+                c::durable::REQ_V2,
+                c::durable_v2_resp_data(to, if persistent { c::durable::FLAG_PERSISTENT } else { 0 }),
+            ))
+        }
+        Some(c::DurableReq::RequestV1) => {
+            conn.durable.insert(fid, make([0u8; 16], false, DEFAULT_TIMEOUT_MS));
+            counter!("smb_durables_granted_total").increment(1);
+            Some((c::durable::REQ_V1, c::durable_v1_resp_data()))
+        }
+        _ => None,
+    }
 }
 
 /// Arbitrate a caching lease for a lease-requesting CREATE ([MS-SMB2]
@@ -1969,7 +2090,7 @@ fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
         0,
         false,
         c::oplock::NONE,
-        None,
+        &[],
     ))
 }
 
@@ -2533,6 +2654,7 @@ mod oplock_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
+            durables: Arc::new(DurableTable::new()),
         })
     }
 
@@ -2635,6 +2757,7 @@ mod lease_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
+            durables: Arc::new(DurableTable::new()),
         })
     }
 
@@ -2886,3 +3009,148 @@ mod security_tests {
     }
 }
 
+
+#[cfg(test)]
+mod durable_tests {
+    use super::*;
+    use crate::state::*;
+    use std::collections::HashMap;
+
+    fn server_with_share(dir: &std::path::Path) -> Arc<ServerShared> {
+        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+        let mut shares = HashMap::new();
+        shares.insert(
+            "public".to_string(),
+            Share { name: "public".into(), root: dir.to_path_buf(), vfs, is_ipc: false },
+        );
+        Arc::new(ServerShared {
+            shares,
+            guid: [0; 16],
+            domain: "W".into(),
+            server_name: "R".into(),
+            users: HashMap::new(),
+            allow_guest: true,
+            require_signing: false,
+            encrypt: false,
+            locks: Arc::new(LockManager::new()),
+            share_modes: Arc::new(ShareModeTable::new()),
+            oplocks: Arc::new(OplockTable::new()),
+            leases: Arc::new(LeaseTable::new()),
+            durables: Arc::new(DurableTable::new()),
+        })
+    }
+
+    /// Build a CREATE frame carrying a single create-context (name, data).
+    fn create_req_ctx(name: &str, access: u32, disp: u32, ctx_name: &[u8], ctx_data: &[u8]) -> Vec<u8> {
+        let name16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let name_off = 64 + 56;
+        let name_end = name_off + name16.len();
+        let pad = (8 - name_end % 8) % 8;
+        let ctx_off = name_end + pad;
+
+        let data_off = (16 + ctx_name.len()).next_multiple_of(8);
+        let mut ctx = Vec::new();
+        ctx.extend_from_slice(&0u32.to_le_bytes());
+        ctx.extend_from_slice(&16u16.to_le_bytes());
+        ctx.extend_from_slice(&(ctx_name.len() as u16).to_le_bytes());
+        ctx.extend_from_slice(&0u16.to_le_bytes());
+        ctx.extend_from_slice(&(data_off as u16).to_le_bytes());
+        ctx.extend_from_slice(&(ctx_data.len() as u32).to_le_bytes());
+        ctx.extend_from_slice(ctx_name);
+        while ctx.len() < data_off {
+            ctx.push(0);
+        }
+        ctx.extend_from_slice(ctx_data);
+
+        let mut body = vec![0u8; 56];
+        body[0..2].copy_from_slice(&57u16.to_le_bytes());
+        body[24..28].copy_from_slice(&access.to_le_bytes());
+        body[32..36].copy_from_slice(&0x7u32.to_le_bytes());
+        body[36..40].copy_from_slice(&disp.to_le_bytes());
+        body[44..46].copy_from_slice(&(name_off as u16).to_le_bytes());
+        body[46..48].copy_from_slice(&(name16.len() as u16).to_le_bytes());
+        body[48..52].copy_from_slice(&(ctx_off as u32).to_le_bytes());
+        body[52..56].copy_from_slice(&(ctx.len() as u32).to_le_bytes());
+        let mut f = vec![0u8; 64];
+        f.extend_from_slice(&body);
+        f.extend_from_slice(&name16);
+        f.extend(std::iter::repeat(0u8).take(pad));
+        f.extend_from_slice(&ctx);
+        f
+    }
+
+    /// A DH2Q durable request is granted (recorded + echoed); after the
+    /// connection drops the handle is preserved and a DH2C reconnect on a fresh
+    /// connection reclaims it under the same persistent id.
+    #[test]
+    fn durable_grant_then_reconnect() {
+        tokio_uring::start(async {
+            let dir = std::env::temp_dir().join(format!("rustsmb_dur_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("dur.bin"), b"durable-data").unwrap();
+            let server = server_with_share(&dir);
+            let vfs = server.shares["public"].vfs.clone();
+            let guid = [0x5Au8; 16];
+            let access = 0x8000_0000 | 0x4000_0000;
+
+            let mut dq = Vec::new();
+            dq.extend_from_slice(&10_000u32.to_le_bytes()); // Timeout
+            dq.extend_from_slice(&0u32.to_le_bytes()); // Flags
+            dq.extend_from_slice(&[0u8; 8]); // Reserved
+            dq.extend_from_slice(&guid); // CreateGuid
+            let frame = create_req_ctx("dur.bin", access, 1, c::durable::REQ_V2, &dq);
+
+            let (tx, _rx) = mpsc::channel(8);
+            let mut conn = Smb2Conn::new([0u8; 8], tx);
+            conn.session_id = 1;
+            let resp = create(&mut conn, vfs.clone(), &server, false, &frame).await.unwrap();
+            assert_ne!(u32::from_le_bytes(resp[80..84].try_into().unwrap()), 0, "durable resp ctx");
+            assert_eq!(conn.durable.len(), 1, "durable handle recorded");
+            let pid: [u8; 16] = resp[64..80].try_into().unwrap();
+
+            // Simulate the connection dropping: preserve into the server table.
+            for (_f, mut e) in conn.durable.drain() {
+                e.deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                server.durables.insert(e);
+            }
+
+            // Fresh connection reclaims the handle via DH2C reconnect.
+            let mut dc = Vec::new();
+            dc.extend_from_slice(&pid);
+            dc.extend_from_slice(&guid);
+            dc.extend_from_slice(&0u32.to_le_bytes()); // Flags
+            let rframe = create_req_ctx("dur.bin", 0x8000_0000, 1, c::durable::RECONNECT_V2, &dc);
+            let (tx2, _rx2) = mpsc::channel(8);
+            let mut conn2 = Smb2Conn::new([0u8; 8], tx2);
+            conn2.session_id = 2;
+            let resp2 = create(&mut conn2, vfs.clone(), &server, false, &rframe).await.expect("reconnect");
+            let rid: [u8; 16] = resp2[64..80].try_into().unwrap();
+            assert_eq!(rid, pid, "reconnect returns the persistent id");
+            assert!(conn2.handles.contains_key(&pid), "handle reinstated on new connection");
+
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    /// A reconnect with an unknown persistent id is rejected.
+    #[test]
+    fn durable_reconnect_unknown_id_fails() {
+        tokio_uring::start(async {
+            let dir = std::env::temp_dir().join(format!("rustsmb_dur2_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("x.bin"), b"data").unwrap();
+            let server = server_with_share(&dir);
+            let vfs = server.shares["public"].vfs.clone();
+            let mut dc = Vec::new();
+            dc.extend_from_slice(&[0xEE; 16]);
+            dc.extend_from_slice(&[0xEE; 16]);
+            dc.extend_from_slice(&0u32.to_le_bytes());
+            let rframe = create_req_ctx("x.bin", 0x8000_0000, 1, c::durable::RECONNECT_V2, &dc);
+            let (tx, _rx) = mpsc::channel(8);
+            let mut conn = Smb2Conn::new([0u8; 8], tx);
+            let err = create(&mut conn, vfs.clone(), &server, false, &rframe).await.unwrap_err();
+            assert_eq!(err, Status::OBJECT_NAME_NOT_FOUND);
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+}

@@ -62,6 +62,8 @@ pub struct ServerShared {
     /// Server-wide lease table ([MS-SMB2] §2.2.23.2) — one caching lease per
     /// file path, broken down when an open with a different lease key contends.
     pub leases: Arc<LeaseTable>,
+    /// Durable handles preserved across connection drops ([MS-SMB2] §3.3.1.10).
+    pub durables: Arc<DurableTable>,
 }
 
 /// Identifies the open that owns a byte-range lock: `(session_id, file_id)`.
@@ -415,6 +417,83 @@ impl LeaseTable {
     /// Drop every lease held by any open of `session_id`.
     pub fn release_session(&self, session_id: u64) {
         self.held.lock().unwrap().retain(|_, h| h.session_id != session_id);
+    }
+}
+
+/// A durable file handle preserved across a connection drop so the client can
+/// reclaim it ([MS-SMB2] §3.3.1.10). Stored as `Send` metadata; on reconnect
+/// the file is re-opened (single-node model), so no live fd is held here.
+#[derive(Clone)]
+pub struct DurableEntry {
+    /// Persistent handle id the client reconnects with (the original FileId).
+    pub persistent_id: [u8; 16],
+    /// Client create-guid (v2 handles); zero for v1.
+    pub create_guid: [u8; 16],
+    /// Share-relative path to re-open on reconnect.
+    pub rel: String,
+    /// Whether the handle was a directory.
+    pub is_dir: bool,
+    /// Original desired-access mask, replayed on re-open.
+    pub access: u32,
+    /// Original create options, replayed on re-open.
+    pub options: u32,
+    /// Session that owned the handle.
+    pub session_id: u64,
+    /// Persistent (survives server restart intent) vs. plain durable.
+    pub persistent: bool,
+    /// Requested handle timeout in milliseconds (0 = server default).
+    pub timeout: u32,
+    /// Absolute expiry after which the preserved handle may be evicted.
+    pub deadline: std::time::Instant,
+}
+
+/// Server-wide table of durable handles awaiting reconnect, keyed by
+/// persistent id.
+#[derive(Default)]
+pub struct DurableTable {
+    entries: std::sync::Mutex<HashMap<[u8; 16], DurableEntry>>,
+}
+
+impl DurableTable {
+    /// Create an empty table.
+    pub fn new() -> Self {
+        Self { entries: std::sync::Mutex::new(HashMap::new()) }
+    }
+
+    /// Preserve `entry` for later reconnect, evicting any already-expired ones.
+    pub fn insert(&self, entry: DurableEntry) {
+        let mut e = self.entries.lock().unwrap();
+        let now = std::time::Instant::now();
+        e.retain(|_, v| v.deadline > now);
+        e.insert(entry.persistent_id, entry);
+    }
+
+    /// Reclaim a preserved handle by persistent id, requiring the create-guid
+    /// to match when `guid` is `Some` (v2). Expired entries are dropped.
+    pub fn reclaim(&self, id: [u8; 16], guid: Option<[u8; 16]>) -> Option<DurableEntry> {
+        let mut e = self.entries.lock().unwrap();
+        let entry = e.get(&id)?;
+        if entry.deadline <= std::time::Instant::now() {
+            e.remove(&id);
+            return None;
+        }
+        if let Some(g) = guid {
+            if entry.create_guid != g {
+                return None;
+            }
+        }
+        e.remove(&id)
+    }
+
+    /// Forget a preserved handle (e.g. after an explicit close).
+    pub fn remove(&self, id: &[u8; 16]) {
+        self.entries.lock().unwrap().remove(id);
+    }
+
+    /// Evict every entry whose deadline has passed.
+    pub fn sweep(&self) {
+        let now = std::time::Instant::now();
+        self.entries.lock().unwrap().retain(|_, v| v.deadline > now);
     }
 }
 

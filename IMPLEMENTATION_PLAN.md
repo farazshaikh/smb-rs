@@ -256,7 +256,7 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | Sharing-mode conflict detection | §3.3.5.10 | complete | share-mode matrix unit tests | two opens same file (smbprotocol) ✅ | — | violation line | sharing_violations ✅ |
 | Oplocks (exclusive) + break notification | [MS-SMB2] §2.2.23/24 | complete | grant+break integration test + codec tests | smbprotocol grant ✅ (break: server test) | oplock latency | break sent lines | oplock_breaks_total ✅ |
 | Leases v2/v3 (file leases) | §2.2.23.2 | complete | lease codec tests + grant/break integration tests | smbprotocol lease grant ✅ (break: server test) | — | lease grant/break lines | leases_granted_total ✅ |
-| Durable / persistent handles | §2.2.13.2.4–6 | planned | reconnect test | network-blip resume | — | — | durables_held |
+| Durable / persistent handles | §2.2.13.2.3–6 | complete | durable grant/reconnect + codec tests | smbprotocol DH2Q grant→drop→DH2C reconnect ✅ | — | — | durables_granted_total ✅ |
 | Server-side COPYCHUNK (ODX offload) | §2.2.31.6 | complete | copychunk copy + limits integration tests | resume-key→copychunk between two handles | effective MB/s | copychunk debug | copychunk_bytes ✅ |
 | ZERO_DATA / SET_SPARSE | §2.2.31.12/14 | complete | zero_range integration test | punches/zeros a range | — | — | zeroed_bytes ✅ |
 

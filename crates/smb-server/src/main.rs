@@ -86,6 +86,7 @@ fn main() {
         share_modes: Arc::new(state::ShareModeTable::new()),
         oplocks: Arc::new(state::OplockTable::new()),
         leases: Arc::new(state::LeaseTable::new()),
+        durables: Arc::new(state::DurableTable::new()),
     });
 
     // Single-threaded io_uring runtime: all networking and file I/O run on
@@ -112,6 +113,17 @@ fn main() {
 
         if let Some(addr) = args.metrics_bind {
             spawn_metrics_endpoint(addr);
+        }
+
+        // Periodically evict expired durable handles awaiting reconnect.
+        {
+            let durables = shared.durables.clone();
+            tokio_uring::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    durables.sweep();
+                }
+            });
         }
 
         loop {

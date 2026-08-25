@@ -92,6 +92,123 @@ pub struct CreateReq {
     pub oplock_level: u8,
     /// Parsed `RqLs` lease create-context, if the client requested a lease.
     pub lease: Option<LeaseReq>,
+    /// Parsed durable-handle request/reconnect intent, if any.
+    pub durable: Option<DurableReq>,
+}
+
+/// Durable-handle intent parsed from a CREATE's create-context chain
+/// ([MS-SMB2] §2.2.13.2.3/§2.2.13.2.4/§2.2.13.2.11/§2.2.13.2.12).
+#[derive(Debug, Clone, Copy)]
+pub enum DurableReq {
+    /// `DHnQ` v1 durable-handle request.
+    RequestV1,
+    /// `DH2Q` v2 durable-handle request.
+    RequestV2 {
+        /// Requested handle timeout in milliseconds (0 = server default).
+        timeout: u32,
+        /// Durable-handle flags (e.g. [`durable::FLAG_PERSISTENT`]).
+        flags: u32,
+        /// Client create-guid identifying the handle across reconnects.
+        create_guid: [u8; 16],
+    },
+    /// `DHnC` v1 reconnect carrying the persistent handle id.
+    ReconnectV1 {
+        /// Persistent id (original FileId) to reclaim.
+        file_id: [u8; 16],
+    },
+    /// `DH2C` v2 reconnect carrying the persistent id and create-guid.
+    ReconnectV2 {
+        /// Persistent id (original FileId) to reclaim.
+        file_id: [u8; 16],
+        /// Client create-guid that must match the preserved handle.
+        create_guid: [u8; 16],
+    },
+}
+
+/// Durable-handle create-context name tags ([MS-SMB2] §2.2.13.2).
+pub mod durable {
+    /// `SMB2_CREATE_DURABLE_HANDLE_REQUEST`.
+    pub const REQ_V1: &[u8] = b"DHnQ";
+    /// `SMB2_CREATE_DURABLE_HANDLE_RECONNECT`.
+    pub const RECONNECT_V1: &[u8] = b"DHnC";
+    /// `SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2`.
+    pub const REQ_V2: &[u8] = b"DH2Q";
+    /// `SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2`.
+    pub const RECONNECT_V2: &[u8] = b"DH2C";
+    /// Persistent-handle flag (`SMB2_DHANDLE_FLAG_PERSISTENT`).
+    pub const FLAG_PERSISTENT: u32 = 0x0000_0002;
+}
+
+/// Walk a CREATE create-context chain, invoking `f(name, data)` for each entry.
+fn walk_create_contexts(frame: &[u8], ctx_off: usize, ctx_len: usize, mut f: impl FnMut(&[u8], &[u8])) {
+    if ctx_len == 0 || ctx_off < BODY {
+        return;
+    }
+    let mut pos = ctx_off;
+    let end = (ctx_off + ctx_len).min(frame.len());
+    loop {
+        if pos + 16 > end {
+            return;
+        }
+        let next = g32(frame, pos) as usize;
+        let name_off = g16(frame, pos + 4) as usize;
+        let name_len = g16(frame, pos + 6) as usize;
+        let data_off = g16(frame, pos + 10) as usize;
+        let data_len = g32(frame, pos + 12) as usize;
+        if let (Some(name), Some(data)) = (
+            frame.get(pos + name_off..pos + name_off + name_len),
+            frame.get(pos + data_off..(pos + data_off + data_len).min(frame.len())),
+        ) {
+            f(name, data);
+        }
+        if next == 0 {
+            return;
+        }
+        pos += next;
+    }
+}
+
+/// Parse durable-handle intent from a CREATE's create-context chain.
+fn parse_durable_context(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option<DurableReq> {
+    let mut found = None;
+    walk_create_contexts(frame, ctx_off, ctx_len, |name, data| {
+        let parsed = if name == durable::REQ_V2 && data.len() >= 32 {
+            Some(DurableReq::RequestV2 {
+                timeout: u32::from_le_bytes(data[0..4].try_into().unwrap()),
+                flags: u32::from_le_bytes(data[4..8].try_into().unwrap()),
+                create_guid: data[16..32].try_into().unwrap(),
+            })
+        } else if name == durable::RECONNECT_V2 && data.len() >= 32 {
+            Some(DurableReq::ReconnectV2 {
+                file_id: data[0..16].try_into().unwrap(),
+                create_guid: data[16..32].try_into().unwrap(),
+            })
+        } else if name == durable::RECONNECT_V1 && data.len() >= 16 {
+            Some(DurableReq::ReconnectV1 { file_id: data[0..16].try_into().unwrap() })
+        } else if name == durable::REQ_V1 {
+            Some(DurableReq::RequestV1)
+        } else {
+            None
+        };
+        if parsed.is_some() {
+            found = parsed;
+        }
+    });
+    found
+}
+
+/// Encode the `DH2Q` v2 durable-handle response data ([MS-SMB2] §2.2.14.2.11).
+pub fn durable_v2_resp_data(timeout: u32, flags: u32) -> Vec<u8> {
+    let mut d = Vec::with_capacity(8);
+    d.extend_from_slice(&timeout.to_le_bytes());
+    d.extend_from_slice(&flags.to_le_bytes());
+    d
+}
+
+/// Encode the `DHnQ` v1 durable-handle response data ([MS-SMB2] §2.2.14.2.3):
+/// 8 reserved bytes.
+pub fn durable_v1_resp_data() -> Vec<u8> {
+    vec![0u8; 8]
 }
 
 /// Requested lease from an `SMB2_CREATE_REQUEST_LEASE`(`_V2`) context
@@ -197,6 +314,7 @@ impl CreateReq {
             name: String::from_utf16_lossy(&units),
             oplock_level: *frame.get(create_off::OPLOCK_LEVEL).unwrap_or(&0),
             lease: parse_lease_context(frame, ctx_off, ctx_len),
+            durable: parse_durable_context(frame, ctx_off, ctx_len),
         })
     }
 }
@@ -251,19 +369,10 @@ pub struct LeaseResp {
     pub v2: bool,
 }
 
-/// Encode a lease `RqLs` create-context (chain terminator) for a CREATE
-/// response ([MS-SMB2] §2.2.13.2 wrapper around §2.2.13.2.8/§2.2.13.2.10).
-fn encode_lease_context(l: &LeaseResp) -> Vec<u8> {
-    let data_len: usize = if l.v2 { 52 } else { 32 };
-    let mut c = Vec::with_capacity(24 + data_len);
-    c.extend_from_slice(&0u32.to_le_bytes()); // Next = 0 (last)
-    c.extend_from_slice(&16u16.to_le_bytes()); // NameOffset
-    c.extend_from_slice(&4u16.to_le_bytes()); // NameLength
-    c.extend_from_slice(&0u16.to_le_bytes()); // Reserved
-    c.extend_from_slice(&24u16.to_le_bytes()); // DataOffset
-    c.extend_from_slice(&(data_len as u32).to_le_bytes()); // DataLength
-    c.extend_from_slice(lease::CONTEXT_NAME); // Name "RqLs" @16
-    c.extend_from_slice(&[0u8; 4]); // pad to DataOffset 24
+/// Encode just the lease structure ([MS-SMB2] §2.2.14.2.10/§2.2.14.2.11 data)
+/// for a granted lease, without the create-context wrapper.
+pub fn lease_context_data(l: &LeaseResp) -> Vec<u8> {
+    let mut c = Vec::new();
     c.extend_from_slice(&l.key); // LeaseKey
     c.extend_from_slice(&l.state.to_le_bytes()); // LeaseState
     c.extend_from_slice(&l.flags.to_le_bytes()); // LeaseFlags
@@ -276,11 +385,44 @@ fn encode_lease_context(l: &LeaseResp) -> Vec<u8> {
     c
 }
 
+/// Encode a chain of CREATE-response create-contexts ([MS-SMB2] §2.2.13.2)
+/// from `(name, data)` pairs, wiring `NextEntryOffset` links and keeping each
+/// entry 8-byte aligned. Returns an empty buffer for no entries.
+pub fn encode_create_contexts(entries: &[(&[u8], Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, (name, data)) in entries.iter().enumerate() {
+        let start = out.len();
+        let data_off = (16 + name.len()).next_multiple_of(8);
+        out.extend_from_slice(&0u32.to_le_bytes()); // Next (patched below)
+        out.extend_from_slice(&16u16.to_le_bytes()); // NameOffset
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes()); // NameLength
+        out.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        let doff = if data.is_empty() { 0 } else { data_off as u16 };
+        out.extend_from_slice(&doff.to_le_bytes()); // DataOffset
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes()); // DataLength
+        out.extend_from_slice(name);
+        while out.len() - start < data_off {
+            out.push(0);
+        }
+        out.extend_from_slice(data);
+        if i + 1 < entries.len() {
+            // Pad to an 8-byte boundary so the next entry (and Next link) align.
+            while (out.len() - start) % 8 != 0 {
+                out.push(0);
+            }
+            let next = (out.len() - start) as u32;
+            out[start..start + 4].copy_from_slice(&next.to_le_bytes());
+        }
+    }
+    out
+}
+
 /// Build CREATE response body (§2.2.14.1).
 ///
 /// Fixed part is 88 bytes; the FileId sits after `Reserved2` at offset 64.
-/// When `lease` is `Some`, an `RqLs` create-context is appended and the
-/// context offset/length fields point at it (offset is header-relative).
+/// `contexts` is a pre-chained create-context blob (see
+/// [`encode_create_contexts`]); when non-empty the context offset/length
+/// fields point at it (offset is header-relative).
 #[allow(clippy::too_many_arguments)]
 pub fn build_create_resp(
     file_id: FileId,
@@ -291,17 +433,16 @@ pub fn build_create_resp(
     eof: u64,
     is_dir: bool,
     oplock: u8,
-    lease: Option<LeaseResp>,
+    contexts: &[u8],
 ) -> Vec<u8> {
     let _ = is_dir;
-    let ctx = lease.as_ref().map(encode_lease_context).unwrap_or_default();
     // Contexts follow the 88-byte fixed body, at header-relative offset 152.
-    let (ctx_off, ctx_len) = if ctx.is_empty() {
+    let (ctx_off, ctx_len) = if contexts.is_empty() {
         (0u32, 0u32)
     } else {
-        ((BODY + 88) as u32, ctx.len() as u32)
+        ((BODY + 88) as u32, contexts.len() as u32)
     };
-    let mut b = Vec::with_capacity(88 + ctx.len());
+    let mut b = Vec::with_capacity(88 + contexts.len());
     b.extend_from_slice(&89u16.to_le_bytes()); // StructureSize @0
     b.push(oplock); // OplockLevel @2
     b.push(0); // Flags @3
@@ -317,7 +458,7 @@ pub fn build_create_resp(
     b.extend_from_slice(&ctx_off.to_le_bytes()); // CreateContextsOffset @80
     b.extend_from_slice(&ctx_len.to_le_bytes()); // CreateContextsLength @84
     debug_assert_eq!(b.len(), 88);
-    b.extend_from_slice(&ctx);
+    b.extend_from_slice(contexts);
     b
 }
 
@@ -1585,7 +1726,7 @@ mod oplock_codec_tests {
 
     #[test]
     fn create_response_carries_oplock_level() {
-        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::EXCLUSIVE, None);
+        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::EXCLUSIVE, &[]);
         assert_eq!(body[2], oplock::EXCLUSIVE, "OplockLevel @2");
         assert_eq!(&body[80..84], &0u32.to_le_bytes(), "no contexts");
     }
@@ -1670,7 +1811,8 @@ mod lease_codec_tests {
     #[test]
     fn create_response_appends_lease_context() {
         let grant = LeaseResp { key: [0x33; 16], state: lease::RH, flags: 0, epoch: 1, v2: true };
-        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::LEASE, Some(grant));
+        let ctx = encode_create_contexts(&[(lease::CONTEXT_NAME, lease_context_data(&grant))]);
+        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::LEASE, &ctx);
         assert_eq!(body[2], oplock::LEASE, "OplockLevel = lease");
         let off = u32::from_le_bytes(body[80..84].try_into().unwrap()) as usize;
         let len = u32::from_le_bytes(body[84..88].try_into().unwrap()) as usize;
@@ -1678,6 +1820,33 @@ mod lease_codec_tests {
         assert_eq!(len, 24 + 52, "v2 context length");
         // Context sits right after the 88-byte fixed part; name tag "RqLs".
         assert_eq!(&body[88 + 16..88 + 20], lease::CONTEXT_NAME);
+    }
+
+    #[test]
+    fn parses_durable_v2_request_and_reconnect() {
+        // Build a DH2Q request context and confirm the guid/timeout parse.
+        let mut data = Vec::new();
+        data.extend_from_slice(&5000u32.to_le_bytes()); // Timeout
+        data.extend_from_slice(&durable::FLAG_PERSISTENT.to_le_bytes()); // Flags
+        data.extend_from_slice(&[0u8; 8]); // Reserved
+        data.extend_from_slice(&[0xAB; 16]); // CreateGuid
+        let ctx = encode_create_contexts(&[(durable::REQ_V2, data)]);
+        let mut frame = vec![0u8; BODY];
+        let mut body = vec![0u8; 56];
+        body[0..2].copy_from_slice(&57u16.to_le_bytes());
+        let ctx_off = BODY + 56;
+        body[48..52].copy_from_slice(&(ctx_off as u32).to_le_bytes());
+        body[52..56].copy_from_slice(&(ctx.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&body);
+        frame.extend_from_slice(&ctx);
+        match CreateReq::parse(&frame).unwrap().durable.expect("durable") {
+            DurableReq::RequestV2 { timeout, flags, create_guid } => {
+                assert_eq!(timeout, 5000);
+                assert_eq!(flags, durable::FLAG_PERSISTENT);
+                assert_eq!(create_guid, [0xAB; 16]);
+            }
+            other => panic!("expected RequestV2, got {other:?}"),
+        }
     }
 
     #[test]
