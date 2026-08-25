@@ -100,6 +100,33 @@ Remaining work is outside the core `[MS-SMB2]` request set:
 Run it on trusted networks; treat it as an interoperability/reference
 implementation that is steadily growing production features.
 
+## Conformance test suite
+
+A Rust integration-test harness under [test/](test/README.md) exercises the
+server and tracks pass/fail plus performance metrics across runs. Its test plan
+mirrors the category structure of Microsoft's
+[WindowsProtocolTestSuites](https://github.com/microsoft/WindowsProtocolTestSuites)
+FileServer family; assertions are native Rust, driven through a Python
+`smbprotocol` actuator.
+
+```sh
+# automated: starts the server, runs every case, records a run under test/data/
+cargo build -p smb-server -p smb-testsuite
+./target/debug/smb-testrunner --start-server --port 4450 --record
+
+# interactive: point cargo test at a running server (skips cleanly if unset)
+SMB_TEST_HOST=127.0.0.1 SMB_TEST_PORT=4450 cargo test -p smb-testsuite
+
+# containerised build + run
+docker build -f test/Dockerfile -t smb-rs-test .
+docker run --rm --security-opt seccomp=unconfined \
+    -v "$PWD/test/data:/work/test/data" smb-rs-test
+```
+
+Results are committed under [test/data/](test/data/) — per-run JSON, `summary.csv`,
+`history.csv`, and a zero-dependency history viewer (`test/data/index.html`) that
+renders pass-rate trends and the latest run without a server.
+
 ---
 
 ## Building

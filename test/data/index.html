@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>smb-rs conformance results</title>
+  <style>
+    :root { color-scheme: light dark; --pass:#1a9c4b; --fail:#d13438; --err:#b26a00; --skip:#666; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; max-width: 1100px; }
+    h1 { font-size: 1.4rem; margin: 0 0 .2rem; }
+    .sub { color: #888; margin: 0 0 1.2rem; font-size: .9rem; }
+    .cards { display: flex; flex-wrap: wrap; gap: .75rem; margin-bottom: 1.2rem; }
+    .card { border: 1px solid #8883; border-radius: 8px; padding: .6rem .9rem; min-width: 110px; }
+    .card .n { font-size: 1.5rem; font-weight: 700; }
+    .card .l { font-size: .75rem; color: #888; text-transform: uppercase; letter-spacing: .04em; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; font-size: .88rem; }
+    th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8882; }
+    th { font-weight: 600; color: #888; font-size: .75rem; text-transform: uppercase; }
+    .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .72rem; font-weight: 700; color: #fff; }
+    .pass { background: var(--pass); } .fail { background: var(--fail); }
+    .error { background: var(--err); } .skip { background: var(--skip); }
+    .bar { height: 8px; border-radius: 4px; background: #8883; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: var(--pass); }
+    .muted { color: #999; }
+    h2 { font-size: 1rem; margin: 1.4rem 0 .5rem; }
+    code { font-family: ui-monospace, monospace; font-size: .85em; }
+    .spark { font-family: ui-monospace, monospace; letter-spacing: -1px; }
+  </style>
+</head>
+<body>
+  <h1>smb-rs conformance results</h1>
+  <p class="sub" id="sub">loading results.json…</p>
+  <div class="cards" id="cards"></div>
+
+  <h2>Pass rate across runs</h2>
+  <div id="trend"></div>
+
+  <h2>By category (latest run)</h2>
+  <table id="cats"><thead><tr><th>Category</th><th>Pass</th><th>Fail</th><th>Error</th><th>Skip</th></tr></thead><tbody></tbody></table>
+
+  <h2>Latest run — cases</h2>
+  <table id="cases"><thead><tr><th>Status</th><th>Case</th><th>Category</th><th>Spec</th><th>ms</th><th>Detail</th></tr></thead><tbody></tbody></table>
+
+  <h2>Run history</h2>
+  <table id="runs"><thead><tr><th>Run</th><th>Date</th><th>Commit</th><th>Ver</th><th>Pass</th><th>Fail</th><th>Rate</th><th>ms</th></tr></thead><tbody></tbody></table>
+
+  <script src="app.js"></script>
+</body>
+</html>

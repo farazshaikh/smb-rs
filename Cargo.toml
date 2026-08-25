@@ -26,6 +26,7 @@ members = [
     "crates/smb-auth",
     "crates/smb-csp",
     "crates/smb-server",
+    "crates/smb-testsuite",
 ]
 
 [workspace.package]
