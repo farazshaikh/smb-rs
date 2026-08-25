@@ -1352,7 +1352,7 @@ async fn run_lock_wait(
 /// final CHANGE_NOTIFY response ([MS-SMB2] §2.2.36) on the outbound queue.
 async fn run_change_notify(
     dir_path: String,
-    _watch_tree: bool,
+    watch_tree: bool,
     filter: u32,
     crypto: AsyncCrypto,
     message_id: u64,
@@ -1360,7 +1360,7 @@ async fn run_change_notify(
     outbound: mpsc::Sender<Vec<u8>>,
     mut cancel: oneshot::Receiver<()>,
 ) {
-    let frame = match watch_one_event(&dir_path, filter, &mut cancel).await {
+    let frame = match watch_one_event(&dir_path, watch_tree, filter, &mut cancel).await {
         Some(entries) => {
             let pairs: Vec<(u32, &str)> =
                 entries.iter().map(|(a, n)| (*a, n.as_str())).collect();
@@ -1383,18 +1383,33 @@ async fn run_change_notify(
 }
 
 /// Await the first inotify event on `dir_path` (mapped from the SMB completion
-/// filter) or a cancellation. Returns the `(action, name)` list, or `None` on
-/// cancel/setup error.
+/// filter) or a cancellation. When `watch_tree` is set, subdirectories are
+/// watched too and the reported name is relative to `dir_path`. Returns the
+/// `(action, name)` list, or `None` on cancel/setup error.
 async fn watch_one_event(
     dir_path: &str,
+    watch_tree: bool,
     filter: u32,
     cancel: &mut oneshot::Receiver<()>,
 ) -> Option<Vec<(u32, String)>> {
     use futures_util::StreamExt;
     use inotify::Inotify;
+    use std::collections::HashMap;
 
     let inotify = Inotify::init().ok()?;
-    inotify.watches().add(dir_path, filter_to_mask(filter)).ok()?;
+    let mask = filter_to_mask(filter);
+    // Map each watch descriptor to its path relative to the watched root so a
+    // recursive event names the file as `subdir\name`.
+    let mut wd_rel: HashMap<inotify::WatchDescriptor, String> = HashMap::new();
+    let root_wd = inotify.watches().add(dir_path, mask).ok()?;
+    wd_rel.insert(root_wd, String::new());
+    if watch_tree {
+        for (abs, rel) in collect_subdirs(std::path::Path::new(dir_path)) {
+            if let Ok(wd) = inotify.watches().add(&abs, mask) {
+                wd_rel.insert(wd, rel);
+            }
+        }
+    }
     let mut buf = [0u8; 4096];
     let mut stream = inotify.into_event_stream(&mut buf).ok()?;
 
@@ -1406,10 +1421,35 @@ async fn watch_one_event(
                 .as_ref()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            Some(vec![(mask_to_action(ev.mask), name)])
+            let prefix = wd_rel.get(&ev.wd).cloned().unwrap_or_default();
+            let full = if prefix.is_empty() { name } else { format!("{prefix}\\{name}") };
+            Some(vec![(mask_to_action(ev.mask), full)])
         }
         _ = cancel => None,
     }
+}
+
+/// Collect subdirectories under `root` as `(absolute_path, backslash_relative)`
+/// pairs for recursive CHANGE_NOTIFY, capped to bound very deep trees.
+fn collect_subdirs(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+    const CAP: usize = 4096;
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    while let Some((dir, rel)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let child = if rel.is_empty() { name } else { format!("{rel}\\{name}") };
+                out.push((e.path(), child.clone()));
+                stack.push((e.path(), child));
+                if out.len() >= CAP {
+                    return out;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Translate an SMB completion filter ([MS-SMB2] §2.2.35) into an inotify
@@ -2286,7 +2326,10 @@ async fn query_directory(
     let has_state = conn.searches.contains_key(&req.file_id.0);
     let restart = !has_state
         || req.flags
-            & (c::find_flags::RESTART_SCANS | c::find_flags::REOPEN | c::find_flags::SCAN)
+            & (c::find_flags::RESTART_SCANS
+                | c::find_flags::REOPEN
+                | c::find_flags::SCAN
+                | c::find_flags::INDEX_SPECIFIED)
             != 0;
 
     if restart {
@@ -2315,7 +2358,7 @@ async fn query_directory(
             &req.pattern.trim_start_matches(['\\', '/']),
         );
         let entries = vfs.list(&dir_rel).await.map_err(vfs_err)?;
-        let matched: Vec<info::FindEntry> = entries
+        let mut matched: Vec<info::FindEntry> = entries
             .into_iter()
             .filter(|e| {
                 name_pat.is_empty()
@@ -2323,6 +2366,11 @@ async fn query_directory(
             })
             .map(|e| info::FindEntry { name: e.name, meta: info::QueryMeta::from_vfs(&e.meta) })
             .collect();
+        // Resume-by-index ([MS-SMB2] §2.2.33): skip to the requested ordinal.
+        if req.flags & c::find_flags::INDEX_SPECIFIED != 0 && req.file_index > 0 {
+            let skip = (req.file_index as usize).min(matched.len());
+            matched.drain(..skip);
+        }
         conn.searches.insert(req.file_id.0, matched.into());
     } else if !conn.searches.contains_key(&req.file_id.0) {
         return Err(Status::INVALID_PARAMETER);
@@ -2604,7 +2652,7 @@ mod async_notify_tests {
 
         let (_tx, mut rx) = oneshot::channel();
         let watch = tokio_uring::spawn(async move {
-            watch_one_event(&path, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
+            watch_one_event(&path, false, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         std::fs::write(dir.join("created.txt"), b"hi").unwrap();
@@ -2613,6 +2661,30 @@ mod async_notify_tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
         assert_eq!(events[0].1, "created.txt");
+        std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    /// A tree watch (`watch_tree`) fires on a file created in a subdirectory and
+    /// names it relative to the watched root.
+    #[test]
+    fn recursive_watch_reports_subdir_file() {
+        tokio_uring::start(async {
+        let dir = std::env::temp_dir().join(format!("rustsmb_notify_rec_{}", std::process::id()));
+        let sub = dir.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+
+        let (_tx, mut rx) = oneshot::channel();
+        let watch = tokio_uring::spawn(async move {
+            watch_one_event(&path, true, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        std::fs::write(sub.join("deep.txt"), b"hi").unwrap();
+
+        let events = watch.await.unwrap().expect("subdir event fired");
+        assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
+        assert_eq!(events[0].1, "nested\\deep.txt", "named relative to watch root");
         std::fs::remove_dir_all(&dir).ok();
         });
     }
@@ -2627,7 +2699,7 @@ mod async_notify_tests {
 
         let (tx, mut rx) = oneshot::channel();
         let watch = tokio_uring::spawn(async move {
-            watch_one_event(&path, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
+            watch_one_event(&path, false, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         tx.send(()).unwrap();

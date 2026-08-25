@@ -270,9 +270,9 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | QUERY_DIRECTORY classes 1/2/3/12/37/38 | §2.2.33/34, [MS-FSCC] §2.4 | complete | entry-chain decode tests | ls + impacket list | entries/s (todo) | — | dirs_scanned |
 | Continuation queue + RESTART/REOPEN/SCAN flags | §3.3.5.24 | complete | restart-flag unit test | multi-page ls | — | — | enum_restarts |
 | RETURN_SINGLE_ENTRY | §2.2.33.1 | complete | — | — | — | — | — |
-| Resume-by-index (INDEX_SPECIFIED) | §2.2.33.1 | planned | index resume tests | huge-dir page walk | — | — | — |
+| Resume-by-index (INDEX_SPECIFIED) | §2.2.33.1 | complete | file_index parse test | index-resumed page walk | — | — | — |
 | 8.3 short-name generation/matching | [MS-FSCC] §2.1.5 | planned | name-gen tests | dos-style lookup | — | — | — |
-| CHANGE_NOTIFY (recursive/non-recursive) | §2.2.35/36 | complete (non-recursive) | parse/build + real inotify watch tests | smbprotocol watch→create→notify over encryption ✅ | — | notify fire lines | notifies_sent ✅ |
+| CHANGE_NOTIFY (recursive/non-recursive) | §2.2.35/36 | complete | parse/build + inotify watch + recursive-subdir tests | smbprotocol watch→create→notify over encryption ✅ | — | notify fire lines | notifies_sent ✅ |
 | DOS wildcard matcher (* ?) | [MS-CIFS] §2.2.8.1 | complete | wildcard unit tests | patterned ls | — | — | — |
 
 ### Information levels & metadata ([MS-FSCC])

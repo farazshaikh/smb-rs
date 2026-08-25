@@ -825,6 +825,8 @@ pub struct QueryDirReq {
     pub class: u8,
     /// FIND flags byte.
     pub flags: u8,
+    /// Resume index (meaningful only when `INDEX_SPECIFIED` is set).
+    pub file_index: u32,
     /// Directory handle.
     pub file_id: FileId,
     /// Search pattern (empty when continuing an enumeration).
@@ -851,6 +853,7 @@ impl QueryDirReq {
         Some(QueryDirReq {
             class: *frame.get(qdir_off::CLASS)?,
             flags: *frame.get(qdir_off::FLAGS)?,
+            file_index: g32(frame, qdir_off::FILE_INDEX),
             file_id: FileId(frame.get(qdir_off::FILE_ID..qdir_off::FILE_ID + 16)?.try_into().ok()?),
             pattern: String::from_utf16_lossy(&units),
         })
@@ -1871,3 +1874,21 @@ mod lease_codec_tests {
     }
 }
 
+
+#[cfg(test)]
+mod query_dir_tests {
+    use super::*;
+
+    #[test]
+    fn parses_resume_file_index() {
+        let mut f = vec![0u8; 64];
+        let mut body = vec![0u8; 32];
+        body[0..2].copy_from_slice(&33u16.to_le_bytes()); // StructureSize
+        body[3] = find_flags::INDEX_SPECIFIED; // Flags
+        body[4..8].copy_from_slice(&7u32.to_le_bytes()); // FileIndex
+        f.extend_from_slice(&body);
+        let req = QueryDirReq::parse(&f).expect("parse");
+        assert_eq!(req.file_index, 7, "resume index parsed");
+        assert_eq!(req.flags & find_flags::INDEX_SPECIFIED, find_flags::INDEX_SPECIFIED);
+    }
+}
