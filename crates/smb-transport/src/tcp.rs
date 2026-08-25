@@ -81,9 +81,7 @@ impl NbssReader {
                 Some(h) => h,
                 None => return Ok(None),
             };
-            let len = ((hdr[1] as usize & 0x01) << 16)
-                | ((hdr[2] as usize) << 8)
-                | hdr[3] as usize;
+            let len = decode_nbss_len(&hdr);
             match hdr[0] {
                 nb_type::SESSION_MESSAGE => {
                     if len > MAX_FRAME {
@@ -114,15 +112,29 @@ impl NbssReader {
     }
 }
 
+/// Decode the 24-bit NBSS session-message length from a 4-byte header.
+///
+/// SMB-over-TCP uses the full 24-bit length ([MS-SMB2] §2.1), so all of byte 1
+/// participates. Masking to the RFC 1002 17-bit limit would truncate any frame
+/// >= 128 KiB (multi-credit reads/writes, sealed transforms) and desync the
+/// stream; the length must decode symmetrically with [`encode_nbss_len`].
+fn decode_nbss_len(hdr: &[u8]) -> usize {
+    ((hdr[1] as usize) << 16) | ((hdr[2] as usize) << 8) | hdr[3] as usize
+}
+
+/// Encode a 24-bit NBSS session-message length into the 3 length bytes.
+fn encode_nbss_len(len: usize) -> [u8; 3] {
+    [(len >> 16) as u8, (len >> 8) as u8, (len & 0xff) as u8]
+}
+
 /// Frame `data` in an NBSS session message and write it via io_uring.
 async fn write_nbss(stream: &TcpStream, data: &[u8]) -> Result<(), TransportError> {
-    // 3-byte big-endian length: frames above 64 KiB (multi-credit
-    // reads/writes, sealed transform payloads) need the middle byte.
+    // Frames above 64 KiB (multi-credit reads/writes, sealed transform
+    // payloads) need the middle byte, and above 128 KiB the high byte.
+    let len = encode_nbss_len(data.len());
     let mut frame = Vec::with_capacity(4 + data.len());
     frame.push(nb_type::SESSION_MESSAGE);
-    frame.push((data.len() >> 16) as u8);
-    frame.push((data.len() >> 8) as u8);
-    frame.push((data.len() & 0xff) as u8);
+    frame.extend_from_slice(&len);
     frame.extend_from_slice(data);
     let (res, _buf) = stream.write_all(frame).await;
     res.map_err(Into::into)
@@ -220,5 +232,30 @@ impl std::fmt::Debug for TcpSink {
 impl FrameSink for TcpSink {
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         write_nbss(&self.stream, data).await
+    }
+}
+
+#[cfg(test)]
+mod nbss_len_tests {
+    use super::{decode_nbss_len, encode_nbss_len, MAX_FRAME};
+
+    /// Encoding then decoding must round-trip across the whole accepted range,
+    /// including sizes that need the high length byte (>= 128 KiB). This guards
+    /// the framing bug where masking byte 1 to 1 bit truncated large frames.
+    #[test]
+    fn round_trips_across_full_range() {
+        for len in [0usize, 1, 63, 64 * 1024, 128 * 1024, 256 * 1024, MAX_FRAME] {
+            let enc = encode_nbss_len(len);
+            let hdr = [0u8, enc[0], enc[1], enc[2]];
+            assert_eq!(decode_nbss_len(&hdr), len, "round-trip failed for {len}");
+        }
+    }
+
+    /// A 256 KiB frame sets the high length byte; a 17-bit decode would drop it.
+    #[test]
+    fn decodes_high_byte() {
+        let enc = encode_nbss_len(256 * 1024);
+        assert_eq!(enc, [0x04, 0x00, 0x00]);
+        assert_eq!(decode_nbss_len(&[0x00, 0x04, 0x00, 0x00]), 256 * 1024);
     }
 }

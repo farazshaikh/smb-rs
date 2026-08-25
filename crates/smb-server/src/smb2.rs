@@ -391,16 +391,18 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
     };
     let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
     let iv_size = if gcm { 12 } else { 11 };
-    let aad = &frame[smb_proto_smb2::commands::tf_off::NONCE
-        ..smb_proto_smb2::commands::tf_off::HDR_SIZE];
-    let payload = &frame[smb_proto_smb2::commands::tf_off::HDR_SIZE
-        ..tf_off_end(tf.original_len)];
+    let aad = frame.get(
+        smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::HDR_SIZE,
+    )?;
+    let payload = frame.get(
+        smb_proto_smb2::commands::tf_off::HDR_SIZE..tf_off_end(tf.original_len),
+    )?;
     // The GCM/CCM tag travels in the TF Signature field ([MS-SMB2]
     // §2.2.41), detached from the ciphertext; re-attach it for the AEAD
     // open, which expects ct||tag.
     let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
     let mut sealed = payload.to_vec();
-    sealed.extend_from_slice(&frame[tag_at..tag_at + 16]);
+    sealed.extend_from_slice(frame.get(tag_at..tag_at + 16)?);
     let pt = if gcm {
         match smb_auth::crypto::aes128gcm_open(
             &c2s,
@@ -2651,9 +2653,10 @@ pub(crate) fn response(
     f.extend_from_slice(&req.credit_charge.to_le_bytes()); // CreditCharge echo
     f.extend_from_slice(&status.raw().to_le_bytes());
     f.extend_from_slice(&req.command.to_le_bytes());
-    // Grant at least the requested charge so large R/W stay credit-neutral
-    // ([MS-SMB2] §3.3.1.1 — generous-grant policy).
-    let grant = std::cmp::max(req.credit_charge, 1);
+    // Honor the client's CreditRequest ([MS-SMB2] §3.3.1.2) so it can build a
+    // credit window large enough for multi-credit (>64 KiB) reads/writes; the
+    // grant is floored at the charge and capped to bound outstanding credits.
+    let grant = req.credits.max(req.credit_charge).max(1).min(512);
     f.extend_from_slice(&grant.to_le_bytes());
     counter!("smb_credits_granted_total").increment(grant as u64);
     f.extend_from_slice(&1u32.to_le_bytes()); // FLAGS_SERVER_TO_REDIR

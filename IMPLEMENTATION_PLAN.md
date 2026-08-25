@@ -188,8 +188,8 @@ diagnostic output today; **metric** = runtime counter/gauge. Metrics are
 | NBSS framing over TCP :445 | RFC 1002 §5.2 | complete | — | smbclient all dialects | — | conn span + disconnect debug (tracing) | nbss_frames_total ✅ |
 | Multi-protocol upgrade (\xFESMB in SMB1 negotiate) | [MS-CIFS] §2.2.4.52 + [MS-SMB2] §3.2.4.2 | complete | — | impacket SMB class fallback | — | upgrade line | — |
 | Compound request/response chains | [MS-SMB2] §3.3.5.2 | complete | — (todo: parser fuzz) | smbd parallel_read path | — | tracing::debug per frame | compounded_msgs_total ✅ |
-| Credit accounting (grant/charge, multi-credit) | [MS-SMB2] §3.3.1.1 | planned | charge calc unit tests | large-file copy ≥64 KiB chunks | large-R/W MB/s | credits granted per resp | credits_granted |
-| Large MTU (>64 KiB single R/W) | §2.2.3.1.1 CAP_LARGE_MTU | planned | — | dd through mount | bulk MB/s | — | max_rw_seen |
+| Credit accounting (grant/charge, multi-credit) | [MS-SMB2] §3.3.1.1 | complete | charge calc unit tests | large-file copy ≥64 KiB chunks ✅ | large-R/W MB/s | credits granted per resp | credits_granted |
+| Large MTU (>64 KiB single R/W) | §2.2.3.1.1 CAP_LARGE_MTU | complete | NBSS 24-bit length codec round-trip ✅ | 256 KiB single-op R/W (smbprotocol) ✅ | bulk MB/s | — | max_rw_seen |
 | Async processing (STATUS_PENDING, async id) | §2.2.1.1, §3.3.4.2 | complete | async-frame + inotify watch/cancel tests | smbprotocol notify over encryption ✅ | — | pending gauge | async_pending ✅ |
 | CANCEL | §2.2.30 | complete | cancel-stops-watch test | ctrl-c mid-read | — | cancel received | cancels_total ✅ |
 | NetBIOS 139 + datagram browsing | RFC 1001/1002 | planned | — | Windows Network browse | — | — | — |
