@@ -32,8 +32,11 @@ pub enum TransportError {
 ///
 /// Implementations must preserve frame boundaries: each value returned by
 /// [`Transport::recv`] is exactly one SMB frame.
-#[async_trait]
-pub trait Transport: Send {
+///
+/// Futures are `?Send`: the io_uring TCP transport owns `!Send` resources and
+/// runs entirely on one thread under a `tokio_uring` runtime.
+#[async_trait(?Send)]
+pub trait Transport {
     /// Receive the next frame. `Ok(None)` signals a clean end of stream.
     async fn recv(&mut self) -> Result<Option<Frame>, TransportError>;
 
@@ -54,8 +57,8 @@ pub trait Transport: Send {
 }
 
 /// Read half of a split [`Transport`].
-#[async_trait]
-pub trait FrameSource: Send {
+#[async_trait(?Send)]
+pub trait FrameSource {
     /// Receive the next frame. `Ok(None)` signals a clean end of stream.
     async fn recv(&mut self) -> Result<Option<Frame>, TransportError>;
 
@@ -64,8 +67,8 @@ pub trait FrameSource: Send {
 }
 
 /// Write half of a split [`Transport`]. Owned by the per-connection writer task.
-#[async_trait]
-pub trait FrameSink: Send {
+#[async_trait(?Send)]
+pub trait FrameSink {
     /// Transmit one frame.
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError>;
 }

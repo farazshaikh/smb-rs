@@ -196,9 +196,22 @@ crates/
 
 ## Design notes
 
+- **Fully async on io_uring**: the server runs on a `tokio_uring`
+  current-thread runtime, so all networking and file I/O go through io_uring
+  with owned (zero-copy-friendly) buffers — no blocking `std::fs`/`std::net`
+  and no ad-hoc worker threads. Because io_uring resources (`fs::File`,
+  `net::TcpStream`) are `!Send`, the transport and VFS traits expose
+  `?Send` futures (`#[async_trait(?Send)]`) and per-connection state is
+  driven entirely on one thread via `tokio_uring::spawn`. Shared server
+  tables stay `Send + Sync` behind `Arc<Mutex>`, and cross-task wakeups
+  (async `STATUS_PENDING` completions, oplock/lease breaks, CHANGE_NOTIFY)
+  travel over `mpsc` channels to a dedicated per-connection writer task.
+  Directory enumeration and cache-fast metadata lookups keep using
+  `std::fs` because `getdents`/`statx` have no io_uring fast path.
 - **Layered by spec**: protocol crates only translate wire ↔ neutral types;
   handlers speak to a VFS abstraction, so SMB1 and SMB2 drive the same
   storage backend and stay behaviourally identical.
+
 - **Spec-named field offsets**: every wire struct documents its section and
   uses named offsets instead of magic numbers.
 - **Byte-level fidelity**: the fiddly parts other implementations get wrong

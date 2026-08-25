@@ -1,5 +1,12 @@
 //! Default storage backend mapping the [`Vfs`] interface onto POSIX file
-//! semantics via `std::fs` / `tokio::fs`.
+//! semantics.
+//!
+//! The data path (open / read / write / fsync) and mutating directory ops
+//! (mkdir / rmdir / rename / unlink) run on **io_uring** via `tokio_uring::fs`
+//! — non-blocking, zero-copy, completion-based. Read-only metadata and
+//! directory *enumeration* use `std::fs` because Linux has no async / io_uring
+//! `getdents` op; those are page-cache-backed syscalls that complete in
+//! microseconds.
 //!
 //! All client paths are resolved inside the configured share root; `..`
 //! traversal and absolute components are refused and existing entries are
@@ -12,6 +19,7 @@
 use async_trait::async_trait;
 use smb_proto::types::{AttrFlags, Disposition, FileTime};
 use smb_vfs::{map_io, Entry, FileMeta, OpenFile, SetOp, Vfs, VfsError, VfsResult};
+use tokio_uring::fs::{File, OpenOptions};
 
 /// POSIX backend rooted at a single directory.
 #[derive(Debug)]
@@ -20,11 +28,23 @@ pub struct PosixVfs {
 }
 
 /// Backend-private state attached to every open handle.
+///
+/// Holds an io_uring [`File`], which is `!Send`; the handle therefore lives
+/// entirely on its connection's runtime and is never sent across threads.
 pub struct PosixInner {
-    /// Open file descriptor (None for directory handles).
-    pub file: Option<std::fs::File>,
+    /// Open io_uring file (None for directory handles).
+    pub file: Option<File>,
     /// Tracked cursor for SEEK support.
     pub pos: u64,
+}
+
+impl std::fmt::Debug for PosixInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PosixInner")
+            .field("open", &self.file.is_some())
+            .field("pos", &self.pos)
+            .finish()
+    }
 }
 
 impl PosixVfs {
@@ -47,20 +67,6 @@ impl PosixVfs {
             return abs;
         }
         resolve_under(&self.root, path)
-    }
-
-    fn open_inner(path: &std::path::Path, read: bool, write: bool) -> VfsResult<std::fs::File> {
-        let mut oo = std::fs::OpenOptions::new();
-        if read {
-            oo.read(true);
-        }
-        if write {
-            oo.write(true).append(false);
-        }
-        if !read && !write {
-            oo.read(true);
-        }
-        oo.open(path).map_err(map_io)
     }
 }
 
@@ -149,7 +155,7 @@ pub fn wildcard_match(name: &str, pattern: &str) -> bool {
     rec(&name.chars().collect::<Vec<_>>(), &pattern.chars().collect::<Vec<_>>())
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Vfs for PosixVfs {
     async fn create(
         &self,
@@ -165,39 +171,25 @@ impl Vfs for PosixVfs {
 
         let path = self.resolve(rel);
         let want_dir = is_dir || options & OPT_DIRECTORY_FILE != 0;
-        let exists = path.symlink_metadata().is_ok();
+        let existing = std::fs::symlink_metadata(&path).ok();
+        let exists = existing.is_some();
+        let existing_is_dir = existing.as_ref().map(|m| m.is_dir()).unwrap_or(false);
 
-        let action: u32;
-        if exists {
-            match Disposition::from_u32(disposition) {
-                Some(Disposition::Overwrite) | Some(Disposition::OverwriteIf)
-                | Some(Disposition::Supersede)
-                    if !path.is_dir() =>
-                {
-                    std::fs::write(&path, b"").map_err(map_io)?;
-                    action = if disposition == 0 { 0 } else { 3 };
-                }
-                _ => action = 1,
-            }
-        } else {
-            match Disposition::from_u32(disposition) {
-                Some(Disposition::Open) | Some(Disposition::Overwrite) => {
-                    return Err(VfsError::NotFound)
-                }
-                _ => {}
-            }
-            if want_dir {
-                std::fs::create_dir_all(&path).map_err(map_io)?;
+        // Directory handle: no io_uring file object, create the directory tree
+        // if needed ([MS-SMB2] FILE_DIRECTORY_FILE).
+        if want_dir || existing_is_dir {
+            let action = if exists {
+                1
             } else {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                match Disposition::from_u32(disposition) {
+                    Some(Disposition::Open) | Some(Disposition::Overwrite) => {
+                        return Err(VfsError::NotFound)
+                    }
+                    _ => {}
                 }
-                std::fs::write(&path, b"").map_err(map_io)?;
-            }
-            action = 2;
-        }
-
-        if path.is_dir() || want_dir {
+                tokio_uring::fs::create_dir_all(&path).await.map_err(map_io)?;
+                2
+            };
             let md = std::fs::metadata(&path).map_err(map_io)?;
             let open = Box::new(OpenFile {
                 path: path.to_string_lossy().into_owned(),
@@ -212,15 +204,44 @@ impl Vfs for PosixVfs {
             return Ok((open, meta_of(&md), action));
         }
 
+        // Regular file: derive create/truncate semantics from the disposition.
+        let (action, truncate, create) = if exists {
+            match Disposition::from_u32(disposition) {
+                Some(Disposition::Supersede) => (0u32, true, false),
+                Some(Disposition::Overwrite) | Some(Disposition::OverwriteIf) => (3, true, false),
+                _ => (1, false, false),
+            }
+        } else {
+            match Disposition::from_u32(disposition) {
+                Some(Disposition::Open) | Some(Disposition::Overwrite) => {
+                    return Err(VfsError::NotFound)
+                }
+                _ => {}
+            }
+            if let Some(parent) = path.parent() {
+                let _ = tokio_uring::fs::create_dir_all(parent).await;
+            }
+            (2, false, true)
+        };
+
         let read_access =
             access & (0x8000_0000 | 0x0000_0001 | 0x0000_0008 | 0x0000_0080 | 0x1000_0000) != 0;
         let write_access = access
             & (0x4000_0000 | 0x0000_0002 | 0x0000_0004 | 0x0001_0000 | 0x2000_0000 | 0x1000_0000)
             != 0;
 
-        let file = Self::open_inner(&path, read_access || !write_access, write_access)?;
-        let md = file.metadata().map_err(map_io)?;
-        let inner = PosixInner { file: Some(file), pos: 0 };
+        let mut oo = OpenOptions::new();
+        oo.read(read_access || !write_access);
+        oo.write(write_access || truncate || create);
+        if create {
+            oo.create(true);
+        }
+        if truncate {
+            oo.truncate(true);
+        }
+        let file = oo.open(&path).await.map_err(map_io)?;
+        let md = std::fs::metadata(&path).map_err(map_io)?;
+
         let open = Box::new(OpenFile {
             path: path.to_string_lossy().into_owned(),
             rel: rel.to_string(),
@@ -229,28 +250,19 @@ impl Vfs for PosixVfs {
             can_write: write_access,
             delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
             delete_pending: false,
-            inner: Box::new(inner),
+            inner: Box::new(PosixInner { file: Some(file), pos: 0 }),
         });
-
         Ok((open, meta_of(&md), action))
     }
 
     async fn read(&self, open: &mut OpenFile, offset: u64, len: usize) -> VfsResult<Vec<u8>> {
-        use std::io::{Read, Seek, SeekFrom};
         let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
-        let f = inner.file.as_mut().ok_or(VfsError::AccessDenied)?;
-        f.seek(SeekFrom::Start(offset)).map_err(map_io)?;
-        let mut buf = vec![0u8; len];
-        loop {
-            match f.read(&mut buf) {
-                Ok(n) => {
-                    buf.truncate(n);
-                    return Ok(buf);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(map_io(e)),
-            }
-        }
+        let f = inner.file.as_ref().ok_or(VfsError::AccessDenied)?;
+        // io_uring positional read; the buffer round-trips through the kernel.
+        let (res, mut buf) = f.read_at(vec![0u8; len], offset).await;
+        let n = res.map_err(map_io)?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
     async fn write(
@@ -260,39 +272,35 @@ impl Vfs for PosixVfs {
         data: &[u8],
         write_through: bool,
     ) -> VfsResult<u64> {
-        use std::io::{Seek, SeekFrom, Write};
         let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
-        let f = inner.file.as_mut().ok_or(VfsError::AccessDenied)?;
-        f.seek(SeekFrom::Start(offset)).map_err(map_io)?;
-        let written = loop {
-            match f.write(data) {
-                Ok(n) => break n as u64,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(map_io(e)),
-            }
-        };
+        let f = inner.file.as_ref().ok_or(VfsError::AccessDenied)?;
+        let total = data.len();
+        let (res, _buf) = f.write_all_at(data.to_vec(), offset).await;
+        res.map_err(map_io)?;
         if write_through {
-            f.flush().map_err(map_io)?;
+            f.sync_all().await.map_err(map_io)?;
         }
-        Ok(written)
+        Ok(total as u64)
     }
 
     async fn seek(&self, open: &mut OpenFile, mode: u16, offset: i64) -> VfsResult<u64> {
-        use std::io::{Seek, SeekFrom};
+        // Positional I/O needs no lseek; track the cursor for SMB1 SEEK.
+        let size = std::fs::metadata(&open.path).map(|m| m.len()).unwrap_or(0);
         let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
-        let f = inner.file.as_mut().ok_or(VfsError::AccessDenied)?;
-        let from = match mode & 3 {
-            0 => SeekFrom::Start(offset.max(0) as u64),
-            1 => SeekFrom::Current(offset),
-            _ => SeekFrom::End(offset),
+        let base = match mode & 3 {
+            0 => 0i64,
+            1 => inner.pos as i64,
+            _ => size as i64,
         };
-        f.seek(from).map_err(map_io)
+        let np = base.saturating_add(offset).max(0) as u64;
+        inner.pos = np;
+        Ok(np)
     }
 
     async fn flush(&self, open: &mut OpenFile) -> VfsResult<()> {
         let inner = open.inner_as_ref::<PosixInner>().ok_or(VfsError::NotSupported)?;
         if let Some(f) = inner.file.as_ref() {
-            f.sync_all().map_err(map_io)?;
+            f.sync_all().await.map_err(map_io)?;
         }
         Ok(())
     }
@@ -301,12 +309,19 @@ impl Vfs for PosixVfs {
         Ok(())
     }
 
-    async fn close(&self, open: Box<OpenFile>) -> VfsResult<()> {
+    async fn close(&self, mut open: Box<OpenFile>) -> VfsResult<()> {
+        // Close the io_uring file explicitly (async close), then honor
+        // delete-on-close.
+        if let Some(inner) = open.inner_as_mut::<PosixInner>() {
+            if let Some(f) = inner.file.take() {
+                let _ = f.close().await;
+            }
+        }
         if open.delete_on_close || open.delete_pending {
             if open.is_dir {
-                std::fs::remove_dir_all(&open.path).map_err(map_io)?;
+                tokio_uring::fs::remove_dir(&open.path).await.map_err(map_io)?;
             } else {
-                std::fs::remove_file(&open.path).map_err(map_io)?;
+                tokio_uring::fs::remove_file(&open.path).await.map_err(map_io)?;
             }
         }
         Ok(())
@@ -314,7 +329,7 @@ impl Vfs for PosixVfs {
 
     async fn mkdir(&self, rel: &str) -> VfsResult<()> {
         let p = self.resolve(rel);
-        std::fs::create_dir(&p).map_err(|e| match e.kind() {
+        tokio_uring::fs::create_dir(&p).await.map_err(|e| match e.kind() {
             std::io::ErrorKind::AlreadyExists => VfsError::AlreadyExists,
             std::io::ErrorKind::NotFound => VfsError::NotFound,
             _ => VfsError::AccessDenied,
@@ -323,7 +338,7 @@ impl Vfs for PosixVfs {
 
     async fn rmdir(&self, rel: &str) -> VfsResult<()> {
         let p = self.resolve(rel);
-        std::fs::remove_dir(&p).map_err(|e| match e.kind() {
+        tokio_uring::fs::remove_dir(&p).await.map_err(|e| match e.kind() {
             std::io::ErrorKind::DirectoryNotEmpty => VfsError::DirectoryNotEmpty,
             std::io::ErrorKind::NotFound => VfsError::NotFound,
             _ => VfsError::AccessDenied,
@@ -345,7 +360,7 @@ impl Vfs for PosixVfs {
         if md.is_dir() {
             return Err(VfsError::InvalidArgument);
         }
-        std::fs::remove_file(&p).map_err(map_io)
+        tokio_uring::fs::remove_file(&p).await.map_err(map_io)
     }
 
     async fn delete_pattern(&self, dir_rel: &str, pattern: &str) -> VfsResult<bool> {
@@ -357,7 +372,7 @@ impl Vfs for PosixVfs {
             if wildcard_match(&n.to_lowercase(), &pattern.to_lowercase())
                 && entry.path().is_file()
             {
-                std::fs::remove_file(entry.path()).map_err(map_io)?;
+                tokio_uring::fs::remove_file(entry.path()).await.map_err(map_io)?;
                 deleted_any = true;
             }
         }
@@ -370,7 +385,7 @@ impl Vfs for PosixVfs {
         if !src.exists() {
             return Err(VfsError::NotFound);
         }
-        std::fs::rename(&src, &dst).map_err(map_io)
+        tokio_uring::fs::rename(&src, &dst).await.map_err(map_io)
     }
 
     async fn list(&self, dir_rel: &str) -> VfsResult<Vec<Entry>> {
@@ -409,9 +424,9 @@ impl Vfs for PosixVfs {
             SetOp::Disposition { delete } => {
                 if *delete {
                     if p.is_dir() {
-                        std::fs::remove_dir(&p).map_err(map_io)?;
+                        tokio_uring::fs::remove_dir(&p).await.map_err(map_io)?;
                     } else {
-                        std::fs::remove_file(&p).map_err(map_io)?;
+                        tokio_uring::fs::remove_file(&p).await.map_err(map_io)?;
                     }
                 }
             }
@@ -442,7 +457,7 @@ impl Vfs for PosixVfs {
             }
             SetOp::Rename { replace_if_exists: _, name } => {
                 let dest = self.resolve(name);
-                std::fs::rename(&p, &dest).map_err(map_io)?;
+                tokio_uring::fs::rename(&p, &dest).await.map_err(map_io)?;
             }
         }
         Ok(())
@@ -463,22 +478,24 @@ mod tests {
     /// handle path (the getattrib step of `smbclient get`), returning
     /// STATUS_OBJECT_PATH_NOT_FOUND. Canonicalizing the root to absolute must
     /// make the stored handle path re-resolve cleanly.
-    #[tokio::test]
-    async fn stat_by_stored_path_survives_relative_root() {
-        let dir = format!("target/it_share_{}", std::process::id());
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(format!("{dir}/hello.txt"), b"hello!").unwrap();
+    #[test]
+    fn stat_by_stored_path_survives_relative_root() {
+        tokio_uring::start(async {
+            let dir = format!("target/it_share_{}", std::process::id());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(format!("{dir}/hello.txt"), b"hello!").unwrap();
 
-        let vfs = PosixVfs::new(&dir);
-        // FILE_OPEN (disposition 1), GENERIC_READ access.
-        let (open, _meta, _action) = vfs
-            .create("hello.txt", false, 0x8000_0000, 1, 0, 0)
-            .await
-            .expect("open existing file");
-        // The exact call that used to fail during getattrib.
-        let meta = vfs.stat(&open.path).await.expect("stat by stored handle path");
-        assert_eq!(meta.eof, 6, "reported size matches file contents");
+            let vfs = PosixVfs::new(&dir);
+            // FILE_OPEN (disposition 1), GENERIC_READ access.
+            let (open, _meta, _action) = vfs
+                .create("hello.txt", false, 0x8000_0000, 1, 0, 0)
+                .await
+                .expect("open existing file");
+            // The exact call that used to fail during getattrib.
+            let meta = vfs.stat(&open.path).await.expect("stat by stored handle path");
+            assert_eq!(meta.eof, 6, "reported size matches file contents");
 
-        std::fs::remove_dir_all(&dir).ok();
+            std::fs::remove_dir_all(&dir).ok();
+        });
     }
 }

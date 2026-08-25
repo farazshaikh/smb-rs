@@ -92,7 +92,7 @@ pub(crate) async fn writer_loop(
 pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Box<dyn Transport>) {
     let (mut reader, writer) = transport.split();
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
-    let writer_task = tokio::spawn(writer_loop(writer, out_rx));
+    let writer_task = tokio_uring::spawn(writer_loop(writer, out_rx));
 
     {
         let challenge = rand_challenge();

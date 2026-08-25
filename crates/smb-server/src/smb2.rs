@@ -162,7 +162,7 @@ pub async fn serve_client(
 ) {
     let (mut reader, writer) = transport.split();
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
-    let writer_task = tokio::spawn(crate::dispatch::writer_loop(writer, out_rx));
+    let writer_task = tokio_uring::spawn(crate::dispatch::writer_loop(writer, out_rx));
 
     {
         let mut conn = Smb2Conn::new(crate::dispatch::rand_challenge_pub(), out_tx.clone());
@@ -866,7 +866,7 @@ async fn process_single(
                 let (cancel_tx, cancel_rx) = oneshot::channel();
                 conn.async_cancels.insert(async_id, cancel_tx);
                 gauge!("smb_async_pending").increment(1.0);
-                tokio::spawn(run_lock_wait(
+                tokio_uring::spawn(run_lock_wait(
                     server.locks.clone(),
                     path,
                     acquires,
@@ -910,7 +910,7 @@ async fn process_single(
             let (cancel_tx, cancel_rx) = oneshot::channel();
             conn.async_cancels.insert(async_id, cancel_tx);
             gauge!("smb_async_pending").increment(1.0);
-            tokio::spawn(run_change_notify(
+            tokio_uring::spawn(run_change_notify(
                 dir_path,
                 req.watch_tree,
                 req.filter,
@@ -2224,14 +2224,15 @@ mod async_notify_tests {
 
     /// End-to-end of the real inotify watcher: arm a watch on a temp dir, drop
     /// a file in, and confirm we surface a FILE_ACTION_ADDED for its name.
-    #[tokio::test]
-    async fn watch_reports_created_file() {
+    #[test]
+    fn watch_reports_created_file() {
+        tokio_uring::start(async {
         let dir = std::env::temp_dir().join(format!("rustsmb_notify_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().into_owned();
 
         let (_tx, mut rx) = oneshot::channel();
-        let watch = tokio::spawn(async move {
+        let watch = tokio_uring::spawn(async move {
             watch_one_event(&path, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -2242,23 +2243,26 @@ mod async_notify_tests {
         assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
         assert_eq!(events[0].1, "created.txt");
         std::fs::remove_dir_all(&dir).ok();
+        });
     }
 
     /// Cancelling the watch resolves the watcher with no events.
-    #[tokio::test]
-    async fn cancel_stops_watch() {
+    #[test]
+    fn cancel_stops_watch() {
+        tokio_uring::start(async {
         let dir = std::env::temp_dir().join(format!("rustsmb_notify_cancel_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().into_owned();
 
         let (tx, mut rx) = oneshot::channel();
-        let watch = tokio::spawn(async move {
+        let watch = tokio_uring::spawn(async move {
             watch_one_event(&path, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         tx.send(()).unwrap();
         assert!(watch.await.unwrap().is_none(), "cancelled watch yields no events");
         std::fs::remove_dir_all(&dir).ok();
+        });
     }
 }
 
@@ -2274,8 +2278,9 @@ mod fsctl_tests {
 
     /// Server-side copy reads from the source open (named by a resume key) and
     /// writes into the target handle; the target file ends up with the bytes.
-    #[tokio::test]
-    async fn copychunk_copies_between_handles() {
+    #[test]
+    fn copychunk_copies_between_handles() {
+        tokio_uring::start(async {
         let dir = std::env::temp_dir().join(format!("rustsmb_cc_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("src.txt"), b"hello copychunk world").unwrap();
@@ -2316,11 +2321,13 @@ mod fsctl_tests {
         vfs.close(dst).await.unwrap();
         assert_eq!(std::fs::read(dir.join("dst.txt")).unwrap(), b"hello copychunk world");
         std::fs::remove_dir_all(&dir).ok();
+        });
     }
 
     /// A request past the server limits is rejected with the limits echoed.
-    #[tokio::test]
-    async fn copychunk_rejects_oversized_request() {
+    #[test]
+    fn copychunk_rejects_oversized_request() {
+        tokio_uring::start(async {
         use smb_proto_smb2::commands::copychunk_limits as lim;
         let dir = std::env::temp_dir().join(format!("rustsmb_cc_lim_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2353,11 +2360,13 @@ mod fsctl_tests {
         assert_eq!(err.0, Status::INVALID_PARAMETER);
         assert_eq!(&err.1[4..8], &lim::MAX_CHUNK_SIZE.to_le_bytes(), "limits echoed");
         std::fs::remove_dir_all(&dir).ok();
+        });
     }
 
     /// FSCTL_SET_ZERO_DATA zeros the requested byte range.
-    #[tokio::test]
-    async fn zero_range_zeros_bytes() {
+    #[test]
+    fn zero_range_zeros_bytes() {
+        tokio_uring::start(async {
         let dir = std::env::temp_dir().join(format!("rustsmb_zd_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("z.bin"), vec![0xFFu8; 16]).unwrap();
@@ -2377,6 +2386,7 @@ mod fsctl_tests {
         }
         assert_eq!(std::fs::read(dir.join("z.bin")).unwrap(), expected);
         std::fs::remove_dir_all(&dir).ok();
+        });
     }
 }
 
@@ -2427,8 +2437,9 @@ mod oplock_tests {
     /// The sole opener requesting an oplock gets EXCLUSIVE; a second open on the
     /// same file breaks that oplock (a break notification lands on the first
     /// connection's outbound queue) and itself gets no oplock.
-    #[tokio::test]
-    async fn oplock_granted_then_broken_on_second_open() {
+    #[test]
+    fn oplock_granted_then_broken_on_second_open() {
+        tokio_uring::start(async {
         let dir = std::env::temp_dir().join(format!("rustsmb_op_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("shared.bin"), b"data").unwrap();
@@ -2475,5 +2486,6 @@ mod oplock_tests {
         assert_eq!(brk[64 + 2], c::oplock::NONE, "broken down to NONE");
 
         std::fs::remove_dir_all(&dir).ok();
+        });
     }
 }

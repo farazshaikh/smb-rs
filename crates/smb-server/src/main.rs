@@ -53,8 +53,7 @@ struct Args {
 }
 
 /// Entry point.
-#[tokio::main]
-async fn main() {
+fn main() {
     let args = Args::parse();
 
     // Observability: tracing subscriber honours RUST_LOG, else --log filter.
@@ -87,44 +86,53 @@ async fn main() {
         oplocks: Arc::new(state::OplockTable::new()),
     });
 
-    let listener = match tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(port = args.port, error = %e, "failed to bind");
-            std::process::exit(1);
-        }
-    };
-    tracing::info!(
-        port = args.port,
-        build = "B7",
-        shares = ?shared.shares.keys().collect::<Vec<_>>(),
-        auth = if shared.users.is_empty() { "guest(any)" } else { "users" },
-        "rustsmb listening"
-    );
-
-    if let Some(addr) = args.metrics_bind {
-        spawn_metrics_endpoint(addr);
-    }
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                let srv = shared.clone();
-                tokio::spawn(async move {
-                    let _ = stream.set_nodelay(true);
-                    let span = tracing::info_span!("conn", peer = %peer);
-                    let _g = span.enter();
-                    tracing::debug!("client connected");
-                    let transport =
-                        Box::new(smb_transport::tcp::TcpTransport::new(stream))
-                            as Box<dyn smb_transport::Transport>;
-                    dispatch::serve_client(srv, transport).await;
-                    tracing::debug!("client disconnected");
-                });
+    // Single-threaded io_uring runtime: all networking and file I/O run on
+    // one thread via io_uring, so per-connection state stays `!Send` and never
+    // crosses threads. (Per-core scaling with SO_REUSEPORT comes later.)
+    tokio_uring::start(async move {
+        let listener = match tokio_uring::net::TcpListener::bind(SocketAddr::from((
+            [0, 0, 0, 0],
+            args.port,
+        ))) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(port = args.port, error = %e, "failed to bind");
+                std::process::exit(1);
             }
-            Err(e) => tracing::warn!(error = %e, "accept error"),
+        };
+        tracing::info!(
+            port = args.port,
+            build = "B7",
+            shares = ?shared.shares.keys().collect::<Vec<_>>(),
+            auth = if shared.users.is_empty() { "guest(any)" } else { "users" },
+            "rustsmb listening"
+        );
+
+        if let Some(addr) = args.metrics_bind {
+            spawn_metrics_endpoint(addr);
         }
-    }
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer)) => {
+                    let srv = shared.clone();
+                    tokio_uring::spawn(async move {
+                        let _ = stream.set_nodelay(true);
+                        let span = tracing::info_span!("conn", peer = %peer);
+                        let _g = span.enter();
+                        tracing::debug!("client connected");
+                        let transport = Box::new(smb_transport::tcp::TcpTransport::new(
+                            stream,
+                            peer.to_string(),
+                        )) as Box<dyn smb_transport::Transport>;
+                        dispatch::serve_client(srv, transport).await;
+                        tracing::debug!("client disconnected");
+                    });
+                }
+                Err(e) => tracing::warn!(error = %e, "accept error"),
+            }
+        }
+    });
 }
 
 /// Build the published share table plus the virtual IPC$ share.
@@ -182,8 +190,8 @@ fn spawn_metrics_endpoint(addr: SocketAddr) {
     use metrics_exporter_prometheus::PrometheusBuilder;
     match PrometheusBuilder::new().install_recorder() {
         Ok(handle) => {
-            tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::bind(addr).await {
+            tokio_uring::spawn(async move {
+                let listener = match tokio_uring::net::TcpListener::bind(addr) {
                     Ok(l) => l,
                     Err(e) => {
                         tracing::error!(%addr, error = %e, "metrics bind failed");
@@ -192,21 +200,19 @@ fn spawn_metrics_endpoint(addr: SocketAddr) {
                 };
                 tracing::info!(%addr, "prometheus metrics on http://{addr}/metrics");
                 loop {
-                    let Ok((mut sock, _)) = listener.accept().await else { continue };
+                    let Ok((sock, _)) = listener.accept().await else { continue };
                     let text = handle.render();
-                    tokio::spawn(async move {
-                        use tokio::io::AsyncWriteExt as _;
+                    tokio_uring::spawn(async move {
                         // Drain the request line/headers before responding.
-                        let mut scratch = [0u8; 1024];
-                        let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut scratch).await;
+                        let (_read, _scratch) = sock.read(vec![0u8; 1024]).await;
                         let resp = format!(
                             "HTTP/1.0 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                             text.len(),
                             text
                         );
-                        let _ = sock.write_all(resp.as_bytes()).await;
-                        let _ = sock.shutdown().await;
+                        let (_wrote, _buf) = sock.write_all(resp.into_bytes()).await;
+                        let _ = sock.shutdown(std::net::Shutdown::Write);
                     });
                 }
             });

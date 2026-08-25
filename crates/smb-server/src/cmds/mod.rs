@@ -140,7 +140,7 @@ mod smb_vfs_stub {
     #[derive(Debug, Default, Clone)]
     pub struct IpcVfs;
 
-    #[async_trait::async_trait]
+    #[async_trait::async_trait(?Send)]
     impl smb_vfs::Vfs for IpcVfs {
         async fn create(
             &self,

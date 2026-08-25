@@ -26,7 +26,7 @@ pub fn duplex(buffer: usize) -> (MemTransport, MemTransport) {
     )
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Transport for MemTransport {
     async fn recv(&mut self) -> Result<Option<Frame>, TransportError> {
         Ok(self.rx.recv().await.map(Frame))
@@ -61,7 +61,7 @@ pub struct MemSource {
     peer: String,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl FrameSource for MemSource {
     async fn recv(&mut self) -> Result<Option<Frame>, TransportError> {
         Ok(self.rx.recv().await.map(Frame))
@@ -78,7 +78,7 @@ pub struct MemSink {
     tx: mpsc::Sender<Vec<u8>>,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl FrameSink for MemSink {
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         self.tx

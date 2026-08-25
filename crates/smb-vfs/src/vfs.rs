@@ -10,7 +10,12 @@ use crate::{Entry, FileMeta, OpenFile, SetOp, VfsResult};
 /// [`OpenFile::inner`](crate::OpenFile::inner)) and are responsible for
 /// mapping relative share paths onto physical storage, including refusing
 /// path traversal.
-#[async_trait]
+///
+/// The trait uses `?Send` futures so backends can hold thread-local io_uring
+/// resources (which are `!Send`); the implementor **object** is still
+/// `Send + Sync` so a single backend can be shared across per-core runtimes.
+/// All I/O must be non-blocking (io_uring / async), never blocking the runtime.
+#[async_trait(?Send)]
 pub trait Vfs: Send + Sync {
     /// Create or open `rel` according to the NT-style parameters.
     ///

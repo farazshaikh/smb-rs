@@ -9,3 +9,4 @@ license.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-uring.workspace = true

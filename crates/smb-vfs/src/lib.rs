@@ -43,22 +43,25 @@ pub struct OpenFile {
     /// Deletion requested through SET_INFORMATION; applied on close.
     pub delete_pending: bool,
     /// Opaque backend state (file descriptor wrapper, cached cursor, …).
-    pub inner: Box<dyn std::any::Any + Send + Sync>,
+    ///
+    /// Not `Send`/`Sync`: io_uring resources (`tokio_uring::fs::File`) are
+    /// `!Send`, and per-connection state is driven entirely on one thread.
+    pub inner: Box<dyn std::any::Any>,
 }
 
 impl OpenFile {
     /// Downcast the backend-private state to a concrete type.
-    pub fn inner_as<T: Send + Sync + 'static>(&self) -> Option<&T> {
+    pub fn inner_as<T: 'static>(&self) -> Option<&T> {
         self.inner.downcast_ref::<T>()
     }
 
     /// Immutably downcast the backend-private state (alias of [`Self::inner_as`]).
-    pub fn inner_as_ref<T: Send + Sync + 'static>(&self) -> Option<&T> {
+    pub fn inner_as_ref<T: 'static>(&self) -> Option<&T> {
         self.inner.downcast_ref::<T>()
     }
 
     /// Mutably downcast the backend-private state to a concrete type.
-    pub fn inner_as_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
+    pub fn inner_as_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.inner.downcast_mut::<T>()
     }
 }
