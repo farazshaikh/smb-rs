@@ -1,0 +1,22 @@
+[package]
+name = "smb-handle-store"
+description = "Pluggable durable/persistent SMB handle store with local and replicated backends"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = ["redb-backend"]
+# Local single-node durable backend (embedded, pure Rust).
+redb-backend = ["dep:redb"]
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+redb = { version = "2", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
