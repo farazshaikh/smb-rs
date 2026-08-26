@@ -73,3 +73,28 @@ fn directory() {
 fn ioctl() {
     run_category("Ioctl");
 }
+
+#[test]
+fn query_info() {
+    run_category("QueryInfo");
+}
+
+#[test]
+fn set_info() {
+    run_category("SetInfo");
+}
+
+#[test]
+fn locking() {
+    run_category("Locking");
+}
+
+#[test]
+fn streams() {
+    run_category("Streams");
+}
+
+#[test]
+fn security() {
+    run_category("Security");
+}

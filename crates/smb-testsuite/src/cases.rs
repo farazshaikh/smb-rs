@@ -263,6 +263,229 @@ pub fn all() -> Vec<TestCase> {
                 Ok(Metrics::new())
             },
         },
+        // ---- Query info ([MS-SMB2] §2.2.37, [MS-FSCC] §2.4) ----
+        TestCase {
+            id: "queryinfo.standard",
+            category: "QueryInfo",
+            spec: "MS-FSCC §2.4.41 FileStandardInformation",
+            about: "FileStandardInformation reports the written EOF",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"qi_std.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"write","handle":"f","offset":0,"fill_size":1000},
+                    {"op":"query_info","handle":"f","info_type":"file","info_class":5},
+                    {"op":"close","handle":"f"}
+                ]))?;
+                ok(&r)?;
+                let eof = step_u64(&r, 2, "end_of_file")?;
+                if eof != 1000 {
+                    return Err(format!("end_of_file {eof} != 1000"));
+                }
+                Ok(Metrics::new())
+            },
+        },
+        TestCase {
+            id: "queryinfo.all_information",
+            category: "QueryInfo",
+            spec: "MS-FSCC §2.4.2 FileAllInformation",
+            about: "FileAllInformation returns a populated buffer",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"qi_all.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"query_info","handle":"f","info_type":"file","info_class":18},
+                    {"op":"close","handle":"f"}
+                ]))?;
+                ok(&r)?;
+                if step_u64(&r, 1, "length")? == 0 {
+                    return Err("FileAllInformation returned empty buffer".into());
+                }
+                Ok(Metrics::new())
+            },
+        },
+        TestCase {
+            id: "queryinfo.network_open",
+            category: "QueryInfo",
+            spec: "MS-FSCC §2.4.34 FileNetworkOpenInformation",
+            about: "FileNetworkOpenInformation returns a populated buffer",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"qi_netopen.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"query_info","handle":"f","info_type":"file","info_class":34},
+                    {"op":"close","handle":"f"}
+                ]))?;
+                ok(&r)?;
+                if step_u64(&r, 1, "length")? == 0 {
+                    return Err("FileNetworkOpenInformation returned empty buffer".into());
+                }
+                Ok(Metrics::new())
+            },
+        },
+        // ---- Set info ([MS-SMB2] §2.2.39, [MS-FSCC] §2.4) ----
+        TestCase {
+            id: "setinfo.end_of_file",
+            category: "SetInfo",
+            spec: "MS-FSCC §2.4.13 FileEndOfFileInformation",
+            about: "Setting EOF resizes the file (verified via query)",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"si_eof.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"set_info","handle":"f","kind":"eof","size":4096},
+                    {"op":"query_info","handle":"f","info_type":"file","info_class":5},
+                    {"op":"close","handle":"f"}
+                ]))?;
+                ok(&r)?;
+                let eof = step_u64(&r, 2, "end_of_file")?;
+                if eof != 4096 {
+                    return Err(format!("end_of_file {eof} != 4096 after set-eof"));
+                }
+                Ok(Metrics::new())
+            },
+        },
+        TestCase {
+            id: "setinfo.rename",
+            category: "SetInfo",
+            spec: "MS-FSCC §2.4.37 FileRenameInformation",
+            about: "Rename moves the file to the new name",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"si_rename_a.bin","disposition":"overwrite_if"},
+                    {"op":"set_info","handle":"f","kind":"rename","new_name":"si_rename_b.bin","replace":true},
+                    {"op":"close","handle":"f"},
+                    {"op":"list","path":"","pattern":"si_rename_*"},
+                    {"op":"open","handle":"b","path":"si_rename_b.bin","disposition":"open","delete_on_close":true},
+                    {"op":"close","handle":"b"}
+                ]))?;
+                ok(&r)?;
+                let names = list_names(&r, 3)?;
+                if names.iter().any(|n| n == "si_rename_a.bin") {
+                    return Err("old name still present after rename".into());
+                }
+                if !names.iter().any(|n| n == "si_rename_b.bin") {
+                    return Err(format!("new name missing after rename: {names:?}"));
+                }
+                Ok(Metrics::new())
+            },
+        },
+        TestCase {
+            id: "setinfo.delete_disposition",
+            category: "SetInfo",
+            spec: "MS-FSCC §2.4.11 FileDispositionInformation",
+            about: "Delete-on-close disposition removes the file",
+            run: |c| {
+                // The final open is expected to fail: the file is gone.
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"si_del.bin","disposition":"overwrite_if"},
+                    {"op":"set_info","handle":"f","kind":"delete"},
+                    {"op":"close","handle":"f"},
+                    {"op":"open","handle":"g","path":"si_del.bin","disposition":"open","expect_fail":true}
+                ]))?;
+                ok(&r)
+            },
+        },
+        // ---- Locking ([MS-SMB2] §2.2.26) ----
+        TestCase {
+            id: "locking.exclusive_conflict",
+            category: "Locking",
+            spec: "MS-SMB2 §2.2.26 / §3.3.5.14",
+            about: "An exclusive lock blocks a conflicting lock until released",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"a","path":"lk_conf.bin","disposition":"overwrite_if"},
+                    {"op":"write","handle":"a","offset":0,"fill_size":100},
+                    {"op":"open","handle":"b","path":"lk_conf.bin","disposition":"open"},
+                    {"op":"lock","handle":"a","kind":"exclusive","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"exclusive","offset":0,"length":50,"expect_fail":true},
+                    {"op":"lock","handle":"a","kind":"unlock","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"exclusive","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"unlock","offset":0,"length":50},
+                    {"op":"close","handle":"b"},
+                    {"op":"close","handle":"a","delete":true}
+                ]))?;
+                ok(&r)
+            },
+        },
+        TestCase {
+            id: "locking.unlock_roundtrip",
+            category: "Locking",
+            spec: "MS-SMB2 §2.2.26",
+            about: "Lock then unlock a range on one handle",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"lk_rt.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"write","handle":"f","offset":0,"fill_size":64},
+                    {"op":"lock","handle":"f","kind":"exclusive","offset":0,"length":32},
+                    {"op":"lock","handle":"f","kind":"unlock","offset":0,"length":32},
+                    {"op":"close","handle":"f"}
+                ]))?;
+                ok(&r)
+            },
+        },
+        // ---- Alternate data streams ([MS-FSCC] §2.6) ----
+        TestCase {
+            id: "streams.roundtrip",
+            category: "Streams",
+            spec: "MS-FSCC §2.6 named streams",
+            about: "Write and read back a named alternate data stream",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"base","path":"ads_rt.bin","disposition":"overwrite_if"},
+                    {"op":"write","handle":"base","offset":0,"data":"base"},
+                    {"op":"close","handle":"base"},
+                    {"op":"open","handle":"s","path":"ads_rt.bin:alt","disposition":"overwrite_if"},
+                    {"op":"write","handle":"s","offset":0,"fill_size":256,"fill_seed":13},
+                    {"op":"read","handle":"s","offset":0,"length":256},
+                    {"op":"close","handle":"s"},
+                    {"op":"open","handle":"base2","path":"ads_rt.bin","disposition":"open","delete_on_close":true},
+                    {"op":"close","handle":"base2"}
+                ]))?;
+                ok(&r)?;
+                compare_crc(&r, 4, 5)
+            },
+        },
+        TestCase {
+            id: "streams.enumerate",
+            category: "Streams",
+            spec: "MS-FSCC §2.4.40 FileStreamInformation",
+            about: "Stream enumeration lists the named stream",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"base","path":"ads_enum.bin","disposition":"overwrite_if"},
+                    {"op":"write","handle":"base","offset":0,"data":"base"},
+                    {"op":"close","handle":"base"},
+                    {"op":"open","handle":"s","path":"ads_enum.bin:alt","disposition":"overwrite_if"},
+                    {"op":"write","handle":"s","offset":0,"data":"streamdata"},
+                    {"op":"close","handle":"s"},
+                    {"op":"open","handle":"b2","path":"ads_enum.bin","disposition":"open"},
+                    {"op":"query_info","handle":"b2","info_type":"file","info_class":22},
+                    {"op":"close","handle":"b2","delete":true}
+                ]))?;
+                ok(&r)?;
+                let streams = stream_names(&r, 7)?;
+                if !streams.iter().any(|n| n.contains(":alt:")) {
+                    return Err(format!("named stream missing from enumeration: {streams:?}"));
+                }
+                Ok(Metrics::new())
+            },
+        },
+        // ---- Security descriptors ([MS-SMB2] §2.2.37, [MS-FSCC] §2.4.6) ----
+        TestCase {
+            id: "security.query_descriptor",
+            category: "Security",
+            spec: "MS-FSCC §2.4.6 / MS-DTYP §2.4.6",
+            about: "Query owner/group/DACL returns a security descriptor",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"f","path":"sd_q.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"query_info","handle":"f","info_type":"security","info_class":0,"additional":7},
+                    {"op":"close","handle":"f"}
+                ]))?;
+                ok(&r)?;
+                if step_u64(&r, 1, "length")? < 20 {
+                    return Err("security descriptor too small".into());
+                }
+                Ok(Metrics::new())
+            },
+        },
     ]
 }
 
@@ -331,6 +554,16 @@ fn b64_len(r: &crate::DriverResp, idx: usize) -> Result<usize, String> {
     let step = r.step(idx).ok_or("missing ioctl step")?;
     let b64 = step.get("output_b64").and_then(Value::as_str).ok_or("no output_b64")?;
     Ok(b64.len() * 3 / 4)
+}
+
+/// Stream names from a `query_info` FileStreamInformation step.
+fn stream_names(r: &crate::DriverResp, idx: usize) -> Result<Vec<String>, String> {
+    let step = r.step(idx).ok_or("missing query_info step")?;
+    let arr = step.get("streams").and_then(Value::as_array).ok_or("no streams in step")?;
+    Ok(arr
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect())
 }
 
 fn step_u64(r: &crate::DriverResp, idx: usize, key: &str) -> Result<u64, String> {

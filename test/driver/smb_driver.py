@@ -32,7 +32,12 @@ from smbprotocol.tree import TreeConnect
 from smbprotocol.open import (
     Open, CreateDisposition, CreateOptions, FilePipePrinterAccessMask,
     ImpersonationLevel, ShareAccess, FileAttributes, FileInformationClass,
-    DirectoryAccessMask,
+    DirectoryAccessMask, SMB2QueryInfoRequest, SMB2QueryInfoResponse,
+    SMB2SetInfoRequest, SMB2LockElement, LockFlags,
+)
+from smbprotocol.file_info import (
+    InfoType, FileStandardInformation, FileEndOfFileInformation,
+    FileRenameInformation, FileDispositionInformation,
 )
 
 DISPOSITION = {
@@ -61,6 +66,22 @@ def _b64(data):
 
 def _unb64(text):
     return base64.b64decode(text.encode("ascii"))
+
+
+def _parse_streams(buf):
+    """Decode a FILE_STREAM_INFORMATION chain ([MS-FSCC] 2.4.40) into names."""
+    streams = []
+    off = 0
+    while off + 24 <= len(buf):
+        next_off = int.from_bytes(buf[off:off + 4], "little")
+        name_len = int.from_bytes(buf[off + 4:off + 8], "little")
+        size = int.from_bytes(buf[off + 8:off + 16], "little")
+        name = buf[off + 24:off + 24 + name_len].decode("utf-16-le", errors="replace")
+        streams.append({"name": name, "size": size})
+        if next_off == 0:
+            break
+        off += next_off
+    return streams
 
 
 class Driver:
@@ -130,6 +151,81 @@ class Driver:
             out["data_b64"] = _b64(data)
         return out
 
+    def _query_info(self, step):
+        f = self.handles[step["handle"]]
+        itype = {"file": InfoType.SMB2_0_INFO_FILE,
+                 "filesystem": InfoType.SMB2_0_INFO_FILESYSTEM,
+                 "security": InfoType.SMB2_0_INFO_SECURITY}[step.get("info_type", "file")]
+        info_class = int(step.get("info_class", 5))
+        req = SMB2QueryInfoRequest()
+        req["info_type"] = itype
+        req["file_info_class"] = info_class
+        req["output_buffer_length"] = 65535
+        req["additional_information"] = int(step.get("additional", 0))
+        req["file_id"] = f.file_id
+        request = self.conn.send(req, sid=self.session.session_id,
+                                 tid=self.tree.tree_connect_id)
+        resp = self.conn.receive(request)
+        qr = SMB2QueryInfoResponse()
+        qr.unpack(resp["data"].get_value())
+        buf = bytes(qr["buffer"].get_value())
+        out = {"length": len(buf)}
+        if info_class == 5:  # FileStandardInformation
+            fsi = FileStandardInformation()
+            fsi.unpack(buf)
+            out["end_of_file"] = int(fsi["end_of_file"].get_value())
+            out["delete_pending"] = bool(fsi["delete_pending"].get_value())
+        elif info_class == 22:  # FileStreamInformation
+            out["streams"] = _parse_streams(buf)
+        return out
+
+    def _set_info(self, step):
+        f = self.handles[step["handle"]]
+        kind = step["kind"]
+        if kind == "eof":
+            info = FileEndOfFileInformation()
+            info["end_of_file"] = int(step["size"])
+            info_class = FileInformationClass.FILE_END_OF_FILE_INFORMATION
+        elif kind == "rename":
+            info = FileRenameInformation()
+            info["replace_if_exists"] = bool(step.get("replace", True))
+            name = step["new_name"].encode("utf-16-le")
+            info["file_name"] = name
+            info["file_name_length"] = len(name)
+            info_class = FileInformationClass.FILE_RENAME_INFORMATION
+        elif kind == "delete":
+            info = FileDispositionInformation()
+            info["delete_pending"] = True
+            info_class = FileInformationClass.FILE_DISPOSITION_INFORMATION
+        else:
+            raise ValueError("unknown set_info kind " + kind)
+        req = SMB2SetInfoRequest()
+        req["info_type"] = InfoType.SMB2_0_INFO_FILE
+        req["file_info_class"] = info_class
+        req["buffer"] = info
+        req["file_id"] = f.file_id
+        request = self.conn.send(req, sid=self.session.session_id,
+                                 tid=self.tree.tree_connect_id)
+        self.conn.receive(request)
+        return {"kind": kind}
+
+    def _lock(self, step):
+        f = self.handles[step["handle"]]
+        kind = step.get("kind", "exclusive")
+        flags = {
+            "exclusive": LockFlags.SMB2_LOCKFLAG_EXCLUSIVE_LOCK,
+            "shared": LockFlags.SMB2_LOCKFLAG_SHARED_LOCK,
+            "unlock": LockFlags.SMB2_LOCKFLAG_UNLOCK,
+        }[kind]
+        if kind != "unlock" and step.get("fail_immediately", True):
+            flags |= LockFlags.SMB2_LOCKFLAG_FAIL_IMMEDIATELY
+        el = SMB2LockElement()
+        el["offset"] = int(step.get("offset", 0))
+        el["length"] = int(step.get("length", 1))
+        el["flags"] = flags
+        f.lock([el])
+        return {"kind": kind}
+
     def _close(self, step):
         f = self.handles.pop(step["handle"])
         f.close()
@@ -186,16 +282,28 @@ class Driver:
         ok = True
         for step in ops:
             entry = {"op": step["op"]}
+            expect_fail = step.get("expect_fail", False)
             try:
                 handler = getattr(self, "_" + step["op"])
-                entry.update(handler(step))
+                result = handler(step)
+                if expect_fail:
+                    entry["ok"] = False
+                    entry["error"] = "expected failure but op succeeded"
+                    ok = False
+                    steps.append(entry)
+                    break
+                entry.update(result)
                 entry["ok"] = True
             except Exception as exc:  # noqa: BLE001 - report to Rust harness
-                entry["ok"] = False
-                entry["error"] = "{}: {}".format(type(exc).__name__, exc)
-                ok = False
-                steps.append(entry)
-                break
+                if expect_fail:
+                    entry["ok"] = True
+                    entry["expected_error"] = "{}: {}".format(type(exc).__name__, exc)
+                else:
+                    entry["ok"] = False
+                    entry["error"] = "{}: {}".format(type(exc).__name__, exc)
+                    ok = False
+                    steps.append(entry)
+                    break
             steps.append(entry)
         return ok, steps
 

@@ -103,14 +103,16 @@ case exists; `planned` = catalogued for a future harness iteration.
 | ReadWrite | §2.2.19/21 | small, offset, 256 KiB large-MTU (crc-verified) | implemented |
 | Directory | §2.2.33/34 | enumeration, wildcard pattern | implemented |
 | Ioctl/FSCTL | §2.2.31 | validate-negotiate, query-network-interface | implemented |
-| FileInfo/SetInfo | §2.2.37–40, MS-FSCC | query/set info classes, rename, EOF | planned |
-| Locking | §2.2.26/27 | byte-range lock conflict matrix | planned |
+| QueryInfo | §2.2.37, MS-FSCC §2.4 | standard, all, network-open | implemented |
+| SetInfo | §2.2.39, MS-FSCC §2.4 | set-EOF, rename, delete disposition | implemented |
+| Locking | §2.2.26/27 | exclusive conflict + unlock roundtrip | implemented |
+| Streams (ADS) | MS-FSCC §2.6 | named-stream read/write + enumeration | implemented |
+| Security | MS-FSCC §2.4.6 | query owner/group/DACL descriptor | implemented |
 | Oplock/Lease | §2.2.23/24 | grant + break | planned |
 | DurableHandle | §2.2.13.2 | grant → reconnect | planned |
 | ChangeNotify | §2.2.35/36 | recursive + non-recursive notify | planned |
 | Compound | §3.3.5.2 | chained requests | planned |
-| SecurityDescriptor | MS-FSCC §2.4.6 | query/set SD | planned |
-| AlternateDataStreams | MS-FSCC §2.6 | enumerate/read/write streams | planned |
+| SetInfo security | MS-FSCC §2.4.6 | set SD | planned |
 | Signing policy | §3.3.5.2.3 | require-signing enforcement | planned |
 
 Adding a case is a single entry in `crates/smb-testsuite/src/cases.rs`; the
