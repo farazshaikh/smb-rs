@@ -224,11 +224,13 @@ fn resolve_driver(args: &Args) -> Driver {
 /// Spawn a local server and give it a moment to bind before tests run.
 fn start_server(args: &Args) -> Child {
     let port = args.port.unwrap_or(445);
-    let share_dir = args.share_dir.clone().unwrap_or_else(|| {
-        let dir = std::env::temp_dir().join("smb-testsuite-share");
-        std::fs::create_dir_all(&dir).ok();
-        dir.to_string_lossy().into_owned()
-    });
+    let share_dir = args
+        .share_dir
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("smb-testsuite-share").to_string_lossy().into_owned());
+    // Always ensure the published directory exists, or root opens fail with
+    // STATUS_OBJECT_PATH_NOT_FOUND.
+    std::fs::create_dir_all(&share_dir).ok();
     println!("starting {} on :{port} publishing {share_dir}", args.server_bin);
     let child = Command::new(&args.server_bin)
         .args([
