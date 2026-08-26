@@ -21,7 +21,6 @@ struct Args {
     filter: Option<String>,
     record: bool,
     data_dir: PathBuf,
-    sqlite: Option<PathBuf>,
     host: Option<String>,
     port: Option<u16>,
     user: Option<String>,
@@ -42,7 +41,6 @@ impl Args {
             filter: None,
             record: false,
             data_dir: PathBuf::from("test/data"),
-            sqlite: None,
             host: None,
             port: None,
             user: None,
@@ -64,7 +62,6 @@ impl Args {
                 "--no-fail" => a.no_fail = true,
                 "--filter" => a.filter = it.next(),
                 "--data-dir" => a.data_dir = PathBuf::from(next(&mut it, "--data-dir")),
-                "--sqlite" => a.sqlite = Some(PathBuf::from(next(&mut it, "--sqlite"))),
                 "--host" => a.host = it.next(),
                 "--port" => a.port = it.next().and_then(|p| p.parse().ok()),
                 "--user" => a.user = it.next(),
@@ -103,7 +100,6 @@ fn print_help() {
          --filter <substr>      run only cases whose id/category contains substr\n\
          --record               write results under --data-dir\n\
          --data-dir <path>      results directory (default test/data)\n\
-         --sqlite <path>        also record into a SQLite DB (default test/data/results.db)\n\
          --host/--port          server endpoint (default env or 127.0.0.1:445)\n\
          --user/--pass/--share  credentials and share (default faraz/pass/public)\n\
          --python/--driver      python interpreter and driver script overrides\n\
@@ -178,14 +174,6 @@ fn main() {
         match recorder::record(&report, &args.data_dir) {
             Ok(path) => println!("recorded {} -> {}", report.run_id, path.display()),
             Err(e) => eprintln!("failed to record results: {e}"),
-        }
-        let db = args.sqlite.clone().unwrap_or_else(|| args.data_dir.join("results.db"));
-        match recorder::record_sqlite(&report, &db) {
-            Ok(()) => {
-                println!("recorded into sqlite {} (commit {})", db.display(), short(&report.commit));
-                print_revision_summary(&db, &report.commit);
-            }
-            Err(e) => eprintln!("failed to record into sqlite: {e}"),
         }
     }
 
@@ -270,29 +258,4 @@ fn git_commit() -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".into())
-}
-
-fn short(commit: &str) -> String {
-    commit.chars().take(12).collect()
-}
-
-/// Print every recorded run for this revision straight from the SQLite DB.
-fn print_revision_summary(db: &std::path::Path, commit: &str) {
-    match recorder::runs_for_commit(db, commit) {
-        Ok(rows) => {
-            println!("\nsqlite: {} run(s) recorded for commit {}", rows.len(), short(commit));
-            for r in rows {
-                println!(
-                    "  {}  {}/{} passed  {} failed  {} err  ({:.1}%)",
-                    r.run_id,
-                    r.passed,
-                    r.total,
-                    r.failed,
-                    r.errored,
-                    r.pass_rate * 100.0,
-                );
-            }
-        }
-        Err(e) => eprintln!("could not read revision summary: {e}"),
-    }
 }

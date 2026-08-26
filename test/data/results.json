@@ -1,6 +1,20 @@
 {
-  "generated_epoch": 1787719332,
+  "generated_epoch": 1787719650,
   "runs": [
+    {
+      "run_id": "1787719650-cfce5b78ac22",
+      "timestamp_epoch": 1787719650,
+      "commit": "cfce5b78ac22",
+      "server_version": "0.2.0",
+      "host": "127.0.0.1",
+      "total": 19,
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0,
+      "errored": 0,
+      "duration_ms": 1856,
+      "pass_rate": 1.0
+    },
     {
       "run_id": "1787719332-e2966ec5e3bb",
       "timestamp_epoch": 1787719332,
@@ -31,9 +45,9 @@
     }
   ],
   "latest": {
-    "run_id": "1787719332-e2966ec5e3bb",
-    "timestamp_epoch": 1787719332,
-    "commit": "e2966ec5e3bb2fc1048fd52bf2f519d2ed75f8df",
+    "run_id": "1787719650-cfce5b78ac22",
+    "timestamp_epoch": 1787719650,
+    "commit": "cfce5b78ac22bdc865adcc418c20120881f60b94",
     "server_version": "0.2.0",
     "host": "127.0.0.1",
     "total": 19,
@@ -41,7 +55,7 @@
     "failed": 0,
     "skipped": 0,
     "errored": 0,
-    "duration_ms": 1873,
+    "duration_ms": 1856,
     "cases": [
       {
         "id": "negotiate.default",
@@ -49,7 +63,7 @@
         "spec": "MS-SMB2 3.1.1 §2.2.3",
         "about": "Connects with the highest common dialect and reaches the share",
         "status": "pass",
-        "duration_ms": 97,
+        "duration_ms": 95,
         "message": "",
         "metrics": {}
       },
@@ -69,7 +83,7 @@
         "spec": "MS-SMB2 §2.2.3",
         "about": "Pins dialect 2.1.0 and verifies it is negotiated",
         "status": "pass",
-        "duration_ms": 98,
+        "duration_ms": 94,
         "message": "",
         "metrics": {}
       },
@@ -79,7 +93,7 @@
         "spec": "MS-SMB2 §2.2.3",
         "about": "Pins dialect 2.0.2 and verifies it is negotiated",
         "status": "pass",
-        "duration_ms": 99,
+        "duration_ms": 94,
         "message": "",
         "metrics": {}
       },
@@ -89,7 +103,7 @@
         "spec": "MS-SMB2 §2.2.5 / MS-NLMP",
         "about": "SPNEGO/NTLMSSP session setup reaches the share",
         "status": "pass",
-        "duration_ms": 97,
+        "duration_ms": 94,
         "message": "",
         "metrics": {}
       },
@@ -99,7 +113,7 @@
         "spec": "MS-SMB2 §3.2.5.3",
         "about": "Signed session (require_signing) completes an op",
         "status": "pass",
-        "duration_ms": 97,
+        "duration_ms": 96,
         "message": "",
         "metrics": {}
       },
@@ -109,7 +123,7 @@
         "spec": "MS-SMB2 §2.2.41",
         "about": "Encrypted session write+read roundtrip preserves data",
         "status": "pass",
-        "duration_ms": 103,
+        "duration_ms": 101,
         "message": "",
         "metrics": {}
       },
@@ -119,7 +133,7 @@
         "spec": "MS-SMB2 §2.2.9/10",
         "about": "TREE_CONNECT to the configured share succeeds",
         "status": "pass",
-        "duration_ms": 101,
+        "duration_ms": 96,
         "message": "",
         "metrics": {}
       },
@@ -129,7 +143,7 @@
         "spec": "MS-SMB2 §2.2.13",
         "about": "FILE_CREATE makes a new file (delete-on-close cleans up)",
         "status": "pass",
-        "duration_ms": 93,
+        "duration_ms": 98,
         "message": "",
         "metrics": {}
       },
@@ -139,7 +153,7 @@
         "spec": "MS-SMB2 §2.2.13",
         "about": "FILE_OVERWRITE_IF opens-or-truncates and writes",
         "status": "pass",
-        "duration_ms": 95,
+        "duration_ms": 98,
         "message": "",
         "metrics": {}
       },
@@ -149,7 +163,7 @@
         "spec": "MS-SMB2 §3.3.5.9",
         "about": "FILE_OPEN of a missing file is refused",
         "status": "pass",
-        "duration_ms": 98,
+        "duration_ms": 97,
         "message": "",
         "metrics": {}
       },
@@ -159,7 +173,7 @@
         "spec": "MS-SMB2 §2.2.13",
         "about": "Opens the share root as a directory handle",
         "status": "pass",
-        "duration_ms": 100,
+        "duration_ms": 96,
         "message": "",
         "metrics": {}
       },
@@ -169,7 +183,7 @@
         "spec": "MS-SMB2 §2.2.19/21",
         "about": "Small write then read returns identical bytes",
         "status": "pass",
-        "duration_ms": 99,
+        "duration_ms": 97,
         "message": "",
         "metrics": {}
       },
@@ -179,7 +193,7 @@
         "spec": "MS-SMB2 §2.2.19",
         "about": "Write at a non-zero offset reads back at that offset",
         "status": "pass",
-        "duration_ms": 98,
+        "duration_ms": 96,
         "message": "",
         "metrics": {}
       },
@@ -201,7 +215,7 @@
         "spec": "MS-SMB2 §2.2.33/34",
         "about": "Created files appear in a directory enumeration",
         "status": "pass",
-        "duration_ms": 99,
+        "duration_ms": 100,
         "message": "",
         "metrics": {}
       },
@@ -211,7 +225,7 @@
         "spec": "MS-SMB2 §2.2.33.1 / MS-CIFS wildcard",
         "about": "A wildcard pattern only returns matching names",
         "status": "pass",
-        "duration_ms": 100,
+        "duration_ms": 104,
         "message": "",
         "metrics": {}
       },
@@ -221,7 +235,7 @@
         "spec": "MS-SMB2 §3.3.5.15",
         "about": "FSCTL_VALIDATE_NEGOTIATE_INFO echoes 24 bytes",
         "status": "pass",
-        "duration_ms": 95,
+        "duration_ms": 93,
         "message": "",
         "metrics": {}
       },
@@ -231,7 +245,7 @@
         "spec": "MS-SMB2 §3.3.5.15.4",
         "about": "FSCTL_QUERY_NETWORK_INTERFACE_INFO returns interface data",
         "status": "pass",
-        "duration_ms": 95,
+        "duration_ms": 98,
         "message": "",
         "metrics": {}
       }

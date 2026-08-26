@@ -217,17 +217,6 @@ pub enum Status {
     Error,
 }
 
-impl Status {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Status::Pass => "pass",
-            Status::Fail => "fail",
-            Status::Skip => "skip",
-            Status::Error => "error",
-        }
-    }
-}
-
 /// Recorded result for one case in one run.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CaseResult {

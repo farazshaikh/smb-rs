@@ -84,32 +84,9 @@ runs, per-category breakdown, the latest run's cases, and the full run history.
 - Git commit, server version, host, timestamp.
 - Throughput-relevant metrics (e.g. bytes moved by the large-MTU case).
 
-## SQLite database (per revision)
-
-Alongside the JSON/CSV, `--record` writes a SQLite database at
-`test/data/results.db` (override with `--sqlite <path>`). Results are keyed by
-git commit so a revision's history is queryable:
-
-```
-runs(run_id PK, timestamp_epoch, git_commit, server_version, host,
-     total, passed, failed, skipped, errored, duration_ms, pass_rate)
-results(run_id, case_id, category, spec, status, duration_ms, message)
-metrics(run_id, case_id, name, value)
-```
-
-```sh
-# pass/fail for a given revision
-sqlite3 test/data/results.db \
-  "SELECT run_id, passed, total, pass_rate FROM runs WHERE git_commit LIKE 'e2966ec%';"
-
-# per-category rollup for the latest run
-sqlite3 test/data/results.db \
-  "SELECT category, SUM(status='pass'), COUNT(*) FROM results
-   WHERE run_id=(SELECT run_id FROM runs ORDER BY timestamp_epoch DESC LIMIT 1)
-   GROUP BY category;"
-```
-
-The runner prints the same per-revision summary after each recorded run.
+Results are written as CSV + JSON under `test/data/` (`summary.csv` carries the
+git commit per run, so a revision's results are greppable). The commit column
+keys results to the revision under test.
 
 ## Test plan (category catalog)
 
