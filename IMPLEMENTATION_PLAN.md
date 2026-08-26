@@ -471,16 +471,51 @@ suites already vendored via `smb-csp`) over hand-rolled codecs.
     - cargo-fuzz parser targets, cross-client concurrency stress harness,
       Windows-client soak, criterion benches wired into CI.
 
-### M4 — Optional / clustered companion specs
+### M4 — Interop conformance vs Microsoft WindowsProtocolTestSuites
 
-Out-of-scope for a standalone server; each is a separate MS spec and most
-production single-node servers never ship them. Tracked here for completeness.
+The remaining protocol work is driven by **passing Microsoft's real MS-SMB2
+FileServer test suite** (286 test methods, 113 tagged BVT), not a home-grown
+proxy. Toolchain is proven: the suite builds on **.NET 8 / Linux** (0 errors),
+so every fix is measured against Microsoft's own tests.
 
-12. **SMB Direct / RDMA** ([MS-SMBD]) — RDMA transport + credit/SMBDirect
-    framing. Needs RDMA-capable NICs and a Rust RDMA binding.
-13. **Witness protocol** ([MS-SWN]) — cluster resource-change notification RPC.
-14. **Continuous availability** — persistent handles backed by a clustered,
-    crash-consistent handle store (beyond M3's single-node durable handles).
-15. **Full DFS namespace server** ([MS-DFSC]) — namespace hosting beyond the
+12. **Stand up the harness (baseline).** Build the MS-SMB2 suite; write a
+    workgroup `ptfconfig` (SUT = rustsmb) with shares `SMBBasic`,
+    `SMBEncrypted`, `SMBCompressed`; provide a minimal SUT control adapter;
+    run the `Bvt` category → record a real `X/113` baseline and bucket the
+    failures.
+13. **Infra-light feature buckets** (no domain/cluster; each raises the score):
+    - Exact `NTSTATUS` codes — `UnexpectedFields` (31) + `UnexpectedContext` (16).
+    - Compression `LZ77` / `LZ77+Huffman` / chained ([MS-SMB2] §2.2.42) — (34).
+    - Lease v2 + directory leasing ([MS-SMB2] §2.2.23.2, §3.3.4.7) — (18).
+    - Replay detection (channel-sequence, `SMB2_FLAGS_REPLAY_OPERATION`) — (20).
+    - Multichannel real alt-channel bind ([MS-SMB2] §3.3.5.15.4) — (10).
+    - Persistent-handle single-node reclaim — (19); **store foundation done**.
+14. **Iterate.** Re-run the suite after each bucket; keep a per-revision score.
+
+### M5 — Continuous availability & Witness (multi-node)
+
+15. **Pluggable handle store** — async `HandleStore` trait + `MemStore` +
+    `RedbStore` (embedded, durable across restart), wired into the server's
+    durable-handle path (`--handle-store mem|redb`). ✅ **COMPLETE**
+    (`smb-handle-store` crate; grant→`put`, DH2C→atomic `take`, sweep).
+16. **Replicated backend** — `openraft` (or etcd via `etcd-client`) backend
+    behind the same trait for multi-node handle/lock/session state.
+17. **Shared-storage VFS** — a backend both nodes serve identical bytes from,
+    so a reclaim on node B resumes node A's handle.
+18. **Witness protocol** ([MS-SWN]) — RPC service on `\pipe\witness`
+    (`WitnessrGetInterfaceList/Register/AsyncNotify/UnRegister`) reusing the
+    srvsvc RPC plumbing, plus a notification engine driven by store
+    owner-changes; advertise `SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY`.
+
+### M6 — Optional companion specs
+
+Separate MS specs most single-node servers never ship; tracked for completeness.
+
+19. **SMB Direct / RDMA** ([MS-SMBD]) — RDMA transport + SMBDirect framing;
+    needs RDMA-capable NICs and a Rust RDMA binding.
+20. **Full DFS namespace server** ([MS-DFSC]) — namespace hosting beyond the
     M3 referral-response path.
+21. **RSVD / SQOS / FSRVP** — shared-VHD, storage-QoS, and VSS-snapshot RPC
+    services (Hyper-V / Windows-cluster niche).
+
 
