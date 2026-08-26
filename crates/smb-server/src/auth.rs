@@ -33,6 +33,15 @@ pub fn authenticate_ntlmssp(
     let user = t3.user.trim().to_string();
     const NO_KEY: Option<[u8; 16]> = None;
 
+    tracing::debug!(
+        user = %user,
+        domain = %t3.domain,
+        ntlm_len = t3.ntlm_response.len(),
+        lm_len = t3.lm_response.len(),
+        flags = format!("{:#010x}", t3.flags),
+        "ntlmssp authenticate"
+    );
+
     // Anonymous / null session.
     if t3.ntlm_response.is_empty() && t3.lm_response.is_empty()
         || t3.flags & smb_auth::ntlm::NEGOTIATE_ANONYMOUS != 0
@@ -94,6 +103,7 @@ pub fn authenticate_ntlmssp(
         }
     }
 
+    tracing::warn!(user = %user, domain = %t3.domain, ntlm_len = t3.ntlm_response.len(), "ntlm proof mismatch");
     AuthOutcome { ok: false, guest: false, user, session_key: NO_KEY }
 }
 

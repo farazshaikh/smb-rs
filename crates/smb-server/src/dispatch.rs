@@ -240,12 +240,14 @@ pub(crate) async fn process_frame(
         return Some(build_response(&hdr, Status::CANCELLED, Vec::new()));
     }
 
-    // Multi-protocol upgrade: only when client offers \xFESMB dialects.
-    // Marks the connection so serve_client routes later frames through the
-    // persistent SMB2 processor.
+    // Multi-protocol upgrade ([MS-SMB2] §3.2.4.2): a client may send an SMB1
+    // NEGOTIATE whose dialect list carries the "SMB 2.002"/"SMB 2.???" strings
+    // (Windows clients do this), or embed the \xFESMB id. Either way, answer
+    // with an SMB2 NEGOTIATE and route later frames through the SMB2 processor.
     if hdr.command == consts::COM_NEGOTIATE
         && !conn.upgraded_smb2
-        && buf.windows(4).any(|w| w == [0xFE, b'S', b'M', b'B'])
+        && (buf.windows(4).any(|w| w == [0xFE, b'S', b'M', b'B'])
+            || buf.windows(6).any(|w| w == b"SMB 2."))
     {
         if let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {
             conn.upgraded_smb2 = true;
