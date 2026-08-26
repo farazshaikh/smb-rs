@@ -11,6 +11,9 @@ pub const DIALECT_300: u16 = 0x0300;
 pub const DIALECT_302: u16 = 0x0302;
 /// SMB 3.1.1 dialect revision.
 pub const DIALECT_311: u16 = 0x0311;
+/// Wildcard revision returned to a multi-protocol "SMB 2.???" offer
+/// ([MS-SMB2] §2.2.4); the client then sends a real SMB2 NEGOTIATE.
+pub const DIALECT_WILDCARD: u16 = 0x02FF;
 
 /// SecurityMode bits (§2.2.3.1.1).
 /// Signing is supported but not required.
@@ -151,7 +154,8 @@ pub fn build_response_full(
     guid: &[u8; 16],
     now: u64,
     salt: &[u8; 32],
-    chosen_cipher: u16,
+    encryption: Option<u16>,
+    offer_signing: bool,
     compression: &[u16],
     require_signing: bool,
 ) -> Vec<u8> {
@@ -161,8 +165,12 @@ pub fn build_response_full(
     b.extend_from_slice(&sec_mode.to_le_bytes()); // SecurityMode
     b.extend_from_slice(&dialect.to_le_bytes());
     if dialect == DIALECT_311 {
-        // PREAUTH + SIGNING + ENCRYPTION, plus COMPRESSION when negotiated.
-        let count = 3 + u16::from(!compression.is_empty());
+        // Echo only the contexts the client offered ([MS-SMB2] §3.3.5.4);
+        // PREAUTH is mandatory, the rest are conditional.
+        let count = 1
+            + u16::from(offer_signing)
+            + u16::from(encryption.is_some())
+            + u16::from(!compression.is_empty());
         b.extend_from_slice(&count.to_le_bytes()); // NegotiateContextCount
     } else {
         b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
@@ -207,16 +215,19 @@ pub fn build_response_full(
         preauth.extend_from_slice(salt);
         push_ctx(&mut ctx, ctx_type::PREAUTH_INTEGRITY, &preauth);
 
-        // SIGNING_CAPABILITIES: AES-128-CMAC (the only 3.x scheme this
-        // server implements).
-        let signing = [1u16.to_le_bytes(), ctx_type::SIGNING_AES128_CMAC.to_le_bytes()].concat();
-        push_ctx(&mut ctx, ctx_type::SIGNING, &signing);
+        // SIGNING_CAPABILITIES: AES-128-CMAC — only when the client offered
+        // a SIGNING_CAPABILITIES context ([MS-SMB2] §3.3.5.4).
+        if offer_signing {
+            let signing = [1u16.to_le_bytes(), ctx_type::SIGNING_AES128_CMAC.to_le_bytes()].concat();
+            push_ctx(&mut ctx, ctx_type::SIGNING, &signing);
+        }
 
         // ENCRYPTION_CAPABILITIES: exactly ONE selected cipher ([MS-SMB2]
-        // §2.2.3.1.2). Advertised so validate-negotiate style flows work;
-        // the transform itself is not applied by this server yet.
-        let enc = [1u16.to_le_bytes(), chosen_cipher.to_le_bytes()].concat();
-        push_ctx(&mut ctx, ctx_type::ENCRYPTION, &enc);
+        // §2.2.3.1.2) — only when the client offered encryption.
+        if let Some(cipher) = encryption {
+            let enc = [1u16.to_le_bytes(), cipher.to_le_bytes()].concat();
+            push_ctx(&mut ctx, ctx_type::ENCRYPTION, &enc);
+        }
 
         // COMPRESSION_CAPABILITIES: advertise the negotiated algorithm set.
         if !compression.is_empty() {
@@ -242,5 +253,5 @@ const BODY_START_FIXED: usize = 64 + 64;
 /// pre-3.1.1 dialects (where the spec marks it Reserved); every real-world
 /// parser expects the field's presence.
 pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
-    build_response_full(dialect, guid, now, &[0u8; 32], 0, &[], false)
+    build_response_full(dialect, guid, now, &[0u8; 32], None, false, &[], false)
 }

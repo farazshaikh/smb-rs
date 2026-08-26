@@ -204,8 +204,16 @@ pub fn handle_multiprotocol_negotiate(
     guid: &[u8; 16],
 ) -> Option<Vec<u8>> {
     let (hdr, _wc_off) = smb_proto_smb1::header::parse_header(buf)?;
-    // The upgrade reply rides on MessageId|1 ([MS-SMB2] §3.2.5.1 style).
-    let mid = u64::from(hdr.mid) | 1;
+    let _ = hdr;
+    // The multi-protocol NEGOTIATE response is MessageId 0 ([MS-SMB2]
+    // §3.2.5.2). Offer the wildcard revision when the client listed
+    // "SMB 2.???" so it re-negotiates a concrete dialect (up to 3.1.1);
+    // otherwise answer the "SMB 2.002"-only case directly.
+    let dialect = if buf.windows(5).any(|w| w == b"2.???") {
+        smb_proto_smb2::negotiate::DIALECT_WILDCARD
+    } else {
+        smb_proto_smb2::negotiate::DIALECT_202
+    };
     let h2 = smb_proto_smb2::Header2 {
         credit_charge: 0,
         status: 0,
@@ -213,7 +221,7 @@ pub fn handle_multiprotocol_negotiate(
         credits: 1,
         flags: 1,
         next_command: 0,
-        message_id: mid,
+        message_id: 0,
         tree_id: 0,
         session_id: 0,
         signature: [0u8; 16],
@@ -222,7 +230,7 @@ pub fn handle_multiprotocol_negotiate(
         &h2,
         Status::SUCCESS,
         smb_proto_smb2::negotiate::build_response(
-            smb_proto_smb2::negotiate::DIALECT_210,
+            dialect,
             guid,
             smb_proto::types::FileTime::now().0,
         ),
@@ -630,7 +638,13 @@ async fn process_single(
                     &server.guid,
                     smb_proto::types::FileTime::now().0,
                     &salt,
-                    chosen.unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM),
+                    // Echo ENCRYPTION/SIGNING only when the client offered them
+                    // ([MS-SMB2] §3.3.5.4).
+                    (!client_ciphers.is_empty())
+                        .then(|| chosen.unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM)),
+                    req.contexts
+                        .iter()
+                        .any(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING),
                     &comp_algos,
                     server.require_signing,
                 ),
