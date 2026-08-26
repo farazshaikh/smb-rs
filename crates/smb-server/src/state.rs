@@ -16,6 +16,16 @@ use std::sync::Arc;
 use smb_vfs::OpenFile;
 use smb_vfs::Vfs;
 
+use smb_handle_store::HandleStore;
+
+/// Milliseconds since the Unix epoch, used for durable-handle deadlines.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// A published share backed by a VFS instance.
 #[derive(Clone)]
 pub struct Share {
@@ -62,8 +72,9 @@ pub struct ServerShared {
     /// Server-wide lease table ([MS-SMB2] §2.2.23.2) — one caching lease per
     /// file path, broken down when an open with a different lease key contends.
     pub leases: Arc<LeaseTable>,
-    /// Durable handles preserved across connection drops ([MS-SMB2] §3.3.1.10).
-    pub durables: Arc<DurableTable>,
+    /// Durable handles preserved across connection drops ([MS-SMB2] §3.3.1.10),
+    /// behind a pluggable store (in-memory, redb, or a replicated backend).
+    pub durables: Arc<dyn HandleStore>,
     /// Established sessions, shared so channels can bind ([MS-SMB2] §3.3.5.5.3).
     pub sessions: Arc<SessionTable>,
 }
@@ -449,53 +460,27 @@ pub struct DurableEntry {
     pub deadline: std::time::Instant,
 }
 
-/// Server-wide table of durable handles awaiting reconnect, keyed by
-/// persistent id.
-#[derive(Default)]
-pub struct DurableTable {
-    entries: std::sync::Mutex<HashMap<[u8; 16], DurableEntry>>,
-}
-
-impl DurableTable {
-    /// Create an empty table.
-    pub fn new() -> Self {
-        Self { entries: std::sync::Mutex::new(HashMap::new()) }
-    }
-
-    /// Preserve `entry` for later reconnect, evicting any already-expired ones.
-    pub fn insert(&self, entry: DurableEntry) {
-        let mut e = self.entries.lock().unwrap();
-        let now = std::time::Instant::now();
-        e.retain(|_, v| v.deadline > now);
-        e.insert(entry.persistent_id, entry);
-    }
-
-    /// Reclaim a preserved handle by persistent id, requiring the create-guid
-    /// to match when `guid` is `Some` (v2). Expired entries are dropped.
-    pub fn reclaim(&self, id: [u8; 16], guid: Option<[u8; 16]>) -> Option<DurableEntry> {
-        let mut e = self.entries.lock().unwrap();
-        let entry = e.get(&id)?;
-        if entry.deadline <= std::time::Instant::now() {
-            e.remove(&id);
-            return None;
+impl DurableEntry {
+    /// Project into a store record, computing the absolute deadline from
+    /// `now_ms`. Persistent handles get deadline 0 (never swept).
+    pub fn into_record(self, now_ms: u64) -> smb_handle_store::HandleRecord {
+        smb_handle_store::HandleRecord {
+            create_guid: self.persistent_id,
+            path: self.rel,
+            share: String::new(),
+            session_id: self.session_id,
+            access: self.access,
+            share_access: 0,
+            create_options: self.options,
+            is_dir: self.is_dir,
+            flags: if self.persistent { 0x2 } else { 0 },
+            match_guid: if self.create_guid == [0u8; 16] { None } else { Some(self.create_guid) },
+            owner_node: String::new(),
+            lease_key: None,
+            timeout_ms: self.timeout as u64,
+            deadline_ms: if self.persistent { 0 } else { now_ms + self.timeout as u64 },
+            delete_on_close: false,
         }
-        if let Some(g) = guid {
-            if entry.create_guid != g {
-                return None;
-            }
-        }
-        e.remove(&id)
-    }
-
-    /// Forget a preserved handle (e.g. after an explicit close).
-    pub fn remove(&self, id: &[u8; 16]) {
-        self.entries.lock().unwrap().remove(id);
-    }
-
-    /// Evict every entry whose deadline has passed.
-    pub fn sweep(&self) {
-        let now = std::time::Instant::now();
-        self.entries.lock().unwrap().retain(|_, v| v.deadline > now);
     }
 }
 

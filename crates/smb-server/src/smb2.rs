@@ -752,7 +752,7 @@ async fn process_single(
                             server.leases.release(&path, (conn.session_id, fid));
                             // An explicit close ends any durable-handle lease.
                             conn.durable.remove(&fid);
-                            server.durables.remove(&fid);
+                            let _ = server.durables.remove(&fid).await;
                         }
                         (Status::SUCCESS, body)
                     }
@@ -1949,22 +1949,39 @@ async fn durable_reconnect(
     id: [u8; 16],
     guid: Option<[u8; 16]>,
 ) -> Result<Vec<u8>, Status> {
-    let entry = server.durables.reclaim(id, guid).ok_or(Status::OBJECT_NAME_NOT_FOUND)?;
+    let record = server
+        .durables
+        .take(&id, guid, crate::state::now_ms())
+        .await
+        .ok()
+        .flatten()
+        .ok_or(Status::OBJECT_NAME_NOT_FOUND)?;
+    let persistent = record.flags & c::durable::FLAG_PERSISTENT != 0;
+    let timeout = record.timeout_ms as u32;
     // FILE_OPEN (disposition 1): the file already exists.
     let (mut open, meta, _action) = vfs
-        .create(&entry.rel, entry.is_dir, entry.access, 1, entry.options, 0)
+        .create(&record.path, record.is_dir, record.access, 1, record.create_options, 0)
         .await
         .map_err(vfs_err)?;
     open.delete_on_close = false;
     conn.handles.insert(id, open);
-    let mut again = entry.clone();
-    again.session_id = conn.session_id;
-    conn.durable.insert(id, again);
+    conn.durable.insert(id, crate::state::DurableEntry {
+        persistent_id: id,
+        create_guid: record.match_guid.unwrap_or([0u8; 16]),
+        rel: record.path.clone(),
+        is_dir: record.is_dir,
+        access: record.access,
+        options: record.create_options,
+        session_id: conn.session_id,
+        persistent,
+        timeout,
+        deadline: std::time::Instant::now(),
+    });
     counter!("smb_durable_reconnects_total").increment(1);
 
     let (name, data): (&[u8], Vec<u8>) = if guid.is_some() {
-        let flags = if entry.persistent { c::durable::FLAG_PERSISTENT } else { 0 };
-        (c::durable::REQ_V2, c::durable_v2_resp_data(entry.timeout, flags))
+        let flags = if persistent { c::durable::FLAG_PERSISTENT } else { 0 };
+        (c::durable::REQ_V2, c::durable_v2_resp_data(timeout, flags))
     } else {
         (c::durable::REQ_V1, c::durable_v1_resp_data())
     };
@@ -2905,7 +2922,7 @@ mod oplock_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
-            durables: Arc::new(DurableTable::new()),
+            durables: Arc::new(smb_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
         })
     }
@@ -3009,7 +3026,7 @@ mod lease_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
-            durables: Arc::new(DurableTable::new()),
+            durables: Arc::new(smb_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
         })
     }
@@ -3289,7 +3306,7 @@ mod durable_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
-            durables: Arc::new(DurableTable::new()),
+            durables: Arc::new(smb_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
         })
     }
@@ -3363,9 +3380,8 @@ mod durable_tests {
             let pid: [u8; 16] = resp[64..80].try_into().unwrap();
 
             // Simulate the connection dropping: preserve into the server table.
-            for (_f, mut e) in conn.durable.drain() {
-                e.deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-                server.durables.insert(e);
+            for (_f, e) in conn.durable.drain() {
+                let _ = server.durables.put(e.into_record(crate::state::now_ms())).await;
             }
 
             // Fresh connection reclaims the handle via DH2C reconnect.

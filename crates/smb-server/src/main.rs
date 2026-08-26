@@ -51,6 +51,15 @@ struct Args {
     /// (SMB2_SESSION_FLAG_ENCRYPT_DATA).
     #[arg(long = "encrypt")]
     encrypt: bool,
+
+    /// Durable-handle store backend: `mem` (non-durable) or `redb` (survives
+    /// a server restart, enabling persistent-handle reclaim).
+    #[arg(long = "handle-store", default_value = "mem")]
+    handle_store: String,
+
+    /// Path for the `redb` handle-store database.
+    #[arg(long = "handle-store-path", default_value = "rustsmb-handles.redb")]
+    handle_store_path: String,
 }
 
 /// Entry point.
@@ -86,7 +95,7 @@ fn main() {
         share_modes: Arc::new(state::ShareModeTable::new()),
         oplocks: Arc::new(state::OplockTable::new()),
         leases: Arc::new(state::LeaseTable::new()),
-        durables: Arc::new(state::DurableTable::new()),
+        durables: build_handle_store(&args),
         sessions: Arc::new(state::SessionTable::new()),
     });
 
@@ -122,7 +131,7 @@ fn main() {
             tokio_uring::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    durables.sweep();
+                    let _ = durables.sweep_expired(state::now_ms()).await;
                 }
             });
         }
@@ -197,6 +206,24 @@ fn build_users(args: &Args) -> HashMap<String, String> {
         }
     }
     users
+}
+
+/// Build the durable-handle store from `--handle-store`. `redb` persists across
+/// a restart (persistent-handle reclaim); anything else is the in-memory store.
+fn build_handle_store(args: &Args) -> Arc<dyn smb_handle_store::HandleStore> {
+    match args.handle_store.as_str() {
+        "redb" => match smb_handle_store::RedbStore::open(&args.handle_store_path) {
+            Ok(store) => {
+                tracing::info!(path = %args.handle_store_path, "durable handle store: redb");
+                Arc::new(store)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to open redb handle store; using memory");
+                Arc::new(smb_handle_store::MemStore::new())
+            }
+        },
+        _ => Arc::new(smb_handle_store::MemStore::new()),
+    }
 }
 
 /// Serve /metrics over a minimal HTTP/1.0 responder — no framework needed

@@ -40,8 +40,12 @@ pub struct HandleRecord {
     pub access: u32,
     pub share_access: u32,
     pub create_options: u32,
+    /// Directory handle (re-opened as a directory on reclaim).
+    pub is_dir: bool,
     /// Durable flags (v2 request / persistent).
     pub flags: u32,
+    /// Client create-guid to validate on a v2 reconnect (`None` for v1).
+    pub match_guid: Option<Guid>,
     /// Node currently owning the handle; empty when free for reclaim.
     pub owner_node: String,
     pub lease_key: Option<Guid>,
@@ -83,6 +87,17 @@ pub trait HandleStore: Send + Sync {
 
     /// Fetch a handle record by its create GUID.
     async fn get(&self, create_guid: &Guid) -> Result<Option<HandleRecord>, StoreError>;
+
+    /// Atomically validate and remove a handle for a durable reconnect
+    /// ([MS-SMB2] §3.3.5.9.7): the record must exist, be unexpired, and — when
+    /// `match_guid` is `Some` (v2 reconnect) — carry the same client guid.
+    /// Returns the removed record on success, else `None`.
+    async fn take(
+        &self,
+        create_guid: &Guid,
+        match_guid: Option<Guid>,
+        now_ms: u64,
+    ) -> Result<Option<HandleRecord>, StoreError>;
 
     /// Atomically claim a handle for `owner` when it is free, already owned by
     /// `owner`, or expired. Returns the (now owned) record, or `None` if it is
@@ -130,6 +145,28 @@ impl HandleStore for MemStore {
 
     async fn get(&self, create_guid: &Guid) -> Result<Option<HandleRecord>, StoreError> {
         Ok(self.lock().get(create_guid).cloned())
+    }
+
+    async fn take(
+        &self,
+        create_guid: &Guid,
+        match_guid: Option<Guid>,
+        now_ms: u64,
+    ) -> Result<Option<HandleRecord>, StoreError> {
+        let mut map = self.lock();
+        let Some(record) = map.get(create_guid) else {
+            return Ok(None);
+        };
+        if record.expired_at(now_ms) {
+            map.remove(create_guid);
+            return Ok(None);
+        }
+        if let Some(g) = match_guid {
+            if record.match_guid != Some(g) {
+                return Ok(None);
+            }
+        }
+        Ok(map.remove(create_guid))
     }
 
     async fn reclaim(
@@ -182,7 +219,9 @@ pub(crate) fn sample(guid_byte: u8, timeout_ms: u64) -> HandleRecord {
         access: 0x0012_019f,
         share_access: 0x7,
         create_options: 0x40,
+        is_dir: false,
         flags: 0x2,
+        match_guid: None,
         owner_node: String::new(),
         lease_key: None,
         timeout_ms,
@@ -228,5 +267,20 @@ mod mem_tests {
         assert_eq!(dropped, vec![[3u8; 16]]);
         assert!(store.get(&[3u8; 16]).await.unwrap().is_none());
         assert!(store.get(&[4u8; 16]).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn take_validates_guid_and_removes() {
+        let store = MemStore::new();
+        let mut rec = sample(5, 1000);
+        rec.match_guid = Some([0xAB; 16]);
+        store.put(rec).await.unwrap();
+        let guid = [5u8; 16];
+        // Wrong client guid is rejected without removing the record.
+        assert!(store.take(&guid, Some([0x00; 16]), 0).await.unwrap().is_none());
+        assert!(store.get(&guid).await.unwrap().is_some());
+        // Correct guid takes (and removes) it.
+        assert!(store.take(&guid, Some([0xAB; 16]), 0).await.unwrap().is_some());
+        assert!(store.get(&guid).await.unwrap().is_none());
     }
 }

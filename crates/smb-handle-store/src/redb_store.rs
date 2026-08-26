@@ -77,6 +77,46 @@ impl HandleStore for RedbStore {
         .await
     }
 
+    async fn take(
+        &self,
+        create_guid: &Guid,
+        match_guid: Option<Guid>,
+        now_ms: u64,
+    ) -> Result<Option<HandleRecord>, StoreError> {
+        let db = self.db.clone();
+        let guid = *create_guid;
+        blocking(move || {
+            let wtx = db.begin_write().map_err(be)?;
+            let taken = {
+                let mut table = wtx.open_table(HANDLES).map_err(be)?;
+                let current = table.get(guid.as_slice()).map_err(be)?.map(|v| v.value().to_vec());
+                match current {
+                    None => None,
+                    Some(bytes) => {
+                        let record: HandleRecord = serde_json::from_slice(&bytes).map_err(se)?;
+                        let expired = !record.is_persistent() && record.deadline_ms <= now_ms;
+                        let guid_ok = match match_guid {
+                            Some(g) => record.match_guid == Some(g),
+                            None => true,
+                        };
+                        if expired || !guid_ok {
+                            if expired {
+                                table.remove(guid.as_slice()).map_err(be)?;
+                            }
+                            None
+                        } else {
+                            table.remove(guid.as_slice()).map_err(be)?;
+                            Some(record)
+                        }
+                    }
+                }
+            };
+            wtx.commit().map_err(be)?;
+            Ok(taken)
+        })
+        .await
+    }
+
     async fn reclaim(
         &self,
         create_guid: &Guid,

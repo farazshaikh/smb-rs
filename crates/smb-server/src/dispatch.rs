@@ -171,10 +171,9 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
             }
             // Preserve durable handles so a later connection can reclaim them
             // ([MS-SMB2] §3.3.7.1).
-            for (_fid, mut entry) in c2.durable.drain() {
-                entry.deadline = std::time::Instant::now()
-                    + std::time::Duration::from_millis(entry.timeout as u64);
-                server.durables.insert(entry);
+            let now_ms = crate::state::now_ms();
+            for (_fid, entry) in c2.durable.drain() {
+                let _ = server.durables.put(entry.into_record(now_ms)).await;
             }
         }
     }

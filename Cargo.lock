@@ -1493,6 +1493,7 @@ dependencies = [
  "ms-ndr",
  "smb-auth",
  "smb-backend-posix",
+ "smb-handle-store",
  "smb-proto",
  "smb-proto-smb1",
  "smb-proto-smb2",

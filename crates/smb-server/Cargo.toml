@@ -30,6 +30,7 @@ smb-transport = { path = "../smb-transport" }
 smb-vfs = { path = "../smb-vfs" }
 smb-backend-posix = { path = "../smb-backend-posix" }
 smb-auth = { path = "../smb-auth", default-features = false }
+smb-handle-store = { path = "../smb-handle-store" }
 ms-ndr = "0.1.1"
 inotify.workspace = true
 futures-util.workspace = true
