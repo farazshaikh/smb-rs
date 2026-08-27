@@ -53,6 +53,10 @@ impl Status {
     pub const BAD_NETWORK_NAME: Status = Status(0xC000_00CC);
     /// The request was cancelled by the client.
     pub const CANCELLED: Status = Status(0xC000_0120);
+    /// A pending CHANGE_NOTIFY was completed because its handle was closed
+    /// ([MS-SMB2] §3.3.5.10). Severity is success, so clients treat the
+    /// CHANGE_NOTIFY response as a (non-error) notification.
+    pub const NOTIFY_CLEANUP: Status = Status(0x0000_010B);
     /// A byte-range lock request conflicts with an existing lock
     /// ([MS-SMB2] §2.2.26, STATUS_LOCK_NOT_GRANTED).
     pub const LOCK_NOT_GRANTED: Status = Status(0xC000_0055);

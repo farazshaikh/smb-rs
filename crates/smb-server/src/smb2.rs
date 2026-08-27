@@ -85,12 +85,17 @@ pub struct Smb2Conn {
     /// ([MS-SMB2] §3.3.4.2).
     pub next_async_id: u64,
     /// In-flight async operations keyed by async id; sending on the channel
-    /// cancels the background task (used by CANCEL, §2.2.30).
-    pub async_cancels: HashMap<u64, oneshot::Sender<()>>,
+    /// completes the background task with the given status (CANCELLED for a
+    /// CANCEL, NOTIFY_CLEANUP when the watched handle is closed).
+    pub async_cancels: HashMap<u64, oneshot::Sender<Status>>,
     /// Maps a pending operation's MessageId to its async id, so a CANCEL that
     /// correlates by MessageId (rather than AsyncId) can find it ([MS-SMB2]
     /// §3.2.4.24).
     pub async_msgids: HashMap<u64, u64>,
+    /// Pending CHANGE_NOTIFY async ids per watched FileId, so closing the
+    /// handle can complete them with STATUS_NOTIFY_CLEANUP ([MS-SMB2]
+    /// §3.3.5.10).
+    pub async_by_file: HashMap<[u8; 16], Vec<u64>>,
     /// Server-side-copy resume keys → source FileId ([MS-SMB2] §2.2.32.3);
     /// handed out by FSCTL_SRV_REQUEST_RESUME_KEY and consumed by COPYCHUNK.
     pub resume_keys: HashMap<[u8; 24], [u8; 16]>,
@@ -132,6 +137,7 @@ impl Smb2Conn {
             next_async_id: 1,
             async_cancels: HashMap::new(),
             async_msgids: HashMap::new(),
+            async_by_file: HashMap::new(),
             resume_keys: HashMap::new(),
             durable: HashMap::new(),
             compress_algo: None,
@@ -771,6 +777,16 @@ async fn process_single(
                     Ok(body) => {
                         // Drop this open's byte-range locks and share-mode entry.
                         if let Some((fid, path)) = close_path {
+                            // Complete any pending CHANGE_NOTIFY on this handle
+                            // with STATUS_NOTIFY_CLEANUP ([MS-SMB2] §3.3.5.10).
+                            if let Some(ids) = conn.async_by_file.remove(&fid) {
+                                for aid in ids {
+                                    conn.async_msgids.retain(|_, v| *v != aid);
+                                    if let Some(tx) = conn.async_cancels.remove(&aid) {
+                                        let _ = tx.send(Status::NOTIFY_CLEANUP);
+                                    }
+                                }
+                            }
                             server.locks.release_owner((conn.session_id, fid));
                             server.share_modes.close(&path, (conn.session_id, fid));
                             server.oplocks.release(&path, (conn.session_id, fid));
@@ -1017,6 +1033,7 @@ async fn process_single(
             let (cancel_tx, cancel_rx) = oneshot::channel();
             conn.async_cancels.insert(async_id, cancel_tx);
             conn.async_msgids.insert(hdr.message_id, async_id);
+            conn.async_by_file.entry(req.file_id.0).or_default().push(async_id);
             gauge!("smb_async_pending").increment(1.0);
             tokio_uring::spawn(run_change_notify(
                 dir_path,
@@ -1095,8 +1112,9 @@ async fn process_single(
             };
             if let Some(aid) = async_id {
                 conn.async_msgids.retain(|_, v| *v != aid);
+                conn.async_by_file.values_mut().for_each(|v| v.retain(|x| *x != aid));
                 if let Some(tx) = conn.async_cancels.remove(&aid) {
-                    let _ = tx.send(());
+                    let _ = tx.send(Status::CANCELLED);
                 }
             }
             return None;
@@ -1407,7 +1425,7 @@ async fn run_lock_wait(
     message_id: u64,
     async_id: u64,
     outbound: mpsc::Sender<Vec<u8>>,
-    mut cancel: oneshot::Receiver<()>,
+    mut cancel: oneshot::Receiver<Status>,
 ) {
     let granted = loop {
         // Register for the wakeup before trying, so a release between the try
@@ -1445,10 +1463,10 @@ async fn run_change_notify(
     message_id: u64,
     async_id: u64,
     outbound: mpsc::Sender<Vec<u8>>,
-    mut cancel: oneshot::Receiver<()>,
+    mut cancel: oneshot::Receiver<Status>,
 ) {
     let frame = match watch_one_event(&dir_path, watch_tree, filter, &mut cancel).await {
-        Some(entries) => {
+        Ok(entries) => {
             let pairs: Vec<(u32, &str)> =
                 entries.iter().map(|(a, n)| (*a, n.as_str())).collect();
             let buf = c::build_file_notify_information(&pairs);
@@ -1456,14 +1474,17 @@ async fn run_change_notify(
             counter!("smb_notifies_sent").increment(1);
             build_async_frame(crypto.session_id, message_id, async_id, ss::cmd::CHANGE_NOTIFY, Status::SUCCESS, &body)
         }
-        None => build_async_frame(
-            crypto.session_id,
-            message_id,
-            async_id,
-            ss::cmd::CHANGE_NOTIFY,
-            Status::CANCELLED,
-            &error_resp(),
-        ),
+        Err(status) => {
+            // NOTIFY_CLEANUP is severity-success: clients parse it as a normal
+            // (empty) CHANGE_NOTIFY response. A genuine CANCEL is an error and
+            // must carry the SMB2 error-response body.
+            let body = if status == Status::NOTIFY_CLEANUP {
+                c::build_change_notify_resp(&[])
+            } else {
+                error_resp()
+            };
+            build_async_frame(crypto.session_id, message_id, async_id, ss::cmd::CHANGE_NOTIFY, status, &body)
+        }
     };
     let _ = outbound.send(finalize_async(&crypto, frame)).await;
     gauge!("smb_async_pending").decrement(1.0);
@@ -1472,23 +1493,24 @@ async fn run_change_notify(
 /// Await the first inotify event on `dir_path` (mapped from the SMB completion
 /// filter) or a cancellation. When `watch_tree` is set, subdirectories are
 /// watched too and the reported name is relative to `dir_path`. Returns the
-/// `(action, name)` list, or `None` on cancel/setup error.
+/// `(action, name)` list on an event, or `Err(status)` carrying the completion
+/// status on cancel/handle-close/setup error.
 async fn watch_one_event(
     dir_path: &str,
     watch_tree: bool,
     filter: u32,
-    cancel: &mut oneshot::Receiver<()>,
-) -> Option<Vec<(u32, String)>> {
+    cancel: &mut oneshot::Receiver<Status>,
+) -> Result<Vec<(u32, String)>, Status> {
     use futures_util::StreamExt;
     use inotify::Inotify;
     use std::collections::HashMap;
 
-    let inotify = Inotify::init().ok()?;
+    let inotify = Inotify::init().map_err(|_| Status::CANCELLED)?;
     let mask = filter_to_mask(filter);
     // Map each watch descriptor to its path relative to the watched root so a
     // recursive event names the file as `subdir\name`.
     let mut wd_rel: HashMap<inotify::WatchDescriptor, String> = HashMap::new();
-    let root_wd = inotify.watches().add(dir_path, mask).ok()?;
+    let root_wd = inotify.watches().add(dir_path, mask).map_err(|_| Status::CANCELLED)?;
     wd_rel.insert(root_wd, String::new());
     if watch_tree {
         for (abs, rel) in collect_subdirs(std::path::Path::new(dir_path)) {
@@ -1498,11 +1520,11 @@ async fn watch_one_event(
         }
     }
     let mut buf = [0u8; 4096];
-    let mut stream = inotify.into_event_stream(&mut buf).ok()?;
+    let mut stream = inotify.into_event_stream(&mut buf).map_err(|_| Status::CANCELLED)?;
 
     tokio::select! {
         ev = stream.next() => {
-            let ev = ev?.ok()?;
+            let ev = ev.ok_or(Status::CANCELLED)?.map_err(|_| Status::CANCELLED)?;
             let name = ev
                 .name
                 .as_ref()
@@ -1510,9 +1532,9 @@ async fn watch_one_event(
                 .unwrap_or_default();
             let prefix = wd_rel.get(&ev.wd).cloned().unwrap_or_default();
             let full = if prefix.is_empty() { name } else { format!("{prefix}\\{name}") };
-            Some(vec![(mask_to_action(ev.mask), full)])
+            Ok(vec![(mask_to_action(ev.mask), full)])
         }
-        _ = cancel => None,
+        status = cancel => Err(status.unwrap_or(Status::CANCELLED)),
     }
 }
 
@@ -2850,8 +2872,8 @@ mod async_notify_tests {
             watch_one_event(&path, false, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tx.send(()).unwrap();
-        assert!(watch.await.unwrap().is_none(), "cancelled watch yields no events");
+        tx.send(Status::CANCELLED).unwrap();
+        assert!(watch.await.unwrap().is_err(), "cancelled watch yields no events");
         std::fs::remove_dir_all(&dir).ok();
         });
     }
