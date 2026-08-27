@@ -118,6 +118,13 @@ pub enum SetOp {
         /// New path relative to the share root.
         name: String,
     },
+    /// Set a single extended attribute (`FILE_FULL_EA_INFORMATION`).
+    Ea {
+        /// Extended-attribute name.
+        name: String,
+        /// Raw attribute value.
+        value: Vec<u8>,
+    },
 }
 
 /// Errors returned by backends. Backends should map their native failures to

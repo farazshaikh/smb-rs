@@ -27,6 +27,8 @@ pub mod file_class {
     pub const INTERNAL: u8 = 0x06;
     /// FileEaInformation.
     pub const EA: u8 = 0x07;
+    /// FileFullEaInformation ([MS-FSCC] §2.4.15).
+    pub const FULL_EA: u8 = 0x0F;
     /// FileAccessInformation.
     pub const ACCESS: u8 = 0x08;
     /// FileNameInformation.
@@ -299,6 +301,25 @@ pub fn decode_set_file_op(class: u8, buf: &[u8]) -> Result<Option<smb_vfs::SetOp
             Ok(Some(smb_vfs::SetOp::Rename { replace_if_exists: replace, name }))
         }
         file_class::POSITION => Ok(None), // advisory only
+        file_class::FULL_EA => {
+            // FileFullEaInformation ([MS-FSCC] §2.4.15): NextEntryOffset(4)
+            // Flags(1) EaNameLength(1) EaValueLength(2) then the ASCII name
+            // (null-terminated) and the value bytes.
+            if buf.len() < 8 {
+                return Err(());
+            }
+            let name_len = buf[5] as usize;
+            let val_len = u16::from_le_bytes([buf[6], buf[7]]) as usize;
+            let name_start = 8;
+            let val_start = name_start + name_len + 1; // skip the null terminator
+            let val_end = val_start + val_len;
+            if buf.len() < val_end {
+                return Err(());
+            }
+            let name = String::from_utf8_lossy(&buf[name_start..name_start + name_len]).into_owned();
+            let value = buf[val_start..val_end].to_vec();
+            Ok(Some(smb_vfs::SetOp::Ea { name, value }))
+        }
         _ => Err(()),
     }
 }

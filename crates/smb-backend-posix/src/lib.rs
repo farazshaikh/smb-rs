@@ -634,6 +634,11 @@ impl Vfs for PosixVfs {
                 let dest = self.resolve(name);
                 tokio_uring::fs::rename(&p, &dest).await.map_err(map_io)?;
             }
+            SetOp::Ea { name, value } => {
+                // Persist the EA as an extended attribute; the write also
+                // raises an IN_ATTRIB inotify event for CHANGE_NOTIFY.
+                xattr::set(&p, &format!("user.smbea.{name}"), value).map_err(map_io)?;
+            }
         }
         Ok(())
     }
