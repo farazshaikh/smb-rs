@@ -21,6 +21,10 @@ use smb_transport::Transport;
 
 use crate::state::{ServerShared, Share};
 
+/// MaxTransactSize advertised in our NEGOTIATE response (1 MiB); CHANGE_NOTIFY
+/// rejects an OutputBufferLength larger than this ([MS-SMB2] §3.3.5.19).
+const MAX_TRANSACT_SIZE: u32 = 1024 * 1024;
+
 /// Per-connection SMB2 state.
 pub struct Smb2Conn {
     /// Negotiated dialect revision (set after successful NEGOTIATE).
@@ -984,6 +988,19 @@ async fn process_single(
             let Some(open) = conn.handles.get(&req.file_id.0) else {
                 return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
             };
+            // Validate before registering the watch ([MS-SMB2] §3.3.5.19).
+            if !open.is_dir {
+                // CHANGE_NOTIFY is only valid on a directory open.
+                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
+            }
+            if !open.can_read {
+                // The open's granted access lacks FILE_LIST_DIRECTORY.
+                return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
+            }
+            if req.output_len > MAX_TRANSACT_SIZE {
+                // OutputBufferLength exceeds the negotiated MaxTransactSize.
+                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
+            }
             let dir_path = open.path.clone();
 
             // Register the async operation and hand it to a background watcher;

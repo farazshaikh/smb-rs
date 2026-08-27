@@ -327,12 +327,13 @@ impl Vfs for PosixVfs {
                 2
             };
             let md = std::fs::metadata(&path).map_err(map_io)?;
+            let (read_access, write_access) = access_flags(access);
             let open = Box::new(OpenFile {
                 path: path.to_string_lossy().into_owned(),
                 rel: rel.to_string(),
                 is_dir: true,
-                can_read: true,
-                can_write: false,
+                can_read: read_access,
+                can_write: write_access,
                 delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
                 delete_pending: false,
                 inner: Box::new(PosixInner { file: None, pos: 0, stream: None }),
