@@ -166,7 +166,7 @@ pub async fn set_info_legacy(
         let utime = u32::from_le_bytes([w[2], w[3], w[4], w[5]]);
         if utime != 0 && utime != u32::MAX {
             let ft = smb_proto::types::FileTime((utime as u64 + 11_644_473_600) * 10_000_000);
-            vfs.set_info_path(&path, &SetOp::Basic { write: Some(ft) })
+            vfs.set_info_path(&path, &SetOp::Basic { access: None, write: Some(ft) })
                 .await
                 .map_err(vfs_err)?;
         }

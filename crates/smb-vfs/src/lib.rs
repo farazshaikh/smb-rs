@@ -106,6 +106,8 @@ pub enum SetOp {
     /// Update timestamps; `None` fields are left untouched
     /// (`FILE_BASIC_INFORMATION`).
     Basic {
+        /// Last-access time to apply, if any.
+        access: Option<FileTime>,
         /// Last-write time to apply, if any.
         write: Option<FileTime>,
     },

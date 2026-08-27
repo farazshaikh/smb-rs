@@ -158,7 +158,7 @@ pub async fn close(
         // Legacy UTIME field: seconds since 1970 in the low word.
         let ft = smb_proto::types::FileTime((cr.mtime as u64 + 11_644_473_600) * 10_000_000);
         let _ = vfs
-            .set_info_open(&mut h, &SetOp::Basic { write: Some(ft) })
+            .set_info_open(&mut h, &SetOp::Basic { access: None, write: Some(ft) })
             .await;
     }
     vfs.close(h).await.map_err(vfs_err)?;

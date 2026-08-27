@@ -358,9 +358,12 @@ fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_vfs::SetOp, Status> {
     };
     match level {
         0x101 | 0x1004 => {
+            let access = r64(8);
             let ft = r64(16);
+            let sel = |v: u64| (v != 0 && v != u64::MAX).then_some(smb_proto::types::FileTime(v));
             Ok(smb_vfs::SetOp::Basic {
-                write: (ft != 0 && ft != u64::MAX).then_some(smb_proto::types::FileTime(ft)),
+                access: sel(access),
+                write: sel(ft),
             })
         }
         0x103 | 0x100B => Ok(smb_vfs::SetOp::Allocation(r64(0))),

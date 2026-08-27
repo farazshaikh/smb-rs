@@ -246,16 +246,24 @@ fn meta_of(md: &std::fs::Metadata) -> FileMeta {
     }
 }
 
-fn set_mtime(path: &std::path::Path, ft: u64) -> VfsResult<()> {
+fn set_file_times(path: &std::path::Path, atime: Option<u64>, mtime: Option<u64>) -> VfsResult<()> {
     use std::fs::FileTimes;
     let f = std::fs::OpenOptions::new()
         .write(true)
         .open(path)
         .map_err(map_io)?;
-    let (secs, nanos) = FileTime(ft).to_unix();
-    let t = std::time::SystemTime::UNIX_EPOCH
-        + std::time::Duration::new(secs.max(0) as u64, nanos);
-    f.set_times(FileTimes::new().set_modified(t)).map_err(map_io)?;
+    let to_sys = |ft: u64| {
+        let (secs, nanos) = FileTime(ft).to_unix();
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(secs.max(0) as u64, nanos)
+    };
+    let mut times = FileTimes::new();
+    if let Some(a) = atime {
+        times = times.set_accessed(to_sys(a));
+    }
+    if let Some(m) = mtime {
+        times = times.set_modified(to_sys(m));
+    }
+    f.set_times(times).map_err(map_io)?;
     Ok(())
 }
 
@@ -611,11 +619,12 @@ impl Vfs for PosixVfs {
                     .set_len(*len)
                     .map_err(map_io)?;
             }
-            SetOp::Basic { write } => {
-                if let Some(ft) = write {
-                    if *ft != FileTime(0) && ft.0 != u64::MAX {
-                        set_mtime(&p, ft.0)?;
-                    }
+            SetOp::Basic { access, write } => {
+                let valid = |ft: &FileTime| ft.0 != 0 && ft.0 != u64::MAX;
+                let a = access.filter(valid).map(|t| t.0);
+                let w = write.filter(valid).map(|t| t.0);
+                if a.is_some() || w.is_some() {
+                    set_file_times(&p, a, w)?;
                 }
             }
             SetOp::Rename { replace_if_exists: _, name } => {

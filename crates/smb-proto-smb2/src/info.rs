@@ -129,6 +129,7 @@ pub fn encode_file_info(class: u8, m: &QueryMeta, name: &str) -> Option<Vec<u8>>
         file_class::BASIC => {
             push_times(&mut d, &m.times);
             d.raw(&m.attrs.to_le_bytes());
+            d.push_u32(0); // Reserved: FileBasicInformation is 40 bytes ([MS-FSCC] §2.4.7)
         }
         file_class::STANDARD => {
             d.push_u64(m.alloc);
@@ -267,10 +268,12 @@ pub fn decode_set_file_op(class: u8, buf: &[u8]) -> Result<Option<smb_vfs::SetOp
     };
     match class {
         file_class::BASIC => {
-            let write = r64(24); // LastWriteTime at offset 24
+            // FileBasicInformation ([MS-FSCC] §2.4.7): CreationTime(0),
+            // LastAccessTime(8), LastWriteTime(16), ChangeTime(24).
+            let ft = |v: u64| (v != 0 && v != u64::MAX).then_some(smb_proto::types::FileTime(v));
             Ok(Some(smb_vfs::SetOp::Basic {
-                write: (write != 0 && write != u64::MAX)
-                    .then_some(smb_proto::types::FileTime(write)),
+                access: ft(r64(8)),
+                write: ft(r64(16)),
             }))
         }
         file_class::END_OF_FILE => Ok(Some(smb_vfs::SetOp::EndOfFile(r64(0)))),
