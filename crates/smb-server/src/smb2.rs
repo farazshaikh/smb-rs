@@ -1519,7 +1519,9 @@ fn filter_to_mask(filter: u32) -> inotify::WatchMask {
     if filter & (nf::FILE_NAME | nf::DIR_NAME) != 0 {
         m |= M::CREATE | M::DELETE | M::MOVED_FROM | M::MOVED_TO;
     }
-    if filter & nf::ATTRIBUTES != 0 {
+    // Attribute and timestamp changes are delivered as inotify IN_ATTRIB on
+    // Linux (utimensat / chmod), so map every metadata filter there.
+    if filter & (nf::ATTRIBUTES | nf::LAST_WRITE | nf::LAST_ACCESS | nf::CREATION | nf::EA) != 0 {
         m |= M::ATTRIB;
     }
     if filter & (nf::SIZE | nf::LAST_WRITE) != 0 {

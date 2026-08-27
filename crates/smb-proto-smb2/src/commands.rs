@@ -1175,6 +1175,12 @@ pub mod notify_filter {
     pub const SIZE: u32 = 0x0000_0008;
     /// Last-write timestamp changes.
     pub const LAST_WRITE: u32 = 0x0000_0010;
+    /// Last-access timestamp changes.
+    pub const LAST_ACCESS: u32 = 0x0000_0020;
+    /// Creation timestamp changes.
+    pub const CREATION: u32 = 0x0000_0040;
+    /// Extended-attribute changes.
+    pub const EA: u32 = 0x0000_0080;
 }
 
 /// FILE_NOTIFY_INFORMATION action codes ([MS-FSCC] §2.7.1).
