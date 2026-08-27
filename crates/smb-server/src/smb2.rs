@@ -2457,13 +2457,24 @@ async fn query_directory(
             &req.pattern.trim_start_matches(['\\', '/']),
         );
         let entries = vfs.list(&dir_rel).await.map_err(vfs_err)?;
-        let mut matched: Vec<info::FindEntry> = entries
-            .into_iter()
+        // Windows precedes real children with "." (the directory itself) and
+        // ".." (its parent) on a wildcard scan ([MS-FSCC] §2.4), so even an
+        // empty directory yields these two entries. They pass through the same
+        // pattern filter, so a non-matching pattern still excludes them.
+        let dot_meta = vfs.stat(&dir_rel).await.map_err(vfs_err)?;
+        let dots = [".", ".."].into_iter().map(|n| info::FindEntry {
+            name: n.to_string(),
+            meta: info::QueryMeta::from_vfs(&dot_meta),
+        });
+        let mut matched: Vec<info::FindEntry> = dots
+            .chain(entries.into_iter().map(|e| info::FindEntry {
+                name: e.name,
+                meta: info::QueryMeta::from_vfs(&e.meta),
+            }))
             .filter(|e| {
                 name_pat.is_empty()
                     || crate::cmds::wildcard(&e.name.to_lowercase(), &name_pat.to_lowercase())
             })
-            .map(|e| info::FindEntry { name: e.name, meta: info::QueryMeta::from_vfs(&e.meta) })
             .collect();
         // Resume-by-index ([MS-SMB2] §2.2.33): skip to the requested ordinal.
         if req.flags & c::find_flags::INDEX_SPECIFIED != 0 && req.file_index > 0 {
