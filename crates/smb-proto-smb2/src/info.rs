@@ -187,7 +187,9 @@ pub fn encode_file_info(class: u8, m: &QueryMeta, name: &str) -> Option<Vec<u8>>
             d.push_u64(0); // current byte offset 80
             d.push_u32(0); // mode 88
             d.push_u32(0); // alignment requirement 92
-            push_utf16_len(&mut d, name); // 96
+            // FileNameInformation: Windows returns FileNameLength 0 here
+            // ([MS-SMB2] §3.3.5.20.1 / MS-FSCC §2.4.7 via a handle query).
+            d.push_u32(0); // FileNameLength 96
         }
         _ => return None,
     }

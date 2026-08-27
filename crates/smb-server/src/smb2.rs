@@ -725,7 +725,7 @@ async fn process_single(
                     return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
                 }
             };
-            match read(conn, vfs, buf).await {
+            match read(conn, vfs, server, buf).await {
                 Ok(body) => (Status::SUCCESS, body),
                 Err(status) => (status, Vec::new()),
             }
@@ -740,7 +740,7 @@ async fn process_single(
                     return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
                 }
             };
-            match write(conn, vfs, buf).await {
+            match write(conn, vfs, server, buf).await {
                 Ok(body) => (Status::SUCCESS, body),
                 Err(status) => (status, Vec::new()),
             }
@@ -2227,10 +2227,22 @@ fn finalize_break(crypto: &crate::state::BreakCrypto, mut frame: Vec<u8>) -> Vec
 async fn read(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
+    server: &Arc<ServerShared>,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::ReadReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let len = (req.length as usize).min(1 << 20); // clamp to 1 MiB
+    let (path, is_dir, can_read) = {
+        let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+        (h.path.clone(), h.is_dir, h.can_read)
+    };
+    if is_dir || !can_read {
+        return Err(Status::ACCESS_DENIED);
+    }
+    // An exclusive byte-range lock from another open blocks reads ([MS-FSA]).
+    if server.locks.read_conflict(&path, req.offset, len as u64, (conn.session_id, req.file_id.0)) {
+        return Err(Status::FILE_LOCK_CONFLICT);
+    }
     let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
         return Err(Status::INVALID_HANDLE);
     };
@@ -2246,9 +2258,21 @@ async fn read(
 async fn write(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
+    server: &Arc<ServerShared>,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::WriteReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
+    let (path, is_dir, can_write) = {
+        let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+        (h.path.clone(), h.is_dir, h.can_write)
+    };
+    if is_dir || !can_write {
+        return Err(Status::ACCESS_DENIED);
+    }
+    // Byte-range lock enforcement ([MS-SMB2] §2.2.26 / [MS-FSA]).
+    if server.locks.write_conflict(&path, req.offset, req.payload.len() as u64, (conn.session_id, req.file_id.0)) {
+        return Err(Status::FILE_LOCK_CONFLICT);
+    }
     let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
         return Err(Status::INVALID_HANDLE);
     };
@@ -2413,7 +2437,8 @@ async fn query_directory(
                 .get(&req.file_id.0)
                 .ok_or(Status::INVALID_HANDLE)?;
             if !h.is_dir {
-                return Err(Status::NOT_A_DIRECTORY);
+                // QUERY_DIRECTORY on a non-directory open ([MS-SMB2] §3.3.5.18).
+                return Err(Status::INVALID_PARAMETER);
             }
             // Enumeration runs inside the opened directory; the pattern may
             // still carry a subdirectory prefix relative to it.

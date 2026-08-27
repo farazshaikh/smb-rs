@@ -90,6 +90,11 @@ struct HeldLock {
     owner: LockOwner,
 }
 
+/// Whether `[off, off+len)` overlaps the held lock's range.
+fn overlaps(h: &HeldLock, off: u64, len: u64) -> bool {
+    off < h.offset.saturating_add(h.length) && h.offset < off.saturating_add(len)
+}
+
 /// Server-wide byte-range lock manager ([MS-SMB2] §2.2.26 / [MS-FSA]
 /// §2.1.4.10). Locks are keyed by the file's on-disk path so opens from
 /// different connections contend correctly.
@@ -139,6 +144,23 @@ impl LockManager {
             list.push(HeldLock { offset: off, length: len, exclusive: excl, owner });
         }
         true
+    }
+
+    /// A write to `[off, off+len)` is blocked when it overlaps any shared lock
+    /// (a read lock forbids writes by every open, [MS-FSA] §2.1.5.9) or an
+    /// exclusive lock held by a different open.
+    pub fn write_conflict(&self, path: &str, off: u64, len: u64, owner: LockOwner) -> bool {
+        let held = self.held.lock().unwrap();
+        let Some(list) = held.get(path) else { return false };
+        list.iter().any(|h| overlaps(h, off, len) && (!h.exclusive || h.owner != owner))
+    }
+
+    /// A read overlaps a conflicting lock only when another open holds an
+    /// exclusive lock on the range.
+    pub fn read_conflict(&self, path: &str, off: u64, len: u64, owner: LockOwner) -> bool {
+        let held = self.held.lock().unwrap();
+        let Some(list) = held.get(path) else { return false };
+        list.iter().any(|h| overlaps(h, off, len) && h.exclusive && h.owner != owner)
     }
 
     /// Release specific `(offset, length)` ranges held by `owner`.

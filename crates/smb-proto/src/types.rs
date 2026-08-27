@@ -56,6 +56,8 @@ impl Status {
     /// A byte-range lock request conflicts with an existing lock
     /// ([MS-SMB2] §2.2.26, STATUS_LOCK_NOT_GRANTED).
     pub const LOCK_NOT_GRANTED: Status = Status(0xC000_0055);
+    /// A read/write overlapped a conflicting byte-range lock ([MS-SMB2] §2.2.26).
+    pub const FILE_LOCK_CONFLICT: Status = Status(0xC000_0054);
     /// The operation is being processed asynchronously; an interim response
     /// ([MS-SMB2] §3.3.4.2) precedes the final one.
     pub const PENDING: Status = Status(0x0000_0103);
