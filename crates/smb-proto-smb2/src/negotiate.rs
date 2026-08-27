@@ -23,10 +23,18 @@ pub const SIGNING_REQUIRED: u16 = 0x0002;
 
 /// Capability bits (§2.2.3.2.5).
 pub mod caps {
+    /// Leasing (file leases) — available from dialect 2.1.
+    pub const LEASING: u32 = 0x0000_0002;
     /// Large MTU — multi-credit transfers.
     pub const LARGE_MTU: u32 = 0x0000_0004;
     /// Multiple channels for one session (multichannel).
     pub const MULTI_CHANNEL: u32 = 0x0000_0008;
+    /// Persistent handles (continuous availability).
+    pub const PERSISTENT_HANDLES: u32 = 0x0000_0010;
+    /// Directory leasing.
+    pub const DIRECTORY_LEASING: u32 = 0x0000_0020;
+    /// Encryption (dialects 3.0/3.0.2; 3.1.1 negotiates via context).
+    pub const ENCRYPTION: u32 = 0x0000_0040;
 }
 
 /// Negotiate context types (§2.2.3.1.2).
@@ -177,9 +185,9 @@ pub fn build_response_full(
     }
     b.extend_from_slice(guid); // ServerGuid
     let caps = if dialect >= DIALECT_300 {
-        caps::LARGE_MTU | caps::MULTI_CHANNEL
+        caps::LARGE_MTU | caps::MULTI_CHANNEL | caps::LEASING
     } else if dialect >= DIALECT_210 {
-        caps::LARGE_MTU
+        caps::LARGE_MTU | caps::LEASING
     } else {
         0
     };

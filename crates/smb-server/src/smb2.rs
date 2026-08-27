@@ -567,8 +567,10 @@ async fn process_single(
             conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
                 smb_proto_smb2::negotiate::caps::LARGE_MTU
                     | smb_proto_smb2::negotiate::caps::MULTI_CHANNEL
+                    | smb_proto_smb2::negotiate::caps::LEASING
             } else if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
                 smb_proto_smb2::negotiate::caps::LARGE_MTU
+                    | smb_proto_smb2::negotiate::caps::LEASING
             } else {
                 0
             };
