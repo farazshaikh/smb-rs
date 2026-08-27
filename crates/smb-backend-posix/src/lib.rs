@@ -564,6 +564,15 @@ impl Vfs for PosixVfs {
     async fn set_info_open(&self, open: &mut OpenFile, op: &SetOp) -> VfsResult<()> {
         match op {
             SetOp::Disposition { delete } => open.delete_pending = *delete,
+            SetOp::Rename { name, .. } => {
+                let target = open.path.clone();
+                self.set_info_path(&target, op).await?;
+                // The open now refers to the file at its new location; keep the
+                // handle's paths in sync so later ops (notably delete-on-close)
+                // act on the renamed file rather than the vanished old path.
+                open.path = self.resolve(name).to_string_lossy().into_owned();
+                open.rel = name.clone();
+            }
             other => {
                 let target = open.path.clone();
                 self.set_info_path(&target, other).await?;
