@@ -87,6 +87,10 @@ pub struct Smb2Conn {
     /// In-flight async operations keyed by async id; sending on the channel
     /// cancels the background task (used by CANCEL, §2.2.30).
     pub async_cancels: HashMap<u64, oneshot::Sender<()>>,
+    /// Maps a pending operation's MessageId to its async id, so a CANCEL that
+    /// correlates by MessageId (rather than AsyncId) can find it ([MS-SMB2]
+    /// §3.2.4.24).
+    pub async_msgids: HashMap<u64, u64>,
     /// Server-side-copy resume keys → source FileId ([MS-SMB2] §2.2.32.3);
     /// handed out by FSCTL_SRV_REQUEST_RESUME_KEY and consumed by COPYCHUNK.
     pub resume_keys: HashMap<[u8; 24], [u8; 16]>,
@@ -127,6 +131,7 @@ impl Smb2Conn {
             outbound,
             next_async_id: 1,
             async_cancels: HashMap::new(),
+            async_msgids: HashMap::new(),
             resume_keys: HashMap::new(),
             durable: HashMap::new(),
             compress_algo: None,
@@ -953,6 +958,7 @@ async fn process_single(
                 let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
                 let (cancel_tx, cancel_rx) = oneshot::channel();
                 conn.async_cancels.insert(async_id, cancel_tx);
+                conn.async_msgids.insert(hdr.message_id, async_id);
                 gauge!("smb_async_pending").increment(1.0);
                 tokio_uring::spawn(run_lock_wait(
                     server.locks.clone(),
@@ -1010,6 +1016,7 @@ async fn process_single(
             let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
             let (cancel_tx, cancel_rx) = oneshot::channel();
             conn.async_cancels.insert(async_id, cancel_tx);
+            conn.async_msgids.insert(hdr.message_id, async_id);
             gauge!("smb_async_pending").increment(1.0);
             tokio_uring::spawn(run_change_notify(
                 dir_path,
@@ -1076,13 +1083,19 @@ async fn process_single(
             }
         }
         ss::cmd::CANCEL => {
-            // Async CANCEL ([MS-SMB2] §3.3.5.14): signal the pending op keyed
-            // by the AsyncId in the header so its task completes with
-            // STATUS_CANCELLED. CANCEL itself carries no response.
+            // CANCEL ([MS-SMB2] §3.3.5.14): find the pending op either by the
+            // AsyncId in the header (async CANCEL) or by MessageId (sync
+            // CANCEL) and signal its task to complete with STATUS_CANCELLED.
+            // CANCEL itself carries no response.
             counter!("smb_cancels_total").increment(1);
-            if hdr.is_async() && buf.len() >= 40 {
-                let async_id = u64::from_le_bytes(buf[32..40].try_into().unwrap());
-                if let Some(tx) = conn.async_cancels.remove(&async_id) {
+            let async_id = if hdr.is_async() && buf.len() >= 40 {
+                Some(u64::from_le_bytes(buf[32..40].try_into().unwrap()))
+            } else {
+                conn.async_msgids.get(&hdr.message_id).copied()
+            };
+            if let Some(aid) = async_id {
+                conn.async_msgids.retain(|_, v| *v != aid);
+                if let Some(tx) = conn.async_cancels.remove(&aid) {
                     let _ = tx.send(());
                 }
             }
@@ -1449,7 +1462,7 @@ async fn run_change_notify(
             async_id,
             ss::cmd::CHANGE_NOTIFY,
             Status::CANCELLED,
-            &c::build_change_notify_resp(&[]),
+            &error_resp(),
         ),
     };
     let _ = outbound.send(finalize_async(&crypto, frame)).await;
