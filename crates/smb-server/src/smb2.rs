@@ -1576,7 +1576,7 @@ fn filter_to_mask(filter: u32) -> inotify::WatchMask {
     if filter & (nf::ATTRIBUTES | nf::LAST_WRITE | nf::LAST_ACCESS | nf::CREATION | nf::EA) != 0 {
         m |= M::ATTRIB;
     }
-    if filter & (nf::SIZE | nf::LAST_WRITE) != 0 {
+    if filter & (nf::SIZE | nf::LAST_WRITE | nf::STREAM_SIZE | nf::STREAM_WRITE | nf::STREAM_NAME) != 0 {
         m |= M::MODIFY | M::CLOSE_WRITE;
     }
     if m.is_empty() {

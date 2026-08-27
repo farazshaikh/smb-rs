@@ -166,7 +166,9 @@ fn split_stream(rel: &str) -> (String, Option<String>) {
             let base = &last[..ci];
             let sname = last[ci + 1..].split(':').next().unwrap_or("");
             let base_full = format!("{dir}{base}");
-            if sname.is_empty() {
+            // An empty name or the bare "$DATA" type keyword denotes the
+            // file's default (unnamed) data stream, not an alternate one.
+            if sname.is_empty() || sname.eq_ignore_ascii_case("$DATA") {
                 (base_full, None)
             } else {
                 (base_full, Some(sname.to_string()))

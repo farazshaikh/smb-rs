@@ -1181,6 +1181,12 @@ pub mod notify_filter {
     pub const CREATION: u32 = 0x0000_0040;
     /// Extended-attribute changes.
     pub const EA: u32 = 0x0000_0080;
+    /// Named-stream add/rename/delete.
+    pub const STREAM_NAME: u32 = 0x0000_0200;
+    /// Named-stream size changes.
+    pub const STREAM_SIZE: u32 = 0x0000_0400;
+    /// Named-stream writes.
+    pub const STREAM_WRITE: u32 = 0x0000_0800;
 }
 
 /// FILE_NOTIFY_INFORMATION action codes ([MS-FSCC] §2.7.1).
