@@ -62,6 +62,9 @@ impl Status {
     pub const LOCK_NOT_GRANTED: Status = Status(0xC000_0055);
     /// A read/write overlapped a conflicting byte-range lock ([MS-SMB2] §2.2.26).
     pub const FILE_LOCK_CONFLICT: Status = Status(0xC000_0054);
+    /// SMB 3.1.1 negotiate carried no hash algorithm the server supports
+    /// ([MS-SMB2] §3.3.5.4).
+    pub const SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP: Status = Status(0xC05D_0000);
     /// The operation is being processed asynchronously; an interim response
     /// ([MS-SMB2] §3.3.4.2) precedes the final one.
     pub const PENDING: Status = Status(0x0000_0103);

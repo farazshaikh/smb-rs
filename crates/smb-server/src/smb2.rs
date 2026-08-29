@@ -603,6 +603,29 @@ async fn process_single(
                 .get(body_start + 8..body_start + 12)
                 .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
                 .unwrap_or(0);
+            // SMB 3.1.1 negotiate-context validation ([MS-SMB2] §3.3.5.4):
+            // exactly one PREAUTH_INTEGRITY context is required, and it must
+            // offer a hash algorithm the server supports (SHA-512).
+            if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+                let preauth: Vec<_> = req
+                    .contexts
+                    .iter()
+                    .filter(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::PREAUTH_INTEGRITY)
+                    .collect();
+                if preauth.len() != 1 {
+                    return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0), true));
+                }
+                // HashAlgorithmCount(2) SaltLength(2) HashAlgorithms[] ([MS-SMB2] §2.2.3.1.1).
+                let pd = &preauth[0].data;
+                let count = pd.get(0..2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize).unwrap_or(0);
+                let algos: Vec<u16> = pd
+                    .get(4..)
+                    .map(|d| d.chunks_exact(2).take(count).map(|w| u16::from_le_bytes([w[0], w[1]])).collect())
+                    .unwrap_or_default();
+                if !algos.contains(&smb_proto_smb2::negotiate::ctx_type::SHA512) {
+                    return Some((response(&hdr, Status::SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP, Vec::new(), 0), true));
+                }
+            }
             // Must match the Capabilities word written by
             // build_response_full below so VALIDATE_NEGOTIATE_INFO echoes it.
             conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
@@ -682,9 +705,10 @@ async fn process_single(
                     smb_proto::types::FileTime::now().0,
                     &salt,
                     // Echo ENCRYPTION/SIGNING only when the client offered them
-                    // ([MS-SMB2] §3.3.5.4).
+                    // ([MS-SMB2] §3.3.5.4). With no common cipher, echo
+                    // ENCRYPTION_NONE (0) so the client clears Connection.CipherId.
                     (!client_ciphers.is_empty())
-                        .then(|| chosen.unwrap_or(smb_proto_smb2::negotiate::ctx_type::AES128_GCM)),
+                        .then(|| chosen.unwrap_or(0)),
                     req.contexts
                         .iter()
                         .any(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING),
