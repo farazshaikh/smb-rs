@@ -150,6 +150,12 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                         break;
                     }
                 }
+                // A handler may ask to terminate the connection (e.g. a failed
+                // FSCTL_VALIDATE_NEGOTIATE_INFO downgrade check, [MS-SMB2]
+                // §3.3.5.15.12).
+                if c2.disconnect {
+                    break;
+                }
                 continue;
             }
 

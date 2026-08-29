@@ -230,20 +230,24 @@ pub fn all() -> Vec<TestCase> {
         TestCase {
             id: "ioctl.validate_negotiate_info",
             category: "Ioctl",
-            spec: "MS-SMB2 §3.3.5.15",
-            about: "FSCTL_VALIDATE_NEGOTIATE_INFO echoes 24 bytes",
+            spec: "MS-SMB2 §3.3.5.15.12",
+            about: "FSCTL_VALIDATE_NEGOTIATE_INFO on 3.1.1 terminates the connection",
             run: |c| {
-                // 24 zero bytes of input satisfy the server's length guard.
+                // On 3.1.1 pre-auth integrity supersedes this exchange, so the
+                // server MUST terminate the connection ([MS-SMB2] §3.3.5.15.12).
                 let r = c.run_with(&Opts::dialect("3.1.1"), json!([
                     {"op":"ioctl","ctl_code":0x00140204,
                      "input_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
                 ]))?;
-                ok(&r)?;
-                let out = b64_len(&r, 0)?;
-                if out < 24 {
-                    return Err(format!("validate-negotiate output too short: {out}"));
+                if r.ok {
+                    return Err("expected connection termination on 3.1.1 validate-negotiate".into());
                 }
-                Ok(Metrics::new())
+                let err = r.error.clone().unwrap_or_default();
+                if err.to_lowercase().contains("clos") {
+                    Ok(Metrics::new())
+                } else {
+                    Err(format!("expected connection closed, got: {err}"))
+                }
             },
         },
         TestCase {

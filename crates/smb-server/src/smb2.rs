@@ -105,6 +105,15 @@ pub struct Smb2Conn {
     /// Negotiated outbound compression algorithm ([MS-SMB2] §2.2.42), if the
     /// client and server share one; `None` disables compressed responses.
     pub compress_algo: Option<u16>,
+    /// Client's NEGOTIATE parameters, retained to validate a later
+    /// FSCTL_VALIDATE_NEGOTIATE_INFO request ([MS-SMB2] §3.3.5.15.12).
+    pub client_guid: [u8; 16],
+    pub client_security_mode: u16,
+    pub client_capabilities: u32,
+    pub client_dialects: Vec<u16>,
+    /// Set to terminate the transport connection after the current frame
+    /// (e.g. a failed VALIDATE_NEGOTIATE_INFO downgrade check).
+    pub disconnect: bool,
 }
 
 impl Smb2Conn {
@@ -141,6 +150,11 @@ impl Smb2Conn {
             resume_keys: HashMap::new(),
             durable: HashMap::new(),
             compress_algo: None,
+            client_guid: [0u8; 16],
+            client_security_mode: 0,
+            client_capabilities: 0,
+            client_dialects: Vec::new(),
+            disconnect: false,
         }
     }
 
@@ -205,6 +219,9 @@ pub async fn serve_client(
                 if out_tx.send(resp).await.is_err() {
                     break;
                 }
+            }
+            if conn.disconnect {
+                break;
             }
         }
     }
@@ -577,6 +594,15 @@ async fn process_single(
                 return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0), true));
             };
             conn.dialect = Some(dialect);
+            // Retain the client's NEGOTIATE fields for a later
+            // FSCTL_VALIDATE_NEGOTIATE_INFO downgrade check ([MS-SMB2] §3.3.5.15.12).
+            conn.client_guid = req.client_guid;
+            conn.client_dialects = req.dialects.clone();
+            conn.client_security_mode = g16(buf, body_start + 4);
+            conn.client_capabilities = buf
+                .get(body_start + 8..body_start + 12)
+                .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+                .unwrap_or(0);
             // Must match the Capabilities word written by
             // build_response_full below so VALIDATE_NEGOTIATE_INFO echoes it.
             conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
@@ -822,7 +848,46 @@ async fn process_single(
             match req.ctl_code {
                 // Echo the negotiated parameters back ([MS-SMB2] §3.3.5.15):
                 // capabilities, server GUID, security mode and dialect.
-                c::fsctl::VALIDATE_NEGOTIATE_INFO if req.input.len() >= 24 => {
+                // Validate against the original NEGOTIATE and terminate the
+                // connection on any mismatch — a downgrade attempt ([MS-SMB2]
+                // §3.3.5.15.12). The request is invalid on 3.1.1, where
+                // pre-auth integrity supersedes this exchange.
+                c::fsctl::VALIDATE_NEGOTIATE_INFO => {
+                    let input = &req.input;
+                    let terminate = 'v: {
+                        if conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
+                            break 'v true;
+                        }
+                        if input.len() < 24 || (req.max_output as usize) < 24 {
+                            break 'v true;
+                        }
+                        let req_caps = u32::from_le_bytes(input[0..4].try_into().unwrap());
+                        if req_caps != conn.client_capabilities {
+                            break 'v true;
+                        }
+                        if input[4..20] != conn.client_guid {
+                            break 'v true;
+                        }
+                        let req_secmode = u16::from_le_bytes(input[20..22].try_into().unwrap());
+                        if req_secmode != conn.client_security_mode {
+                            break 'v true;
+                        }
+                        let count = u16::from_le_bytes(input[22..24].try_into().unwrap()) as usize;
+                        let mut dialects = Vec::with_capacity(count);
+                        for i in 0..count {
+                            match input.get(24 + i * 2..26 + i * 2) {
+                                Some(s) => dialects.push(u16::from_le_bytes(s.try_into().unwrap())),
+                                None => break 'v true,
+                            }
+                        }
+                        const SUPPORTED: [u16; 5] = [0x0202, 0x0210, 0x0300, 0x0302, 0x0311];
+                        let gcd = dialects.iter().copied().filter(|d| SUPPORTED.contains(d)).max();
+                        gcd != conn.dialect
+                    };
+                    if terminate {
+                        conn.disconnect = true;
+                        return None;
+                    }
                     let mut out = Vec::with_capacity(24);
                     // Echo the exact values from our NEGOTIATE response —
                     // the client fails the exchange on any mismatch
@@ -840,7 +905,6 @@ async fn process_single(
                         &conn.dialect.unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
                             .to_le_bytes(),
                     );
-                    let _ = &req.input;
                     (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
                 }
                 // Resiliency handshake carries no output data.
