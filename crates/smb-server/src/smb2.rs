@@ -2304,10 +2304,14 @@ fn arbitrate_lease(
         let grant = requested & c::lease::RH;
         return c::LeaseResp { key: lr.key, state: grant, flags: 0, epoch: lr.epoch, v2: lr.v2 };
     }
+    // A newly established lease initializes its epoch from the request and
+    // increments it by one for a LeaseV2 grant ([MS-SMB2] §3.3.5.9.11); V1
+    // leases have no epoch (reported as zero).
+    let granted_epoch = if lr.v2 { lr.epoch.wrapping_add(1) } else { 0 };
     let holder = crate::state::LeaseHolder {
         key: lr.key,
         state: requested,
-        epoch: lr.epoch,
+        epoch: granted_epoch,
         v2: lr.v2,
         session_id: conn.session_id,
         file_id: fid,
@@ -2316,7 +2320,7 @@ fn arbitrate_lease(
     };
     server.leases.grant(path, holder);
     counter!("smb_leases_granted_total").increment(1);
-    c::LeaseResp { key: lr.key, state: requested, flags: 0, epoch: lr.epoch, v2: lr.v2 }
+    c::LeaseResp { key: lr.key, state: requested, flags: 0, epoch: granted_epoch, v2: lr.v2 }
 }
 
 /// Build a NETWORK_INTERFACE_INFO list ([MS-SMB2] §2.2.32.5) from the host's
