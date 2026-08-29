@@ -120,6 +120,8 @@ class Driver:
                    else CreateOptions.FILE_NON_DIRECTORY_FILE)
         if step.get("delete_on_close"):
             options |= CreateOptions.FILE_DELETE_ON_CLOSE
+            # Delete-on-close requires DELETE access ([MS-SMB2] 3.3.5.9).
+            mask |= FilePipePrinterAccessMask.DELETE
         attrs = (FileAttributes.FILE_ATTRIBUTE_DIRECTORY if directory
                  else FileAttributes.FILE_ATTRIBUTE_NORMAL)
         f = Open(self.tree, step["path"])

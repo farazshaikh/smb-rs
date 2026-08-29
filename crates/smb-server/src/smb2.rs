@@ -1978,6 +1978,27 @@ async fn create(
         return durable_reconnect(conn, vfs, server, id, guid).await;
     }
 
+    // Reject a path that walks upward from a real component ([MS-SMB2]
+    // §3.3.5.9 — e.g. "x\..\y.txt"); bare "." / leading ".." are normalized.
+    {
+        let mut seen_real = false;
+        for c in req.name.split(['\\', '/']).filter(|c| !c.is_empty()) {
+            if c == ".." && seen_real {
+                return Err(Status::INVALID_PARAMETER);
+            }
+            if c != "." && c != ".." {
+                seen_real = true;
+            }
+        }
+    }
+    // FILE_DELETE_ON_CLOSE requires DELETE or GENERIC_ALL access ([MS-SMB2]
+    // §3.3.5.9).
+    if req.options & OPT_DELETE_ON_CLOSE != 0
+        && req.desired_access & (0x0001_0000 | 0x1000_0000) == 0
+    {
+        return Err(Status::ACCESS_DENIED);
+    }
+
     let rel = req.name.trim_start_matches(['\\', '/']).to_string();
     let want_dir = req.options & OPT_DIRECTORY_FILE != 0;
 
