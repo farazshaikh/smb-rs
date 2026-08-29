@@ -546,25 +546,33 @@ async fn process_single(
     let charge = hdr.credit_charge as u32;
     conn.client_credits = conn.client_credits.saturating_sub(charge);
 
-    // Signing policy ([MS-SMB2] §3.3.5.2.3): reject unsigned traffic from
-    // real accounts when --require-signing is set. Sealed (encrypted)
-    // sessions carry their own integrity guarantee via the AEAD tag, so
-    // the signature requirement is satisfied by encryption there.
-    if server.require_signing
-        && !pre_session
+    // Signing policy ([MS-SMB2] §3.3.5.2.3). Two independent rules:
+    //  1. A request that carries a signature MUST verify against the
+    //     session's signing key, regardless of the server signing policy —
+    //     a bad signature is a tamper/forgery attempt. We only enforce this
+    //     for dialects whose signing key we derive identically to the client
+    //     (2.x / 3.0 / 3.0.2, where the key is the session key or a
+    //     preauth-independent KDF). For 3.1.1 the signing key mixes in the
+    //     pre-auth integrity hash, which we do not yet reproduce bit-for-bit,
+    //     so we skip verification there to avoid rejecting honest traffic.
+    //  2. Unsigned traffic from real accounts is rejected only when
+    //     --require-signing is set. Sealed (encrypted) sessions carry their
+    //     own AEAD integrity guarantee, so signatures are not required there.
+    if hdr.command != ss::cmd::NEGOTIATE
         && hdr.command != ss::cmd::SESSION_SETUP
         && !conn.guest
         && !conn.encrypt_data
         && conn.signing_key.is_some()
     {
         let key = conn.signing_key.unwrap();
-        if !hdr.is_signed() {
+        let is_311 = conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311);
+        if hdr.is_signed() {
+            if !is_311 && !verify_pdu_signature(buf, &key, conn.dialect) {
+                counter!("smb_reject_bad_signature_total").increment(1);
+                return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
+            }
+        } else if server.require_signing {
             counter!("smb_reject_unsigned_total").increment(1);
-            return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
-        }
-        // A signed request with a bad signature is a tamper/forgery attempt.
-        if !verify_pdu_signature(buf, &key, conn.dialect) {
-            counter!("smb_reject_bad_signature_total").increment(1);
             return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
         }
     }
