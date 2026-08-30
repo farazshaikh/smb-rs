@@ -508,6 +508,10 @@ pub struct DurableEntry {
     pub options: u32,
     /// Session that owned the handle.
     pub session_id: u64,
+    /// Client GUID that opened the handle (validated on a lease reconnect).
+    pub client_guid: [u8; 16],
+    /// Lease key associated with the open, if it held a lease.
+    pub lease_key: Option<[u8; 16]>,
     /// Persistent (survives server restart intent) vs. plain durable.
     pub persistent: bool,
     /// Requested handle timeout in milliseconds (0 = server default).
@@ -532,7 +536,8 @@ impl DurableEntry {
             flags: if self.persistent { 0x2 } else { 0 },
             match_guid: if self.create_guid == [0u8; 16] { None } else { Some(self.create_guid) },
             owner_node: String::new(),
-            lease_key: None,
+            lease_key: self.lease_key,
+            client_guid: self.client_guid,
             timeout_ms: self.timeout as u64,
             deadline_ms: if self.persistent { 0 } else { now_ms + self.timeout as u64 },
             delete_on_close: false,

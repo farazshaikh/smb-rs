@@ -49,6 +49,9 @@ pub struct HandleRecord {
     /// Node currently owning the handle; empty when free for reclaim.
     pub owner_node: String,
     pub lease_key: Option<Guid>,
+    /// Client GUID that opened the handle; validated on a lease reconnect
+    /// ([MS-SMB2] §3.3.5.9.7).
+    pub client_guid: Guid,
     /// Requested durable timeout in milliseconds (0 = persistent, no timeout).
     pub timeout_ms: u64,
     /// Absolute expiry (ms since epoch); 0 means persistent / never expires.
@@ -224,6 +227,7 @@ pub(crate) fn sample(guid_byte: u8, timeout_ms: u64) -> HandleRecord {
         match_guid: None,
         owner_node: String::new(),
         lease_key: None,
+        client_guid: [0u8; 16],
         timeout_ms,
         deadline_ms: if timeout_ms == 0 { 0 } else { timeout_ms },
         delete_on_close: false,

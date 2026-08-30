@@ -94,6 +94,9 @@ pub struct CreateReq {
     pub lease: Option<LeaseReq>,
     /// Parsed durable-handle request/reconnect intent, if any.
     pub durable: Option<DurableReq>,
+    /// Bitmask of durable create-context tags present ([`durable::tag`]);
+    /// used to reject conflicting durable-context combinations on reconnect.
+    pub durable_ctx_tags: u8,
 }
 
 /// Durable-handle intent parsed from a CREATE's create-context chain
@@ -137,6 +140,20 @@ pub mod durable {
     pub const RECONNECT_V2: &[u8] = b"DH2C";
     /// Persistent-handle flag (`SMB2_DHANDLE_FLAG_PERSISTENT`).
     pub const FLAG_PERSISTENT: u32 = 0x0000_0002;
+
+    /// Bitmask flags recording which durable create-context tags a CREATE
+    /// carried, so the server can reject conflicting combinations
+    /// ([MS-SMB2] §3.3.5.9.7/§3.3.5.9.12).
+    pub mod tag {
+        /// `DHnQ` present.
+        pub const REQ_V1: u8 = 0x01;
+        /// `DHnC` present.
+        pub const RECONNECT_V1: u8 = 0x02;
+        /// `DH2Q` present.
+        pub const REQ_V2: u8 = 0x04;
+        /// `DH2C` present.
+        pub const RECONNECT_V2: u8 = 0x08;
+    }
 }
 
 /// Walk a CREATE create-context chain, invoking `f(name, data)` for each entry.
@@ -168,11 +185,16 @@ fn walk_create_contexts(frame: &[u8], ctx_off: usize, ctx_len: usize, mut f: imp
     }
 }
 
-/// Parse durable-handle intent from a CREATE's create-context chain.
+/// Parse durable-handle intent from a CREATE's create-context chain, keeping the
+/// first durable context so the reconnect type is determined by chain order when
+/// several durable contexts are present ([MS-SMB2] §3.3.5.9.7/§3.3.5.9.12).
 fn parse_durable_context(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option<DurableReq> {
-    let mut found = None;
+    let mut found: Option<DurableReq> = None;
     walk_create_contexts(frame, ctx_off, ctx_len, |name, data| {
-        let parsed = if name == durable::REQ_V2 && data.len() >= 32 {
+        if found.is_some() {
+            return;
+        }
+        found = if name == durable::REQ_V2 && data.len() >= 32 {
             Some(DurableReq::RequestV2 {
                 timeout: u32::from_le_bytes(data[0..4].try_into().unwrap()),
                 flags: u32::from_le_bytes(data[4..8].try_into().unwrap()),
@@ -190,11 +212,23 @@ fn parse_durable_context(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option
         } else {
             None
         };
-        if parsed.is_some() {
-            found = parsed;
-        }
     });
     found
+}
+
+/// Collect a bitmask of which durable create-context tags appear in the chain.
+fn durable_context_tags(frame: &[u8], ctx_off: usize, ctx_len: usize) -> u8 {
+    let mut tags = 0u8;
+    walk_create_contexts(frame, ctx_off, ctx_len, |name, _data| {
+        tags |= match name {
+            n if n == durable::REQ_V1 => durable::tag::REQ_V1,
+            n if n == durable::RECONNECT_V1 => durable::tag::RECONNECT_V1,
+            n if n == durable::REQ_V2 => durable::tag::REQ_V2,
+            n if n == durable::RECONNECT_V2 => durable::tag::RECONNECT_V2,
+            _ => 0,
+        };
+    });
+    tags
 }
 
 /// Encode the `DH2Q` v2 durable-handle response data ([MS-SMB2] §2.2.14.2.11).
@@ -315,6 +349,7 @@ impl CreateReq {
             oplock_level: *frame.get(create_off::OPLOCK_LEVEL).unwrap_or(&0),
             lease: parse_lease_context(frame, ctx_off, ctx_len),
             durable: parse_durable_context(frame, ctx_off, ctx_len),
+            durable_ctx_tags: durable_context_tags(frame, ctx_off, ctx_len),
         })
     }
 }

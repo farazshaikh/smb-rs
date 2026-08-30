@@ -2034,7 +2034,7 @@ async fn create(
     // Durable reconnect ([MS-SMB2] §3.3.5.9.7/§3.3.5.9.12): reclaim a preserved
     // handle instead of opening fresh.
     if let Some((id, guid)) = durable_reconnect_ids(&req.durable) {
-        return durable_reconnect(conn, vfs, server, id, guid).await;
+        return durable_reconnect(conn, vfs, server, &req, id, guid).await;
     }
 
     // Reject a path that walks upward from a real component ([MS-SMB2]
@@ -2209,9 +2209,57 @@ async fn durable_reconnect(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     server: &Arc<ServerShared>,
+    req: &c::CreateReq,
     id: [u8; 16],
     guid: Option<[u8; 16]>,
 ) -> Result<Vec<u8>, Status> {
+    // A reconnect must not be combined with a conflicting durable context
+    // ([MS-SMB2] §3.3.5.9.7/§3.3.5.9.12). A v1 reconnect (DHnC) rejects any V2
+    // durable context with STATUS_INVALID_PARAMETER; a v2 reconnect (DH2C)
+    // rejects any other durable context with STATUS_OBJECT_NAME_NOT_FOUND.
+    let tags = req.durable_ctx_tags;
+    if guid.is_none() {
+        if tags & (c::durable::tag::REQ_V2 | c::durable::tag::RECONNECT_V2) != 0 {
+            return Err(Status::INVALID_PARAMETER);
+        }
+    } else if tags & (c::durable::tag::REQ_V1 | c::durable::tag::RECONNECT_V1 | c::durable::tag::REQ_V2) != 0 {
+        return Err(Status::OBJECT_NAME_NOT_FOUND);
+    }
+
+    // Peek the preserved record to validate the reconnect against the original
+    // open's lease and client before consuming it.
+    let peeked = server
+        .durables
+        .get(&id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(Status::OBJECT_NAME_NOT_FOUND)?;
+    if guid.is_some() && peeked.match_guid != guid {
+        return Err(Status::OBJECT_NAME_NOT_FOUND);
+    }
+    // Lease-bound reconnect validation ([MS-SMB2] §3.3.5.9.7): when the original
+    // open held a lease, the reconnect must target the same file name, come from
+    // the same client, present a lease context, and use the same lease key.
+    if let Some(orig_key) = peeked.lease_key {
+        if req.name.trim_start_matches(['\\', '/']) != peeked.path {
+            // Name mismatch: v1 -> INVALID_PARAMETER, v2 -> OBJECT_NAME_NOT_FOUND.
+            return Err(if guid.is_some() {
+                Status::OBJECT_NAME_NOT_FOUND
+            } else {
+                Status::INVALID_PARAMETER
+            });
+        }
+        if peeked.client_guid != conn.client_guid {
+            return Err(Status::OBJECT_NAME_NOT_FOUND);
+        }
+        match &req.lease {
+            None => return Err(Status::OBJECT_NAME_NOT_FOUND),
+            Some(l) if l.key != orig_key => return Err(Status::OBJECT_NAME_NOT_FOUND),
+            Some(_) => {}
+        }
+    }
+
     let record = server
         .durables
         .take(&id, guid, crate::state::now_ms())
@@ -2236,6 +2284,8 @@ async fn durable_reconnect(
         access: record.access,
         options: record.create_options,
         session_id: conn.session_id,
+        client_guid: record.client_guid,
+        lease_key: record.lease_key,
         persistent,
         timeout,
         deadline: std::time::Instant::now(),
@@ -2293,6 +2343,8 @@ fn grant_durable(
         access: req.desired_access,
         options: req.options,
         session_id: conn.session_id,
+        client_guid: conn.client_guid,
+        lease_key: req.lease.as_ref().map(|l| l.key),
         persistent,
         timeout,
         deadline: std::time::Instant::now(),
