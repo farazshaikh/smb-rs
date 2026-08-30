@@ -69,9 +69,6 @@
   <span class="updated" id="updated">loading…</span>
 </header>
 <main>
-  <div class="cards" id="cards"></div>
-  <div class="bar" id="bar"></div>
-  <div class="suites" id="suites"></div>
   <div class="controls">
     <select id="suiteFilter"><option value="">All suites</option></select>
     <select id="statusFilter">
@@ -84,6 +81,9 @@
     <select id="categoryFilter"><option value="">All categories</option></select>
     <input id="search" type="search" placeholder="Filter by test name…" />
   </div>
+  <div class="cards" id="cards"></div>
+  <div class="bar" id="bar"></div>
+  <div class="suites" id="suites"></div>
   <table>
     <thead><tr>
       <th data-k="name">Test</th>
@@ -114,22 +114,64 @@ const REPO = "https://github.com/farazshaikh/smb-rs";
 
 async function refresh() {
   try {
-    const [status, tests] = await Promise.all([
-      fetch("/api/status").then(r => r.json()),
-      fetch("/api/tests").then(r => r.json()),
-    ]);
-    TESTS = tests;
-    renderCards(status);
-    renderBar(status);
-    renderSuites(status.suites);
-    fillSuites(status.suites);
-    fillCategories(status.categories);
-    renderRows();
+    TESTS = await fetch("/api/tests").then(r => r.json());
+    render();
     document.getElementById("updated").textContent =
-      "updated " + new Date().toLocaleTimeString() + " · " + status.total + " tests";
+      "updated " + new Date().toLocaleTimeString() + " · " + TESTS.length + " tests";
   } catch (e) {
     document.getElementById("updated").textContent = "error contacting API";
   }
+}
+
+// Rows in scope for the summary panels: everything except the status filter, so
+// the cards/bar reflect the selected suite/category/search.
+function scopedRows() {
+  const suite = document.getElementById("suiteFilter").value;
+  const cat = document.getElementById("categoryFilter").value;
+  const q = document.getElementById("search").value.toLowerCase();
+  return TESTS.filter(t =>
+    (!suite || t.suite === suite) &&
+    (!cat || t.category === cat) &&
+    (!q || t.name.toLowerCase().includes(q)));
+}
+
+function summarize(rows) {
+  const s = { total: rows.length, passed: 0, failed: 0, skipped: 0, unknown: 0 };
+  for (const r of rows) {
+    if (r.status === "pass") s.passed++;
+    else if (r.status === "fail") s.failed++;
+    else if (r.status === "skip") s.skipped++;
+    else s.unknown++;
+  }
+  return s;
+}
+
+// Group any row set into [{key, passed, failed, skipped, unknown, total}].
+function groupBy(rows, field) {
+  const map = new Map();
+  for (const r of rows) {
+    const g = map.get(r[field]) || { key: r[field], passed: 0, failed: 0, skipped: 0, unknown: 0, total: 0 };
+    g[({ pass: "passed", fail: "failed", skip: "skipped" })[r.status] || "unknown"]++;
+    g.total++;
+    map.set(r[field], g);
+  }
+  return [...map.values()].sort((a, b) => a.key < b.key ? -1 : 1);
+}
+
+function render() {
+  const scoped = scopedRows();
+  renderCards(summarize(scoped));
+  renderBar(summarize(scoped));
+  renderSuites(groupBy(TESTS, "suite"));
+  fillSuites(groupBy(TESTS, "suite"));
+  fillCategories(groupBy(scopeBySuite(), "category"));
+  renderRows();
+}
+
+// Rows in the currently selected suite (or all), for the category dropdown.
+function scopeBySuite() {
+  const suite = document.getElementById("suiteFilter").value;
+  return suite ? TESTS.filter(t => t.suite === suite) : TESTS;
 }
 
 function renderCards(s) {
@@ -153,11 +195,13 @@ function renderBar(s) {
 }
 
 function renderSuites(suites) {
+  const selected = document.getElementById("suiteFilter").value;
   document.getElementById("suites").innerHTML = suites.map(c => {
     const t = c.total || 1;
-    const desc = SUITE_INFO[c.suite] || "";
-    return `<div class="suite">
-      <h3>${escapeHtml(c.suite)}</h3>
+    const desc = SUITE_INFO[c.key] || "";
+    const active = (!selected || selected === c.key) ? "" : ' style="opacity:.45"';
+    return `<div class="suite"${active}>
+      <h3>${escapeHtml(c.key)}</h3>
       <div class="desc">${escapeHtml(desc)}</div>
       <div class="mini">${c.passed}/${c.total} passed · ${c.failed} failed` +
       `${c.unknown ? " · " + c.unknown + " unknown" : ""}</div>
@@ -174,7 +218,7 @@ function fillSuites(suites) {
   const sel = document.getElementById("suiteFilter");
   const current = sel.value;
   sel.innerHTML = '<option value="">All suites</option>' +
-    suites.map(c => `<option value="${c.suite}">${c.suite} (${c.passed}/${c.total})</option>`).join("");
+    suites.map(c => `<option value="${c.key}">${c.key} (${c.passed}/${c.total})</option>`).join("");
   sel.value = current;
 }
 
@@ -182,7 +226,7 @@ function fillCategories(categories) {
   const sel = document.getElementById("categoryFilter");
   const current = sel.value;
   sel.innerHTML = '<option value="">All categories</option>' +
-    categories.map(c => `<option value="${c.category}">${c.category} ` +
+    categories.map(c => `<option value="${c.key}">${c.key} ` +
       `(${c.passed}/${c.total})</option>`).join("");
   sel.value = current;
 }
@@ -234,7 +278,7 @@ document.querySelectorAll("th[data-k]").forEach(th =>
     renderRows();
   }));
 ["suiteFilter", "statusFilter", "categoryFilter", "search"].forEach(id =>
-  document.getElementById(id).addEventListener("input", renderRows));
+  document.getElementById(id).addEventListener("input", render));
 
 refresh();
 setInterval(refresh, 5000);
