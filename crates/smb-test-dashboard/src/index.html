@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MS-SMB2 Test Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --pass: #2ea043; --fail: #f85149; --skip: #d29922;
+    --unknown: #6e7681;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; }
+  .updated { color: var(--muted); font-size: 12px; }
+  main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; min-width: 120px; }
+  .card .n { font-size: 26px; font-weight: 700; }
+  .card .l { color: var(--muted); font-size: 12px; text-transform: uppercase;
+    letter-spacing: .04em; }
+  .n.pass { color: var(--pass); } .n.fail { color: var(--fail); }
+  .n.skip { color: var(--skip); } .n.unknown { color: var(--unknown); }
+  .bar { height: 14px; border-radius: 7px; overflow: hidden; display: flex;
+    background: var(--border); margin-bottom: 24px; }
+  .bar > span { height: 100%; }
+  .bar .p { background: var(--pass); } .bar .f { background: var(--fail); }
+  .bar .s { background: var(--skip); } .bar .u { background: var(--unknown); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border);
+    font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; cursor: pointer; user-select: none; }
+  tr:last-child td { border-bottom: none; }
+  .pill { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700;
+    text-transform: uppercase; }
+  .pill.pass { background: rgba(46,160,67,.15); color: var(--pass); }
+  .pill.fail { background: rgba(248,81,73,.15); color: var(--fail); }
+  .pill.skip { background: rgba(210,153,34,.15); color: var(--skip); }
+  .pill.unknown { background: rgba(110,118,129,.2); color: var(--unknown); }
+  .suites { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .suite { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px; min-width: 200px; }
+  .suite h3 { margin: 0 0 8px; font-size: 13px; text-transform: capitalize; }
+  .suite .mini { color: var(--muted); font-size: 12px; }
+  .suite .sbar { height: 8px; border-radius: 4px; overflow: hidden; display: flex;
+    background: var(--border); margin-top: 8px; }
+  .suite .sbar > span { height: 100%; }
+  .controls { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  select, input { background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  .cat-head { margin: 26px 0 8px; font-size: 14px; color: var(--muted); }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MS-SMB2 Test Dashboard</h1>
+  <span class="updated" id="updated">loading…</span>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+  <div class="bar" id="bar"></div>
+  <div class="suites" id="suites"></div>
+  <div class="controls">
+    <select id="suiteFilter"><option value="">All suites</option></select>
+    <select id="statusFilter">
+      <option value="">All statuses</option>
+      <option value="pass">Passed</option>
+      <option value="fail">Failed</option>
+      <option value="skip">Skipped</option>
+      <option value="unknown">Unknown</option>
+    </select>
+    <select id="categoryFilter"><option value="">All categories</option></select>
+    <input id="search" type="search" placeholder="Filter by test name…" />
+  </div>
+  <table>
+    <thead><tr>
+      <th data-k="name">Test</th>
+      <th data-k="suite">Suite</th>
+      <th data-k="category">Category</th>
+      <th data-k="status">Status</th>
+      <th data-k="duration_ms">ms</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>No results yet. Run the suite to populate the CSV.</div>
+</main>
+<script>
+let TESTS = [];
+let sortKey = "status", sortDir = 1;
+
+async function refresh() {
+  try {
+    const [status, tests] = await Promise.all([
+      fetch("/api/status").then(r => r.json()),
+      fetch("/api/tests").then(r => r.json()),
+    ]);
+    TESTS = tests;
+    renderCards(status);
+    renderBar(status);
+    renderSuites(status.suites);
+    fillSuites(status.suites);
+    fillCategories(status.categories);
+    renderRows();
+    document.getElementById("updated").textContent =
+      "updated " + new Date().toLocaleTimeString() + " · " + status.total + " tests";
+  } catch (e) {
+    document.getElementById("updated").textContent = "error contacting API";
+  }
+}
+
+function renderCards(s) {
+  const rate = s.total ? ((s.passed / s.total) * 100).toFixed(1) : "0.0";
+  document.getElementById("cards").innerHTML = `
+    <div class="card"><div class="n">${s.total}</div><div class="l">Total</div></div>
+    <div class="card"><div class="n pass">${s.passed}</div><div class="l">Passed</div></div>
+    <div class="card"><div class="n fail">${s.failed}</div><div class="l">Failed</div></div>
+    <div class="card"><div class="n skip">${s.skipped}</div><div class="l">Skipped</div></div>
+    <div class="card"><div class="n unknown">${s.unknown}</div><div class="l">Unknown</div></div>
+    <div class="card"><div class="n">${rate}%</div><div class="l">Pass rate</div></div>`;
+}
+
+function renderBar(s) {
+  const t = s.total || 1;
+  document.getElementById("bar").innerHTML =
+    `<span class="p" style="width:${(s.passed/t)*100}%"></span>` +
+    `<span class="f" style="width:${(s.failed/t)*100}%"></span>` +
+    `<span class="s" style="width:${(s.skipped/t)*100}%"></span>` +
+    `<span class="u" style="width:${(s.unknown/t)*100}%"></span>`;
+}
+
+function renderSuites(suites) {
+  document.getElementById("suites").innerHTML = suites.map(c => {
+    const t = c.total || 1;
+    return `<div class="suite">
+      <h3>${escapeHtml(c.suite)}</h3>
+      <div class="mini">${c.passed}/${c.total} passed · ${c.failed} failed` +
+      `${c.unknown ? " · " + c.unknown + " unknown" : ""}</div>
+      <div class="sbar">
+        <span class="p" style="width:${(c.passed/t)*100}%;background:var(--pass)"></span>
+        <span class="f" style="width:${(c.failed/t)*100}%;background:var(--fail)"></span>
+        <span class="s" style="width:${(c.skipped/t)*100}%;background:var(--skip)"></span>
+        <span class="u" style="width:${(c.unknown/t)*100}%;background:var(--unknown)"></span>
+      </div></div>`;
+  }).join("");
+}
+
+function fillSuites(suites) {
+  const sel = document.getElementById("suiteFilter");
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All suites</option>' +
+    suites.map(c => `<option value="${c.suite}">${c.suite} (${c.passed}/${c.total})</option>`).join("");
+  sel.value = current;
+}
+
+function fillCategories(categories) {
+  const sel = document.getElementById("categoryFilter");
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All categories</option>' +
+    categories.map(c => `<option value="${c.category}">${c.category} ` +
+      `(${c.passed}/${c.total})</option>`).join("");
+  sel.value = current;
+}
+
+function renderRows() {
+  const suite = document.getElementById("suiteFilter").value;
+  const status = document.getElementById("statusFilter").value;
+  const cat = document.getElementById("categoryFilter").value;
+  const q = document.getElementById("search").value.toLowerCase();
+  let rows = TESTS.filter(t =>
+    (!suite || t.suite === suite) &&
+    (!status || t.status === status) &&
+    (!cat || t.category === cat) &&
+    (!q || t.name.toLowerCase().includes(q)));
+
+  rows.sort((a, b) => {
+    const av = a[sortKey], bv = b[sortKey];
+    return (av < bv ? -1 : av > bv ? 1 : 0) * sortDir;
+  });
+
+  document.getElementById("empty").hidden = rows.length > 0;
+  document.getElementById("rows").innerHTML = rows.map(t => `
+    <tr>
+      <td>${escapeHtml(t.name)}</td>
+      <td>${escapeHtml(t.suite)}</td>
+      <td>${escapeHtml(t.category)}</td>
+      <td><span class="pill ${t.status}">${t.status}</span></td>
+      <td>${t.duration_ms}</td>
+    </tr>`).join("");
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+document.querySelectorAll("th[data-k]").forEach(th =>
+  th.addEventListener("click", () => {
+    const k = th.dataset.k;
+    sortDir = (sortKey === k) ? -sortDir : 1;
+    sortKey = k;
+    renderRows();
+  }));
+["suiteFilter", "statusFilter", "categoryFilter", "search"].forEach(id =>
+  document.getElementById(id).addEventListener("input", renderRows));
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

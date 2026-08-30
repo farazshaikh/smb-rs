@@ -28,6 +28,7 @@ members = [
     "crates/smb-server",
     "crates/smb-handle-store",
     "crates/smb-testsuite",
+    "crates/smb-test-dashboard",
 ]
 
 [workspace.package]

@@ -2,3 +2,4 @@
 server.log
 share/
 *.log
+test_status.csv

@@ -1507,6 +1507,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "smb-test-dashboard"
+version = "0.2.0"
+
+[[package]]
 name = "smb-testsuite"
 version = "0.2.0"
 dependencies = [
