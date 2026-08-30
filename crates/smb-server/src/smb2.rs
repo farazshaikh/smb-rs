@@ -2159,7 +2159,17 @@ async fn create(
     counter!("smb_creates_total").increment(1);
 
     // Grant a durable handle when the client requested one.
-    let durable_grant = grant_durable(conn, &req, fid_bytes, &rel, is_dir);
+    // rustsmb serves no continuous-availability shares, so persistence is
+    // never granted; a lease present must include handle caching for durable.
+    let durable_grant = grant_durable(
+        conn,
+        &req,
+        fid_bytes,
+        &rel,
+        is_dir,
+        lease_grant.as_ref().map(|l| l.state),
+        false,
+    );
 
     // Assemble create-context responses (lease grant, durable-handle grant).
     let mut ctx_entries: Vec<(&[u8], Vec<u8>)> = Vec::new();
@@ -2254,13 +2264,25 @@ async fn durable_reconnect(
 
 /// Record a durable-handle grant on the connection and return the response
 /// create-context to echo. Directories and one-shot deletes are ineligible.
+/// A durable open also requires a batch oplock or a handle-caching lease, so
+/// `lease_state` (the granted lease bits, if any) gates the grant; persistence
+/// is only granted on a continuous-availability share (`is_ca`).
 fn grant_durable(
     conn: &mut Smb2Conn,
     req: &c::CreateReq,
     fid: [u8; 16],
     rel: &str,
     is_dir: bool,
+    lease_state: Option<u32>,
+    is_ca: bool,
 ) -> Option<(&'static [u8], Vec<u8>)> {
+    // A durable open requires a batch oplock or a handle-caching lease
+    // ([MS-SMB2] §3.3.5.9.6/§3.3.5.9.10).
+    match lease_state {
+        Some(state) if state & c::lease::HANDLE_CACHING != 0 => {}
+        None if req.oplock_level == c::oplock::BATCH => {}
+        _ => return None,
+    }
     /// Fallback handle timeout when the client requests 0 (60 s).
     const DEFAULT_TIMEOUT_MS: u32 = 60_000;
     let make = |create_guid: [u8; 16], persistent: bool, timeout: u32| crate::state::DurableEntry {
@@ -2277,7 +2299,9 @@ fn grant_durable(
     };
     match req.durable {
         Some(c::DurableReq::RequestV2 { timeout, flags, create_guid }) => {
-            let persistent = flags & c::durable::FLAG_PERSISTENT != 0;
+            // Persistence requires a CA share ([MS-SMB2] §3.3.5.9.11); otherwise
+            // the persistent bit is ignored and a plain durable handle granted.
+            let persistent = is_ca && flags & c::durable::FLAG_PERSISTENT != 0;
             let to = if timeout == 0 { DEFAULT_TIMEOUT_MS } else { timeout };
             conn.durable.insert(fid, make(create_guid, persistent, to));
             counter!("smb_durables_granted_total").increment(1);
@@ -3674,6 +3698,8 @@ mod durable_tests {
             let (tx, _rx) = mpsc::channel(8);
             let mut conn = Smb2Conn::new([0u8; 8], tx);
             conn.session_id = 1;
+            let mut frame = frame;
+            frame[67] = c::oplock::BATCH; // durable requires a batch oplock
             let resp = create(&mut conn, vfs.clone(), &server, false, &frame).await.unwrap();
             assert_ne!(u32::from_le_bytes(resp[80..84].try_into().unwrap()), 0, "durable resp ctx");
             assert_eq!(conn.durable.len(), 1, "durable handle recorded");
