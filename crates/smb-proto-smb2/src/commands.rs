@@ -1863,6 +1863,42 @@ mod oplock_codec_tests {
 }
 
 #[cfg(test)]
+mod symlink_error_tests {
+    use super::*;
+
+    #[test]
+    fn symlink_error_response_matches_spec_layout() {
+        // Relative symlink "t" with an unparsed tail of 8 bytes (4 UTF-16 units).
+        let body = build_symlink_error_response("t", "t", 8, true);
+        assert_eq!(u16::from_le_bytes([body[0], body[1]]), error::RESPONSE_STRUCTURE_SIZE);
+        assert_eq!(body[2], 0, "ErrorContextCount");
+        let byte_count = u32::from_le_bytes(body[4..8].try_into().unwrap()) as usize;
+        let data = &body[8..];
+        assert_eq!(byte_count, data.len());
+
+        let name_bytes = 2u16; // "t" as one UTF-16 unit
+        assert_eq!(u32::from_le_bytes(data[0..4].try_into().unwrap()),
+            error::SYMLINK_FIXED_LEN + (2 * name_bytes) as u32, "SymLinkLength");
+        assert_eq!(u32::from_le_bytes(data[4..8].try_into().unwrap()), error::SYMLINK_ERROR_TAG);
+        assert_eq!(u32::from_le_bytes(data[8..12].try_into().unwrap()), error::IO_REPARSE_TAG_SYMLINK);
+        assert_eq!(u16::from_le_bytes(data[12..14].try_into().unwrap()),
+            error::REPARSE_HEADER_LEN + 2 * name_bytes, "ReparseDataLength");
+        assert_eq!(u16::from_le_bytes(data[14..16].try_into().unwrap()), 8, "UnparsedPathLength");
+        assert_eq!(u16::from_le_bytes(data[16..18].try_into().unwrap()), 0, "SubstituteNameOffset");
+        assert_eq!(u16::from_le_bytes(data[18..20].try_into().unwrap()), name_bytes, "SubstituteNameLength");
+        assert_eq!(u16::from_le_bytes(data[20..22].try_into().unwrap()), name_bytes, "PrintNameOffset");
+        assert_eq!(u16::from_le_bytes(data[22..24].try_into().unwrap()), name_bytes, "PrintNameLength");
+        assert_eq!(u32::from_le_bytes(data[24..28].try_into().unwrap()), error::SYMLINK_FLAG_RELATIVE);
+    }
+
+    #[test]
+    fn absolute_symlink_clears_relative_flag() {
+        let body = build_symlink_error_response("/abs", "/abs", 0, false);
+        assert_eq!(u32::from_le_bytes(body[8..][24..28].try_into().unwrap()), 0);
+    }
+}
+
+#[cfg(test)]
 mod lease_codec_tests {
     use super::*;
 
