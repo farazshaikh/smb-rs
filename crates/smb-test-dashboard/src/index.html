@@ -43,6 +43,9 @@
   .pill.fail { background: rgba(248,81,73,.15); color: var(--fail); }
   .pill.skip { background: rgba(210,153,34,.15); color: var(--skip); }
   .pill.unknown { background: rgba(110,118,129,.2); color: var(--unknown); }
+  .commit { color: #58a6ff; text-decoration: none; font-family: ui-monospace,
+    SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .commit:hover { text-decoration: underline; }
   .suites { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
   .suite { background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px; flex: 1 1 300px; max-width: 360px; }
@@ -88,6 +91,7 @@
       <th data-k="category">Category</th>
       <th data-k="status">Status</th>
       <th data-k="duration_ms">ms</th>
+      <th data-k="commit">Passed @</th>
     </tr></thead>
     <tbody id="rows"></tbody>
   </table>
@@ -106,6 +110,7 @@ const SUITE_INFO = {
   system: "End-to-end interop tests: the Python smbprotocol client talks to a " +
     "live rustsmb server via smb-testrunner to validate real-world behavior.",
 };
+const REPO = "https://github.com/farazshaikh/smb-rs";
 
 async function refresh() {
   try {
@@ -206,7 +211,14 @@ function renderRows() {
       <td>${escapeHtml(t.category)}</td>
       <td><span class="pill ${t.status}">${t.status}</span></td>
       <td>${t.duration_ms}</td>
+      <td>${commitCell(t.commit)}</td>
     </tr>`).join("");
+}
+
+function commitCell(commit) {
+  if (!commit) return "";
+  return `<a class="commit" href="${REPO}/commit/${encodeURIComponent(commit)}" ` +
+    `target="_blank" rel="noopener">${escapeHtml(commit)}</a>`;
 }
 
 function escapeHtml(s) {

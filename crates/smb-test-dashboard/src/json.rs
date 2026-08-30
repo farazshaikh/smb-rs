@@ -53,13 +53,14 @@ pub fn tests_body(rows: &[TestRow]) -> String {
 fn row_to_json(row: &TestRow) -> String {
     format!(
         "{{\"suite\":{},\"name\":{},\"category\":{},\"status\":{},\
-         \"duration_ms\":{},\"timestamp\":{}}}",
+         \"duration_ms\":{},\"timestamp\":{},\"commit\":{}}}",
         quote(&row.suite),
         quote(&row.name),
         quote(&row.category),
         quote(&row.status),
         row.duration_ms,
-        quote(&row.timestamp)
+        quote(&row.timestamp),
+        quote(&row.commit)
     )
 }
 

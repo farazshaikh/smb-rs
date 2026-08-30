@@ -10,7 +10,9 @@ Output schema: suite,name,category,status,duration_ms,timestamp
 """
 import argparse
 import csv
+import os
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
@@ -19,6 +21,14 @@ NS = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def git_commit():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    except Exception:
+        return ""
 
 
 def protocol_rows(path):
@@ -135,29 +145,53 @@ def system_rows(path):
     return rows
 
 
+def load_base(path):
+    """Load an existing CSV keyed by (suite, name) so prior results survive an
+    incremental sweep that only re-ran a subset of tests."""
+    base = {}
+    if not path or not os.path.exists(path):
+        return base
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            r["duration_ms"] = int(r.get("duration_ms") or 0)
+            r.setdefault("commit", "")
+            base[(r["suite"], r["name"])] = r
+    return base
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--base", help="existing CSV to preserve (incremental sweep)")
     ap.add_argument("--trx")
     ap.add_argument("--protocol-list")
     ap.add_argument("--cargo")
     ap.add_argument("--conformance")
+    ap.add_argument("--commit", default=git_commit(),
+                    help="changeset to stamp on newly passing tests (default: git HEAD)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    rows = []
-    if args.trx:
-        rows += protocol_rows(args.trx)
-    elif args.protocol_list:
-        rows += protocol_list_rows(args.protocol_list)
-    if args.cargo:
-        rows += unit_rows(args.cargo)
-    if args.conformance:
-        rows += system_rows(args.conformance)
+    # Start from prior results, seed any unseen protocol tests as unknown, then
+    # overlay freshly produced outcomes (last write wins).
+    base = load_base(args.base)
+    merged = dict(base)
+    if args.protocol_list:
+        for r in protocol_list_rows(args.protocol_list):
+            merged.setdefault((r["suite"], r["name"]), r)
+    for r in (protocol_rows(args.trx) if args.trx else []):
+        merged[(r["suite"], r["name"])] = r
+    for r in (unit_rows(args.cargo) if args.cargo else []):
+        merged[(r["suite"], r["name"])] = r
+    for r in (system_rows(args.conformance) if args.conformance else []):
+        merged[(r["suite"], r["name"])] = r
 
-    rows.sort(key=lambda r: (r["suite"], r["category"], r["name"]))
+    stamp_commits(merged, base, args.commit)
+
+    rows = sorted(merged.values(), key=lambda r: (r["suite"], r["category"], r["name"]))
     with open(args.out, "w", newline="") as f:
         w = csv.DictWriter(
-            f, fieldnames=["suite", "name", "category", "status", "duration_ms", "timestamp"])
+            f, fieldnames=["suite", "name", "category", "status",
+                           "duration_ms", "timestamp", "commit"])
         w.writeheader()
         w.writerows(rows)
 
@@ -168,6 +202,20 @@ def main():
     for suite, statuses in sorted(by_suite.items()):
         p = statuses.count("pass")
         print(f"  {suite:9} {p}/{len(statuses)} passed")
+
+
+def stamp_commits(merged, base, commit):
+    """Record the changeset each test passed at: keep a prior pass's commit,
+    stamp a newly passing test with the current changeset, clear non-passes."""
+    for key, r in merged.items():
+        if r.get("status") != "pass":
+            r["commit"] = ""
+            continue
+        prev = base.get(key)
+        if prev and prev.get("status") == "pass" and prev.get("commit"):
+            r["commit"] = prev["commit"]
+        elif not r.get("commit"):
+            r["commit"] = commit
 
 
 if __name__ == "__main__":
