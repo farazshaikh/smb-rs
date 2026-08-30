@@ -118,12 +118,11 @@ impl LockManager {
         }
     }
 
-    /// A new lock on `[off, off+len)` conflicts with `existing` when they are
-    /// held by different opens, overlap, and either side is exclusive.
-    fn conflicts(existing: &HeldLock, off: u64, len: u64, excl: bool, owner: LockOwner) -> bool {
-        if existing.owner == owner {
-            return false;
-        }
+    /// A new lock on `[off, off+len)` conflicts with `existing` when the ranges
+    /// overlap and either lock is exclusive. An exclusive lock conflicts even
+    /// with the same open's overlapping lock ([MS-FSA] §2.1.5.9); two shared
+    /// locks never conflict.
+    fn conflicts(existing: &HeldLock, off: u64, len: u64, excl: bool) -> bool {
         let overlap = off < existing.offset.saturating_add(existing.length)
             && existing.offset < off.saturating_add(len);
         overlap && (excl || existing.exclusive)
@@ -136,7 +135,7 @@ impl LockManager {
         let list = held.entry(path.to_string()).or_default();
         let clash = ranges
             .iter()
-            .any(|&(off, len, excl)| list.iter().any(|h| Self::conflicts(h, off, len, excl, owner)));
+            .any(|&(off, len, excl)| list.iter().any(|h| Self::conflicts(h, off, len, excl)));
         if clash {
             return false;
         }
@@ -784,10 +783,13 @@ mod lock_tests {
     }
 
     #[test]
-    fn same_owner_does_not_self_conflict() {
+    fn exclusive_conflicts_even_for_same_owner() {
         let m = LockManager::new();
         assert!(m.try_acquire("f", &[(0, 10, true)], owner(1)));
-        assert!(m.try_acquire("f", &[(0, 10, true)], owner(1)), "same owner re-lock ok");
+        // An exclusive lock conflicts with an overlapping lock held by the same
+        // open ([MS-FSA] §2.1.5.9); a non-overlapping range still succeeds.
+        assert!(!m.try_acquire("f", &[(0, 10, true)], owner(1)), "overlapping exclusive conflicts");
+        assert!(m.try_acquire("f", &[(10, 10, true)], owner(1)), "adjacent range ok");
     }
 
     #[test]
