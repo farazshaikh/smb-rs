@@ -633,6 +633,13 @@ async fn process_single(
 
     let (status, mut body): (Status, Vec<u8>) = match hdr.command {
         ss::cmd::NEGOTIATE => {
+            // A NEGOTIATE received after the connection already negotiated a
+            // dialect is invalid: the server MUST disconnect and not reply
+            // ([MS-SMB2] §3.3.5.4).
+            if conn.dialect.is_some() {
+                conn.disconnect = true;
+                return None;
+            }
             // Clients probing for SMB2 support send either a header-only
             // NEGOTIATE or one carrying Status = STATUS_INVALID_PARAMETER
             // ([MS-SMB2] §3.3.5.3). Answer both with the wildcard-dialect
