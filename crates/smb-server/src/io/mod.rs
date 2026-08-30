@@ -26,11 +26,10 @@ macro_rules! io_states {
 }
 
 /// The command table: the single source of truth mapping an SMB2 command code to
-/// its request type and handler. Generates `SmbRequest`, `SmbRequest::command`,
-/// `SmbRequest::parse`, and the static `dispatch` function so a new command is
-/// one line and cannot desync across those sites.
-macro_rules! smb_commands {
-    ( $( $variant:ident = $code:path => $req:ty , $handler:ty ; )* ) => {
+/// its request type. Generates `SmbRequest`, `SmbRequest::command`, and
+/// `SmbRequest::parse`, so a decodable command is one line and cannot desync.
+macro_rules! smb_request_table {
+    ( $( $variant:ident = $code:path => $req:ty ; )* ) => {
         /// Sum type over every client request the server decodes (generated).
         #[derive(Debug)]
         pub enum SmbRequest { $( $variant($req), )* }
@@ -49,18 +48,29 @@ macro_rules! smb_commands {
                 }
             }
         }
+    };
+}
 
-        /// Static, monomorphic dispatch to the owning command handler (generated).
+/// Static, monomorphic dispatch to command handlers. Generated separately from
+/// the request table so handlers migrate onto the typestate one at a time; a
+/// command that is decodable but not yet handled falls through to the legacy
+/// dispatcher (this `dispatch` is not the live entry point until Phase 6).
+macro_rules! smb_dispatch {
+    ( $( $variant:ident => $handler:ty ; )* ) => {
+        /// Serve a request by moving it into its owning handler (generated).
         pub async fn dispatch(ctx: IoContext<Accepted, Solicited>) -> Outcome {
             let (ctx, req) = ctx.split();
             match req {
                 $( SmbRequest::$variant(r) => <$handler as Command>::serve(ctx, r).await, )*
+                #[allow(unreachable_patterns)]
+                _ => Outcome::Silent,
             }
         }
     };
 }
 
 mod context;
+mod decode;
 mod origin;
 mod request;
 mod state;
