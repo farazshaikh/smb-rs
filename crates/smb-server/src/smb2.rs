@@ -990,8 +990,35 @@ async fn process_single(
                     );
                     (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
                 }
-                // Resiliency handshake carries no output data.
+                // Resiliency handshake carries no output data. Preserve the
+                // handle like a durable open ([MS-SMB2] §3.3.5.15.9) so a later
+                // SMB2_CREATE_DURABLE_HANDLE_RECONNECT can reclaim it.
                 c::fsctl::LMR_REQUEST_RESILIENCY => {
+                    if let Some(open) = conn.handles.get(&req.file_id.0) {
+                        let timeout = req
+                            .input
+                            .get(0..4)
+                            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                            .filter(|t| *t != 0)
+                            .unwrap_or(60_000);
+                        let access = if open.can_write { 0x001F_01FF } else { 0x0012_0089 };
+                        let options = if open.is_dir { 0x1 } else { 0x40 };
+                        let entry = crate::state::DurableEntry {
+                            persistent_id: req.file_id.0,
+                            create_guid: [0u8; 16],
+                            rel: open.rel.clone(),
+                            is_dir: open.is_dir,
+                            access,
+                            options,
+                            session_id: conn.session_id,
+                            client_guid: conn.client_guid,
+                            lease_key: None,
+                            persistent: false,
+                            timeout,
+                            deadline: std::time::Instant::now(),
+                        };
+                        conn.durable.insert(req.file_id.0, entry);
+                    }
                     (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
                 }
                 // FSCTL_PIPE_TRANSACT (0x0011C017): the DCERPC PDU arrives
