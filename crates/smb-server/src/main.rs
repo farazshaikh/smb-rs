@@ -3,6 +3,7 @@
 mod auth;
 pub mod cmds;
 pub mod dispatch;
+pub mod io;
 pub mod security;
 pub mod smb2;
 pub mod srvsvc;
