@@ -45,9 +45,11 @@
   .pill.unknown { background: rgba(110,118,129,.2); color: var(--unknown); }
   .suites { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
   .suite { background: var(--panel); border: 1px solid var(--border);
-    border-radius: 8px; padding: 12px 16px; min-width: 200px; }
-  .suite h3 { margin: 0 0 8px; font-size: 13px; text-transform: capitalize; }
-  .suite .mini { color: var(--muted); font-size: 12px; }
+    border-radius: 8px; padding: 14px 16px; flex: 1 1 300px; max-width: 360px; }
+  .suite h3 { margin: 0 0 6px; font-size: 14px; text-transform: capitalize; }
+  .suite .desc { color: var(--muted); font-size: 12px; line-height: 1.45;
+    margin-bottom: 10px; }
+  .suite .mini { color: var(--text); font-size: 12px; }
   .suite .sbar { height: 8px; border-radius: 4px; overflow: hidden; display: flex;
     background: var(--border); margin-top: 8px; }
   .suite .sbar > span { height: 100%; }
@@ -95,6 +97,16 @@
 let TESTS = [];
 let sortKey = "status", sortDir = 1;
 
+const SUITE_INFO = {
+  protocol: "Microsoft's official MS-SMB2 Server Test Suite (Windows Protocol " +
+    "Test Suites). The .NET SMB2 SDK drives rustsmb over the wire and asserts " +
+    "conformance to the [MS-SMB2] specification.",
+  unit: "In-process Rust unit & integration tests (cargo test --workspace) — " +
+    "codecs, wire (de)serialization, state machines and per-crate logic.",
+  system: "End-to-end interop tests: the Python smbprotocol client talks to a " +
+    "live rustsmb server via smb-testrunner to validate real-world behavior.",
+};
+
 async function refresh() {
   try {
     const [status, tests] = await Promise.all([
@@ -138,8 +150,10 @@ function renderBar(s) {
 function renderSuites(suites) {
   document.getElementById("suites").innerHTML = suites.map(c => {
     const t = c.total || 1;
+    const desc = SUITE_INFO[c.suite] || "";
     return `<div class="suite">
       <h3>${escapeHtml(c.suite)}</h3>
+      <div class="desc">${escapeHtml(desc)}</div>
       <div class="mini">${c.passed}/${c.total} passed · ${c.failed} failed` +
       `${c.unknown ? " · " + c.unknown + " unknown" : ""}</div>
       <div class="sbar">

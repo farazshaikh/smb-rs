@@ -58,6 +58,30 @@ def _hms_ms(text):
         return 0
 
 
+def _protocol_category(name):
+    stem = name[4:] if name.startswith("BVT_") else name
+    return stem.split("_", 1)[0] or "Unknown"
+
+
+def protocol_list_rows(path):
+    """Seed every protocol test as `unknown` from a `--list-tests` dump."""
+    rows, ts = [], now_iso()
+    with open(path, errors="replace") as f:
+        for line in f:
+            name = line.strip()
+            if not name or " " in name or not name[0].isalpha():
+                continue
+            rows.append({
+                "suite": "protocol",
+                "name": name,
+                "category": _protocol_category(name),
+                "status": "unknown",
+                "duration_ms": 0,
+                "timestamp": ts,
+            })
+    return rows
+
+
 # `test <path>::<name> ... ok|FAILED|ignored`
 CARGO_RE = re.compile(r"^test\s+(\S+)\s+\.\.\.\s+(ok|FAILED|ignored)")
 CARGO_CRATE_RE = re.compile(r"Running\s+\S+\s+.*deps/([A-Za-z0-9_]+)-[0-9a-f]+")
@@ -114,6 +138,7 @@ def system_rows(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trx")
+    ap.add_argument("--protocol-list")
     ap.add_argument("--cargo")
     ap.add_argument("--conformance")
     ap.add_argument("--out", required=True)
@@ -122,6 +147,8 @@ def main():
     rows = []
     if args.trx:
         rows += protocol_rows(args.trx)
+    elif args.protocol_list:
+        rows += protocol_list_rows(args.protocol_list)
     if args.cargo:
         rows += unit_rows(args.cargo)
     if args.conformance:
