@@ -1309,7 +1309,25 @@ async fn process_single(
             }
             return None;
         }
-        ss::cmd::ECHO => (Status::SUCCESS, c::build_echo_resp()),
+        ss::cmd::ECHO => {
+            // Route ECHO through the typestate pipeline (typestate_plan.md
+            // Phase 2). Legacy framing still wraps the (status, body) below.
+            let reply = crate::io::ReplyHeader {
+                command: hdr.command,
+                message_id: hdr.message_id,
+                session_id: conn.session_id,
+                tree_id: hdr.tree_id,
+                credits: 0,
+                seal: crate::io::SealIntent::default(),
+            };
+            match crate::io::SmbRequest::parse(hdr.command, buf) {
+                Ok(req) => match crate::io::dispatch(crate::io::IoContext::accept(reply, req)).await {
+                    crate::io::Outcome::Final(r) => (r.status, r.body),
+                    _ => (Status::INVALID_PARAMETER, Vec::new()),
+                },
+                Err(status) => (status, Vec::new()),
+            }
+        }
         ss::cmd::OPLOCK_BREAK => {
             // Command 18 carries both oplock (StructureSize 24) and lease
             // (StructureSize 36) break acknowledgements; dispatch on the size.
