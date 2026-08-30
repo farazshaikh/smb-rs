@@ -431,6 +431,40 @@ impl LeaseTable {
         Some((h.key, old, h.epoch, h.outbound.clone(), h.crypto.clone()))
     }
 
+    /// Break the lease on `path` by clearing the `clear` caching bits, unless
+    /// it is held by `owner` (the caller's own open) or the caller shares the
+    /// lease key `req_key` (a co-holder of the same lease). Returns the
+    /// notification fields `(key, old_state, new_state, epoch, outbound,
+    /// crypto)` when a break is actually needed ([MS-SMB2] §3.3.4.7).
+    pub fn break_conflict(
+        &self,
+        path: &str,
+        owner: LockOwner,
+        req_key: Option<[u8; 16]>,
+        clear: u32,
+    ) -> Option<(
+        [u8; 16],
+        u32,
+        u32,
+        u16,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        BreakCrypto,
+    )> {
+        let mut held = self.held.lock().unwrap();
+        let h = held.get_mut(path)?;
+        if (h.session_id, h.file_id) == owner || req_key == Some(h.key) {
+            return None;
+        }
+        let new_state = h.state & !clear;
+        if new_state == h.state {
+            return None;
+        }
+        let old = h.state;
+        h.state = new_state;
+        h.epoch = h.epoch.wrapping_add(1);
+        Some((h.key, old, new_state, h.epoch, h.outbound.clone(), h.crypto.clone()))
+    }
+
     /// Record the state a holder settled on after acknowledging a break.
     pub fn set_state(&self, key: [u8; 16], state: u32) {
         let mut held = self.held.lock().unwrap();

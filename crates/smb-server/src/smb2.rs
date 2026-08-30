@@ -73,6 +73,9 @@ pub struct Smb2Conn {
     pub trees: HashMap<u32, String>,
     /// Open handles keyed by 16-byte SMB2 FileId.
     pub handles: HashMap<[u8; 16], Box<smb_vfs::OpenFile>>,
+    /// Lease key each open handle joined, so a write/open from a co-holder of
+    /// the same lease does not break it ([MS-SMB2] §3.3.4.7).
+    pub lease_keys: HashMap<[u8; 16], [u8; 16]>,
     /// Virtual named pipes opened on IPC$ (srvsvc, …) keyed by file id.
     pub pipes: HashMap<[u8; 16], crate::srvsvc::Pipe>,
     /// Directory-enumeration continuation queues keyed by directory FileId.
@@ -144,6 +147,7 @@ impl Smb2Conn {
             ntlm_targ: None,
             trees: HashMap::new(),
             handles: HashMap::new(),
+            lease_keys: HashMap::new(),
             pipes: HashMap::new(),
             searches: HashMap::new(),
             outbound,
@@ -2095,6 +2099,17 @@ async fn create(
     // carries the wildcard FileId resolves to it ([MS-SMB2] §3.3.5.2.7.2).
     conn.chain_fid = Some(fid_bytes);
 
+    // A non-lease open conflicting with another holder's lease breaks its
+    // write caching (RWH -> RH) ([MS-SMB2] §3.3.4.7); lease-context opens are
+    // handled by arbitrate_lease below.
+    if req.lease.is_none() && !is_dir {
+        if let Some((k, old, new, ep, out, crypto)) =
+            server.leases.break_conflict(&path, (conn.session_id, fid_bytes), None, c::lease::WRITE_CACHING)
+        {
+            send_lease_break(&out, &crypto, k, old, new, ep);
+        }
+    }
+
     // Oplock arbitration ([MS-SMB2] §2.2.23): grant an exclusive oplock only
     // to the sole opener of a file. A contending open first breaks the current
     // holder to NONE, then gets no oplock itself.
@@ -2110,6 +2125,7 @@ async fn create(
     } else if req.oplock_level == c::oplock::LEASE {
         if let Some(lr) = req.lease {
             lease_grant = Some(arbitrate_lease(server, conn, &path, fid_bytes, &lr, req_signed));
+            conn.lease_keys.insert(fid_bytes, lr.key);
             c::oplock::LEASE
         } else {
             c::oplock::NONE
@@ -2378,7 +2394,7 @@ fn send_lease_break(
     epoch: u16,
 ) {
     let body = c::build_lease_break(key, current, new, epoch, c::lease::BREAK_FLAG_ACK_REQUIRED);
-    let frame = finalize_break(crypto, build_break_frame(crypto.session_id, &body));
+    let frame = finalize_break(crypto, build_break_frame(&body));
     if outbound.try_send(frame).is_ok() {
         counter!("smb_lease_breaks_total").increment(1);
     }
@@ -2403,7 +2419,7 @@ fn break_crypto(conn: &Smb2Conn, signed: bool) -> crate::state::BreakCrypto {
 /// ([MS-SMB2] §2.2.23.1) telling `holder` to break down to `level`.
 fn send_oplock_break(holder: &crate::state::OplockHolder, level: u8) {
     let body = c::build_oplock_break(c::FileId(holder.file_id), level);
-    let frame = finalize_break(&holder.crypto, build_break_frame(holder.crypto.session_id, &body));
+    let frame = finalize_break(&holder.crypto, build_break_frame(&body));
     if holder.outbound.try_send(frame).is_ok() {
         counter!("smb_oplock_breaks_total").increment(1);
     }
@@ -2411,7 +2427,7 @@ fn send_oplock_break(holder: &crate::state::OplockHolder, level: u8) {
 
 /// Build a server-initiated OPLOCK_BREAK frame (unsolicited: MessageId all-ones,
 /// sync header). Returned unsigned and unsealed.
-fn build_break_frame(session_id: u64, body: &[u8]) -> Vec<u8> {
+fn build_break_frame(body: &[u8]) -> Vec<u8> {
     let mut f = Vec::with_capacity(64 + body.len());
     f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
     f.extend_from_slice(&64u16.to_le_bytes()); // StructureSize
@@ -2424,19 +2440,17 @@ fn build_break_frame(session_id: u64, body: &[u8]) -> Vec<u8> {
     f.extend_from_slice(&u64::MAX.to_le_bytes()); // MessageId (unsolicited)
     f.extend_from_slice(&0u32.to_le_bytes()); // Reserved
     f.extend_from_slice(&0u32.to_le_bytes()); // TreeId
-    f.extend_from_slice(&session_id.to_le_bytes());
+    // Break notifications carry SessionId 0 ([MS-SMB2] §3.3.4.6/§3.3.4.7).
+    f.extend_from_slice(&0u64.to_le_bytes());
     f.extend_from_slice(&[0u8; 16]); // Signature
     f.extend_from_slice(body);
     f
 }
 
-/// Sign/seal an oplock break for its holder, mirroring the request path order.
-fn finalize_break(crypto: &crate::state::BreakCrypto, mut frame: Vec<u8>) -> Vec<u8> {
-    if crypto.signed {
-        if let Some(key) = crypto.signing_key {
-            sign_pdu(&mut frame, &key, crypto.dialect);
-        }
-    }
+/// Seal an oplock/lease break for its holder. Break notifications carry
+/// SessionId 0 and are sent unsigned ([MS-SMB2] §3.3.4.6); encrypted sessions
+/// still wrap them in a transform header.
+fn finalize_break(crypto: &crate::state::BreakCrypto, frame: Vec<u8>) -> Vec<u8> {
     if crypto.encrypt {
         if let (Some(keys), Some(cipher)) = (crypto.enc_keys, crypto.cipher) {
             if let Some(sealed) = seal_pdu(crypto.session_id, keys, cipher, &frame) {
@@ -2509,6 +2523,14 @@ async fn write(
         .map_err(vfs_err)?;
     counter!("smb_bytes_written_total").increment(written);
     tracing::trace!(offset = req.offset, wrote = written, "write");
+    // A write from a non-holder invalidates cached reads: break the lease to
+    // NONE ([MS-SMB2] §3.3.4.7). A co-holder of the same lease key is exempt.
+    let req_key = conn.lease_keys.get(&req.file_id.0).copied();
+    if let Some((k, old, new, ep, out, crypto)) =
+        server.leases.break_conflict(&path, (conn.session_id, req.file_id.0), req_key, c::lease::RWH)
+    {
+        send_lease_break(&out, &crypto, k, old, new, ep);
+    }
     Ok(c::build_write_resp(written as u32))
 }
 
@@ -2522,6 +2544,7 @@ async fn close(
         return Err(Status::INVALID_HANDLE);
     };
     conn.searches.remove(&req.file_id.0);
+    conn.lease_keys.remove(&req.file_id.0);
     let meta = vfs.stat(&h.path).await.ok().unwrap_or_default();
     vfs.close(h).await.map_err(vfs_err)?;
     counter!("smb_closes_total").increment(1);
