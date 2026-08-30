@@ -58,10 +58,13 @@ macro_rules! smb_request_table {
 macro_rules! smb_dispatch {
     ( $( $variant:ident => $handler:ty ; )* ) => {
         /// Serve a request by moving it into its owning handler (generated).
-        pub async fn dispatch(ctx: IoContext<Accepted, Solicited>) -> Outcome {
+        pub async fn dispatch(
+            ctx: IoContext<Accepted, Solicited>,
+            res: &mut Resources<'_>,
+        ) -> Outcome {
             let (ctx, req) = ctx.split();
             match req {
-                $( SmbRequest::$variant(r) => <$handler as Command>::serve(ctx, r).await, )*
+                $( SmbRequest::$variant(r) => <$handler as Command>::serve(ctx, r, res).await, )*
                 #[allow(unreachable_patterns)]
                 _ => Outcome::Silent,
             }
@@ -76,7 +79,7 @@ mod request;
 mod state;
 mod wire;
 
-pub use context::{Command, IoContext, Outcome};
+pub use context::{Command, IoContext, Outcome, Resources};
 pub use origin::{Bare, Origin, Solicited, Unsolicited};
 pub use request::{dispatch, EchoCmd, EchoReq, SmbRequest};
 pub use state::{Accepted, Completed, IoState, Pending};

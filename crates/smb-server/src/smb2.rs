@@ -547,6 +547,36 @@ fn tf_off_end(original_len: usize) -> usize {
     smb_proto_smb2::commands::tf_off::HDR_SIZE + original_len
 }
 
+/// Route a request through the typestate pipeline (io::dispatch) and return the
+/// `(status, body)` the legacy framing still wraps. Used by commands migrated
+/// onto `io::Command` (typestate_plan.md Phases 2–3).
+async fn via_typestate(
+    hdr: &smb_proto_smb2::Header2,
+    conn: &mut Smb2Conn,
+    server: &Arc<ServerShared>,
+    buf: &[u8],
+) -> (Status, Vec<u8>) {
+    let reply = crate::io::ReplyHeader {
+        command: hdr.command,
+        message_id: hdr.message_id,
+        session_id: conn.session_id,
+        tree_id: hdr.tree_id,
+        credits: 0,
+        seal: crate::io::SealIntent::default(),
+    };
+    match crate::io::SmbRequest::parse(hdr.command, buf) {
+        Ok(req) => {
+            let ctx = crate::io::IoContext::accept(reply, req);
+            let mut res = crate::io::Resources { conn, server };
+            match crate::io::dispatch(ctx, &mut res).await {
+                crate::io::Outcome::Final(r) => (r.status, r.body),
+                _ => (Status::UNSUCCESSFUL, Vec::new()),
+            }
+        }
+        Err(status) => (status, Vec::new()),
+    }
+}
+
 /// Process exactly one SMB2 request starting at `buf` (its own header).
 async fn process_single(
     server: &Arc<ServerShared>,
@@ -803,32 +833,8 @@ async fn process_single(
             }
             Err(status) => (status, Vec::new()),
         },
-        ss::cmd::TREE_DISCONNECT => {
-            // Idempotent ([MS-SMB2] §3.3.5.8): tearing down a tree that is
-            // already gone still satisfies the client's intent, so ack it.
-            conn.trees.remove(&tid);
-            (Status::SUCCESS, c::build_tree_disconnect_resp())
-        }
-        ss::cmd::LOGOFF => {
-            close_all_handles(conn);
-            server.locks.release_session(conn.session_id);
-            server.share_modes.close_session(conn.session_id);
-            server.oplocks.release_session(conn.session_id);
-            server.leases.release_session(conn.session_id);
-            server.sessions.remove(conn.session_id);
-            conn.trees.clear();
-            conn.searches.clear();
-            if conn.authenticated {
-                gauge!("smb_sessions_active").decrement(1.0);
-            }
-            conn.authenticated = false;
-            // Keep session_id and cipher keys so this LOGOFF response still
-            // carries the right SessionId and can be sealed when the request
-            // arrived encrypted ([MS-SMB2] §3.3.5.6). A logged-off session is
-            // gated by `authenticated`, not by clearing the id.
-            counter!("smb_logoffs_total").increment(1);
-            (Status::SUCCESS, c::build_logoff_resp())
-        }
+        ss::cmd::TREE_DISCONNECT => via_typestate(&hdr, conn, server, buf).await,
+        ss::cmd::LOGOFF => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::CREATE => {
             // Named-pipe open on IPC$: \srvsvc and friends are virtual
             // files backed by the RPC dispatcher, not the VFS.
@@ -926,18 +932,7 @@ async fn process_single(
                 }
             }
         }
-        ss::cmd::FLUSH => {
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                }
-            };
-            match flush(conn, vfs, buf).await {
-                Ok(()) => (Status::SUCCESS, c::build_flush_resp()),
-                Err(status) => (status, Vec::new()),
-            }
-        }
+        ss::cmd::FLUSH => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::IOCTL => {
             let Some(req) = c::IoctlReq::parse(buf) else {
                 tracing::debug!("ioctl parse failed");
@@ -1309,25 +1304,7 @@ async fn process_single(
             }
             return None;
         }
-        ss::cmd::ECHO => {
-            // Route ECHO through the typestate pipeline (typestate_plan.md
-            // Phase 2). Legacy framing still wraps the (status, body) below.
-            let reply = crate::io::ReplyHeader {
-                command: hdr.command,
-                message_id: hdr.message_id,
-                session_id: conn.session_id,
-                tree_id: hdr.tree_id,
-                credits: 0,
-                seal: crate::io::SealIntent::default(),
-            };
-            match crate::io::SmbRequest::parse(hdr.command, buf) {
-                Ok(req) => match crate::io::dispatch(crate::io::IoContext::accept(reply, req)).await {
-                    crate::io::Outcome::Final(r) => (r.status, r.body),
-                    _ => (Status::INVALID_PARAMETER, Vec::new()),
-                },
-                Err(status) => (status, Vec::new()),
-            }
-        }
+        ss::cmd::ECHO => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::OPLOCK_BREAK => {
             // Command 18 carries both oplock (StructureSize 24) and lease
             // (StructureSize 36) break acknowledgements; dispatch on the size.
@@ -2704,19 +2681,7 @@ async fn close(
     ))
 }
 
-async fn flush(
-    conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
-    buf: &[u8],
-) -> Result<(), Status> {
-    let req = c::FlushReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
-    if let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) {
-        vfs.flush(h).await.map_err(vfs_err)?;
-    }
-    Ok(())
-}
-
-fn close_all_handles(conn: &mut Smb2Conn) {
+pub(crate) fn close_all_handles(conn: &mut Smb2Conn) {
     conn.handles.clear();
     conn.pipes.clear();
 }
@@ -3001,7 +2966,7 @@ fn g16(b: &[u8], o: usize) -> u16 {
 
 /// Resolve the VFS backing `tid`, mirroring the SMB1 path (share by name,
 /// unknown trees rejected before handlers run).
-fn share_vfs(
+pub(crate) fn share_vfs(
     server: &Arc<ServerShared>,
     conn: &Smb2Conn,
     tid: u32,
@@ -3071,7 +3036,7 @@ async fn do_copychunk(
     Ok(c::build_copychunk_resp(chunks_written, 0, total_written))
 }
 
-fn vfs_err(e: smb_vfs::VfsError) -> Status {
+pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
     use smb_vfs::VfsError as E;
     match e {
         E::NotFound => Status::OBJECT_PATH_NOT_FOUND,

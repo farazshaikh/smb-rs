@@ -12,6 +12,16 @@ use super::state::{Accepted, Pending};
 use super::wire::{ReplyHeader, SmbResponse};
 use super::SmbRequest;
 
+/// Per-request access to the mutable connection and shared server state a
+/// handler needs. Borrowed for the duration of one dispatch on the connection's
+/// single thread, so no locking is required for the per-connection half.
+pub struct Resources<'r> {
+    /// Per-connection state (handles, session, credits, durable table…).
+    pub conn: &'r mut crate::smb2::Smb2Conn,
+    /// Server-wide shared state (shares, lock/oplock/lease tables, sessions…).
+    pub server: &'r std::sync::Arc<crate::state::ServerShared>,
+}
+
 /// The server's work item for one request (or one server event). Owns the reply
 /// header and — while `Solicited` — the parsed request; parameterized by the
 /// lifecycle state `S` and origin `O`.
@@ -97,14 +107,19 @@ pub enum Outcome {
     Silent,
 }
 
-/// One command's server-side behaviour: map its owned request to an [`Outcome`].
-/// Dispatched by a concrete `match` (never as a trait object), so it uses native
-/// `async fn` and needs no boxed future.
+/// One command's server-side behaviour: map its owned request to an [`Outcome`],
+/// using the connection/server [`Resources`]. Dispatched by a concrete `match`
+/// (never as a trait object), so it uses native `async fn` and needs no boxed
+/// future.
 #[allow(async_fn_in_trait)]
 pub trait Command {
     /// The request type this command decodes and consumes.
     type Request: super::Decode;
     /// Serve the request. The context is request-neutral (`Bare`) and owns
-    /// everything except the request, which is passed alongside.
-    async fn serve(ctx: IoContext<Accepted, Bare>, req: Self::Request) -> Outcome;
+    /// everything except the request and the shared resources, passed alongside.
+    async fn serve(
+        ctx: IoContext<Accepted, Bare>,
+        req: Self::Request,
+        res: &mut Resources<'_>,
+    ) -> Outcome;
 }
