@@ -1196,6 +1196,66 @@ pub fn build_lock_resp() -> Vec<u8> {
     b
 }
 
+/// Wire constants for the SMB2 ERROR response ([MS-SMB2] §2.2.2) and the
+/// Symbolic Link Error Response it can carry ([MS-SMB2] §2.2.2.2.1).
+pub mod error {
+    /// SMB2 ERROR Response StructureSize ([MS-SMB2] §2.2.2).
+    pub const RESPONSE_STRUCTURE_SIZE: u16 = 9;
+    /// `SymLinkErrorTag` identifying a symbolic-link error payload (§2.2.2.2.1).
+    pub const SYMLINK_ERROR_TAG: u32 = 0x4C4D_5953;
+    /// `IO_REPARSE_TAG_SYMLINK` ([MS-FSCC] §2.1.2.4).
+    pub const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+    /// `SYMLINK_FLAG_RELATIVE`: the substitute name is a relative path (§2.2.2.2.1.1).
+    pub const SYMLINK_FLAG_RELATIVE: u32 = 0x0000_0001;
+    /// Bytes preceding `PathBuffer` inside the reparse data of §2.2.2.2.1
+    /// (UnparsedPathLength through Flags: four u16 offsets/lengths + a u32 Flags).
+    pub const REPARSE_HEADER_LEN: u16 = 12;
+    /// Bytes from `SymLinkErrorTag` to the start of `PathBuffer` (§2.2.2.2.1):
+    /// SymLinkErrorTag, ReparseTag, ReparseDataLength, UnparsedPathLength, the
+    /// four name offset/length fields, and Flags.
+    pub const SYMLINK_FIXED_LEN: u32 = 24;
+}
+
+/// Build the SMB2 ERROR response body ([MS-SMB2] §2.2.2) carrying a Symbolic
+/// Link Error Response ([MS-SMB2] §2.2.2.2.1) for STATUS_STOPPED_ON_SYMLINK.
+///
+/// `substitute`/`print` are the symlink target (substitute and display names);
+/// `unparsed_path_len` is the byte length of the request path that follows the
+/// symlink; `relative` sets `SYMLINK_FLAG_RELATIVE`.
+pub fn build_symlink_error_response(
+    substitute: &str,
+    print: &str,
+    unparsed_path_len: u16,
+    relative: bool,
+) -> Vec<u8> {
+    let sub: Vec<u8> = substitute.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let prt: Vec<u8> = print.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let path_len = (sub.len() + prt.len()) as u16;
+    let flags = if relative { error::SYMLINK_FLAG_RELATIVE } else { 0 };
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&(error::SYMLINK_FIXED_LEN + path_len as u32).to_le_bytes()); // SymLinkLength
+    data.extend_from_slice(&error::SYMLINK_ERROR_TAG.to_le_bytes());
+    data.extend_from_slice(&error::IO_REPARSE_TAG_SYMLINK.to_le_bytes());
+    data.extend_from_slice(&(error::REPARSE_HEADER_LEN + path_len).to_le_bytes()); // ReparseDataLength
+    data.extend_from_slice(&unparsed_path_len.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+    data.extend_from_slice(&(sub.len() as u16).to_le_bytes()); // SubstituteNameLength
+    data.extend_from_slice(&(sub.len() as u16).to_le_bytes()); // PrintNameOffset
+    data.extend_from_slice(&(prt.len() as u16).to_le_bytes()); // PrintNameLength
+    data.extend_from_slice(&flags.to_le_bytes());
+    data.extend_from_slice(&sub);
+    data.extend_from_slice(&prt);
+
+    let mut body = Vec::with_capacity(8 + data.len());
+    body.extend_from_slice(&error::RESPONSE_STRUCTURE_SIZE.to_le_bytes()); // StructureSize
+    body.push(0); // ErrorContextCount
+    body.push(0); // Reserved
+    body.extend_from_slice(&(data.len() as u32).to_le_bytes()); // ByteCount
+    body.extend_from_slice(&data);
+    body
+}
+
 // ---------------- CHANGE_NOTIFY (§2.2.35 / §2.2.36) ----------------
 
 /// CHANGE_NOTIFY completion-filter bits ([MS-SMB2] §2.2.35, [MS-FSCC] §2.7.1).

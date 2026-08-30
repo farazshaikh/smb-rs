@@ -121,6 +121,9 @@ pub struct Smb2Conn {
     /// chain, used to resolve the wildcard FileId (0xFF..FF) that a related
     /// follow-up request carries ([MS-SMB2] §3.3.5.2.7.2). Reset per frame.
     pub chain_fid: Option<[u8; 16]>,
+    /// Symbolic Link Error Response body built by the last CREATE that stopped
+    /// on a symlink ([MS-SMB2] §2.2.2.2.1), consumed when framing the error.
+    pub symlink_error: Option<Vec<u8>>,
 }
 
 impl Smb2Conn {
@@ -164,6 +167,7 @@ impl Smb2Conn {
             client_dialects: Vec::new(),
             disconnect: false,
             chain_fid: None,
+            symlink_error: None,
         }
     }
 
@@ -842,6 +846,11 @@ async fn process_single(
                 };
                 match create(conn, vfs, server, hdr.is_signed(), buf).await {
                     Ok(body) => (Status::SUCCESS, body),
+                    // A symlink in the path carries a Symbolic Link Error
+                    // Response the client parses ([MS-SMB2] §2.2.2.2.1).
+                    Err(status) if status == Status::STOPPED_ON_SYMLINK => {
+                        (status, conn.symlink_error.take().unwrap_or_else(error_resp))
+                    }
                     Err(status) => (status, Vec::new()),
                 }
             }
@@ -2095,7 +2104,7 @@ async fn create(
     let rel = req.name.trim_start_matches(['\\', '/']).to_string();
     let want_dir = req.options & OPT_DIRECTORY_FILE != 0;
 
-    let (mut open, meta, action) = vfs
+    let (mut open, meta, action) = match vfs
         .create(
             &rel,
             want_dir,
@@ -2105,7 +2114,18 @@ async fn create(
             req.attrs,
         )
         .await
-        .map_err(vfs_err)?;
+    {
+        Ok(v) => v,
+        // Traversal hit a symlink: build the Symbolic Link Error Response from
+        // the target and unparsed path ([MS-SMB2] §2.2.2.2.1) for the caller to
+        // frame with STATUS_STOPPED_ON_SYMLINK.
+        Err(smb_vfs::VfsError::StoppedOnSymlink { target, unparsed_len, relative }) => {
+            conn.symlink_error =
+                Some(c::build_symlink_error_response(&target, &target, unparsed_len, relative));
+            return Err(Status::STOPPED_ON_SYMLINK);
+        }
+        Err(e) => return Err(vfs_err(e)),
+    };
 
     if req.options & OPT_NON_DIRECTORY_FILE != 0 && open.is_dir {
         return Err(Status::FILE_IS_A_DIRECTORY);
@@ -3042,6 +3062,7 @@ fn vfs_err(e: smb_vfs::VfsError) -> Status {
         E::DirectoryNotEmpty => Status::DIRECTORY_NOT_EMPTY,
         E::InvalidArgument => Status::INVALID_PARAMETER,
         E::NotSupported => Status::NOT_IMPLEMENTED,
+        E::StoppedOnSymlink { .. } => Status::STOPPED_ON_SYMLINK,
         E::Io(_) => Status::UNSUCCESSFUL,
     }
 }

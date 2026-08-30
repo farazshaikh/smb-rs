@@ -15,6 +15,8 @@ impl Status {
     pub const UNSUCCESSFUL: Status = Status(0xC000_0001);
     /// Function not implemented by this server.
     pub const NOT_IMPLEMENTED: Status = Status(0xC000_0002);
+    /// A create traversed a symbolic link ([MS-SMB2] §2.2.2.2.1).
+    pub const STOPPED_ON_SYMLINK: Status = Status(0x8000_002D);
     /// End of file reached during a read.
     pub const END_OF_FILE: Status = Status(0xC000_0011);
     /// The supplied handle (FID) is not valid on this session/tree.

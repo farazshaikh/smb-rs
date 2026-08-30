@@ -191,6 +191,42 @@ fn access_flags(access: u32) -> (bool, bool) {
     (read, write)
 }
 
+/// If any component of `rel` under `root` is a symbolic link, return the symlink
+/// target, the UTF-16 byte length of the request path following the symlink, and
+/// whether the target is relative — the data for a Symbolic Link Error Response
+/// ([MS-SMB2] §2.2.2.2.1). A create traversing a symlink must stop here.
+fn symlink_stop(root: &std::path::Path, rel: &str) -> Option<(String, u16, bool)> {
+    let bytes = rel.as_bytes();
+    let mut cur = root.to_path_buf();
+    let mut i = 0;
+    while i < rel.len() {
+        while i < rel.len() && (bytes[i] == b'\\' || bytes[i] == b'/') {
+            i += 1;
+        }
+        let start = i;
+        while i < rel.len() && bytes[i] != b'\\' && bytes[i] != b'/' {
+            i += 1;
+        }
+        let comp = &rel[start..i];
+        if comp.is_empty() || comp == "." || comp == ".." || comp.contains(':') {
+            continue;
+        }
+        cur.push(comp);
+        let Ok(m) = std::fs::symlink_metadata(&cur) else { continue };
+        if !m.file_type().is_symlink() {
+            continue;
+        }
+        let target = std::fs::read_link(&cur)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // The unparsed portion is the request path after the symlink component.
+        let unparsed_len = (rel[i..].encode_utf16().count() * 2) as u16;
+        let relative = !std::path::Path::new(&target).is_absolute();
+        return Some((target, unparsed_len, relative));
+    }
+    None
+}
+
 fn resolve_under(root: &std::path::Path, rel: &str) -> std::path::PathBuf {
     let mut cur = root.to_path_buf();
     for comp in rel.split(['\\', '/']) {
@@ -308,6 +344,15 @@ impl Vfs for PosixVfs {
         }
         let rel = base_rel.as_str();
         let path = self.resolve(rel);
+        // A create that traverses a symbolic link is rejected with
+        // STATUS_STOPPED_ON_SYMLINK unless FILE_OPEN_REPARSE_POINT is set
+        // ([MS-SMB2] §3.3.5.9).
+        const OPT_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        if options & OPT_OPEN_REPARSE_POINT == 0 {
+            if let Some((target, unparsed_len, relative)) = symlink_stop(&self.root, rel) {
+                return Err(VfsError::StoppedOnSymlink { target, unparsed_len, relative });
+            }
+        }
         let want_dir = is_dir || options & OPT_DIRECTORY_FILE != 0;
         let existing = std::fs::symlink_metadata(&path).ok();
         let exists = existing.is_some();

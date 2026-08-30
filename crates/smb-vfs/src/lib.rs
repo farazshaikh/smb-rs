@@ -152,6 +152,17 @@ pub enum VfsError {
     /// The backend does not implement the requested operation.
     #[error("not supported")]
     NotSupported,
+    /// A path component is a symbolic link, so traversal stops and the client
+    /// resolves it ([MS-SMB2] §2.2.2.2.1, STATUS_STOPPED_ON_SYMLINK).
+    #[error("stopped on symlink")]
+    StoppedOnSymlink {
+        /// Symlink target, reported as the substitute and print name.
+        target: String,
+        /// UTF-16 byte length of the request path following the symlink.
+        unparsed_len: u16,
+        /// The target is a relative path (`SYMLINK_FLAG_RELATIVE`).
+        relative: bool,
+    },
 }
 
 /// Result alias used throughout the VFS surface.

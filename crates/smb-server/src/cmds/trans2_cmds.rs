@@ -393,6 +393,7 @@ fn vfs_err(e: smb_vfs::VfsError) -> Status {
         E::DirectoryNotEmpty => Status::DIRECTORY_NOT_EMPTY,
         E::InvalidArgument => Status::INVALID_PARAMETER,
         E::NotSupported => Status::NOT_IMPLEMENTED,
+        E::StoppedOnSymlink { .. } => Status::STOPPED_ON_SYMLINK,
         E::Io(_) => Status::UNSUCCESSFUL,
     }
 }
