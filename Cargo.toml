@@ -13,6 +13,9 @@ handrolled = ["smb-server/handrolled"]
 [dependencies]
 smb-server = { path = "crates/smb-server", default-features = false }
 
+[lints]
+workspace = true
+
 [workspace]
 resolver = "2"
 members = [
@@ -35,6 +38,11 @@ members = [
 edition = "2024"
 version = "0.2.0"
 license = "MIT"
+
+# Workspace-wide lints. Crates opt in with `[lints]\nworkspace = true`.
+# Public items must be documented — an undocumented `pub` item is a hard error.
+[workspace.lints.rust]
+missing_docs = "deny"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt", "io-util", "sync", "macros", "time"] }

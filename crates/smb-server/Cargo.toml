@@ -36,3 +36,6 @@ inotify.workspace = true
 futures-util.workspace = true
 win-sd.workspace = true
 if-addrs.workspace = true
+
+[lints]
+workspace = true

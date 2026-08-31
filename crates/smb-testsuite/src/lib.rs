@@ -26,10 +26,15 @@ pub type Metrics = BTreeMap<String, f64>;
 /// The SMB server under test.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
+    /// Server hostname or IP.
     pub host: String,
+    /// TCP port (445 by default).
     pub port: u16,
+    /// Username for authentication.
     pub user: String,
+    /// Password for authentication.
     pub pass: String,
+    /// Share name to connect to.
     pub share: String,
 }
 
@@ -55,18 +60,24 @@ fn non_empty(v: Option<String>) -> Option<String> {
 /// Per-call connection options (dialect pin, signing, encryption).
 #[derive(Default, Clone, Debug)]
 pub struct Opts {
+    /// Require SMB2 signing on the connection.
     pub sign: bool,
+    /// Require SMB3 encryption on the connection.
     pub encrypt: bool,
+    /// Pin a specific dialect (e.g. `"3.1.1"`), else negotiate the highest.
     pub dialect: Option<String>,
 }
 
 impl Opts {
+    /// Options pinning a specific dialect.
     pub fn dialect(d: &str) -> Opts {
         Opts { dialect: Some(d.to_string()), ..Opts::default() }
     }
+    /// Options requiring signing.
     pub fn signed() -> Opts {
         Opts { sign: true, ..Opts::default() }
     }
+    /// Options requiring encryption.
     pub fn encrypted() -> Opts {
         Opts { encrypt: true, ..Opts::default() }
     }
@@ -75,7 +86,9 @@ impl Opts {
 /// Locates the Python interpreter and driver script.
 #[derive(Clone, Debug)]
 pub struct Driver {
+    /// Path to the Python interpreter.
     pub python: String,
+    /// Path to the `smb_driver.py` script.
     pub script: String,
 }
 
@@ -103,11 +116,15 @@ fn default_driver_script() -> String {
 /// Response from one driver invocation.
 #[derive(Deserialize, Debug, Default)]
 pub struct DriverResp {
+    /// Whether every op in the invocation succeeded.
     pub ok: bool,
+    /// Failure message when `ok` is false.
     #[serde(default)]
     pub error: Option<String>,
+    /// Dialect the driver negotiated.
     #[serde(default)]
     pub dialect: String,
+    /// Per-op result JSON, in request order.
     #[serde(default)]
     pub steps: Vec<serde_json::Value>,
 }
@@ -140,7 +157,9 @@ struct EndpointReq<'a> {
 
 /// Context handed to every case: the endpoint plus a way to run SMB ops.
 pub struct Ctx<'a> {
+    /// The server under test.
     pub ep: &'a Endpoint,
+    /// The Python driver used to run SMB ops.
     pub driver: &'a Driver,
 }
 
@@ -211,22 +230,34 @@ pub struct TestCase {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
+    /// The case met its assertions.
     Pass,
+    /// The case ran but an assertion failed.
     Fail,
+    /// The case was skipped (precondition unmet).
     Skip,
+    /// The case aborted unexpectedly (panic / driver error).
     Error,
 }
 
 /// Recorded result for one case in one run.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CaseResult {
+    /// Case identifier.
     pub id: String,
+    /// Case category (grouping).
     pub category: String,
+    /// Spec reference the case exercises.
     pub spec: String,
+    /// One-line description of the case.
     pub about: String,
+    /// Outcome status.
     pub status: Status,
+    /// Wall-clock duration in milliseconds.
     pub duration_ms: u128,
+    /// Failure/skip detail, empty on pass.
     pub message: String,
+    /// Metrics captured during the run.
     pub metrics: Metrics,
 }
 

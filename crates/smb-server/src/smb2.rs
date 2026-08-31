@@ -111,8 +111,11 @@ pub struct Smb2Conn {
     /// Client's NEGOTIATE parameters, retained to validate a later
     /// FSCTL_VALIDATE_NEGOTIATE_INFO request ([MS-SMB2] §3.3.5.15.12).
     pub client_guid: [u8; 16],
+    /// Client SecurityMode from NEGOTIATE (signing enabled/required bits).
     pub client_security_mode: u16,
+    /// Client Capabilities flags from NEGOTIATE.
     pub client_capabilities: u32,
+    /// Dialects the client offered in NEGOTIATE.
     pub client_dialects: Vec<u16>,
     /// Set to terminate the transport connection after the current frame
     /// (e.g. a failed VALIDATE_NEGOTIATE_INFO downgrade check).

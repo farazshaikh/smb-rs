@@ -11,3 +11,6 @@ tokio-uring.workspace = true
 xattr.workspace = true
 smb-proto = { path = "../smb-proto" }
 smb-vfs = { path = "../smb-vfs" }
+
+[lints]
+workspace = true

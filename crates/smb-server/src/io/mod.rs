@@ -18,6 +18,7 @@
 macro_rules! io_states {
     ($($state:ident),+ $(,)?) => {
         $(
+            #[doc = concat!("`", stringify!($state), "` request-lifecycle state marker (zero-sized).")]
             #[derive(Debug, Clone, Copy)]
             pub struct $state;
             impl sealed::Sealed for $state {}
@@ -33,7 +34,10 @@ macro_rules! smb_request_table {
     ( $( $variant:ident = $code:path => $req:ty ; )* ) => {
         /// Sum type over every client request the server decodes (generated).
         #[derive(Debug)]
-        pub enum SmbRequest { $( $variant($req), )* }
+        pub enum SmbRequest { $(
+            #[doc = concat!("A decoded `", stringify!($variant), "` request.")]
+            $variant($req),
+        )* }
 
         impl SmbRequest {
             /// The SMB2 command code this request decodes to.

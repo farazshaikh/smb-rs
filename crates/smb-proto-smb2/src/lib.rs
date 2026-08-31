@@ -16,6 +16,13 @@
 /// SMB2 header magic `\xFESMB`.
 pub const SMB2_MAGIC: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
+/// First byte of a plaintext SMB2 message ProtocolId (`SMB2_MAGIC[0]`, `\xFE`).
+pub const PROTO_ID_SMB2: u8 = SMB2_MAGIC[0];
+/// First byte of an encrypted TRANSFORM_HEADER ProtocolId (`\xFD`, [MS-SMB2] §2.2.41).
+pub const PROTO_ID_ENCRYPTED: u8 = commands::TF_MAGIC[0];
+/// First byte of a COMPRESSION_TRANSFORM_HEADER ProtocolId (`\xFC`, [MS-SMB2] §2.2.42).
+pub const PROTO_ID_COMPRESSED: u8 = compress::PROTOCOL_ID[0];
+
 pub mod commands;
 pub mod compress;
 pub mod consts;

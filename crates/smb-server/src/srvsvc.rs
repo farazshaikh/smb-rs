@@ -10,27 +10,34 @@ use ms_ndr::NdrEncoder;
 /// One advertised share for NetShareEnum level 1.
 #[derive(Debug, Clone)]
 pub struct ShareInfo {
+    /// Share name (`NetName`).
     pub netname: String,
+    /// Share type (`STYPE_*`: disktree, IPC, …).
     pub shi_type: u32,
+    /// Human-readable share comment.
     pub remark: String,
 }
 
 /// A virtual named pipe bound to one open file id.
 pub struct Pipe {
+    /// Lowercased pipe name (e.g. `srvsvc`).
     pub name: String,
     inbound: Vec<u8>,
     outbound: VecDeque<Vec<u8>>,
 }
 
 impl Pipe {
+    /// Open a fresh, empty pipe with the given name.
     pub fn new(name: &str) -> Self {
         Self { name: name.to_lowercase(), inbound: Vec::new(), outbound: VecDeque::new() }
     }
 
+    /// Bytes queued in the next outbound DCERPC fragment.
     pub fn pending(&self) -> usize {
         self.outbound.front().map_or(0, |v| v.len())
     }
 
+    /// Dequeue up to `max` bytes of the next outbound fragment.
     pub fn take(&mut self, max: usize) -> Vec<u8> {
         match self.outbound.front_mut() {
             Some(msg) => {
@@ -43,6 +50,8 @@ impl Pipe {
         }
     }
 
+    /// Feed inbound DCERPC bytes, dispatching any complete request PDUs
+    /// (BIND, and NetShareEnumAll opnum 15) and queueing their responses.
     pub fn on_write(&mut self, data: &[u8], shares: &[ShareInfo]) {
         self.inbound.extend_from_slice(data);
         loop {

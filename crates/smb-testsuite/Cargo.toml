@@ -13,3 +13,6 @@ serde_json = "1"
 [[bin]]
 name = "smb-testrunner"
 path = "src/bin/run.rs"
+
+[lints]
+workspace = true

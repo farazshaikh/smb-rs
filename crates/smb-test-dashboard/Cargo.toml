@@ -8,3 +8,6 @@ license.workspace = true
 [[bin]]
 name = "smb-test-dashboard"
 path = "src/main.rs"
+
+[lints]
+workspace = true

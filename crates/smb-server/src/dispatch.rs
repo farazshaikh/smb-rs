@@ -12,6 +12,7 @@ use smb_proto_smb1::header::{build_response, parse_header, Header, RespBody, HDR
 
 use smb_transport::{FrameSink, Transport};
 use smb_proto_smb1::consts::flags2;
+use smb_proto_smb2::{PROTO_ID_COMPRESSED, PROTO_ID_ENCRYPTED, PROTO_ID_SMB2};
 
 use metrics::{counter, histogram};
 use tokio::sync::mpsc;
@@ -73,7 +74,6 @@ impl<'a> ReqView<'a> {
     }
 }
 
-/// Serve one client connection until EOF or transport error.
 /// Drain the outbound frame queue into the connection's write half. Runs as a
 /// dedicated task so background work can emit unsolicited frames (async
 /// STATUS_PENDING completions, oplock/lease breaks, CHANGE_NOTIFY) while the
@@ -89,6 +89,9 @@ pub(crate) async fn writer_loop(
     }
 }
 
+/// Serve one client connection until EOF or transport error: read NBSS frames,
+/// route SMB1 and SMB2/3 (including encrypted/compressed transforms) to their
+/// processors, and release the session's locks and durable handles on close.
 pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Box<dyn Transport>) {
     let (mut reader, writer) = transport.split();
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -115,14 +118,18 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
             // SMB2/3 frames (\xFESMB magic), encrypted transform frames
             // (\xFD"SMB" — [MS-SMB2] §2.2.41) and compressed transform frames
             // (\xFC"SMB" — §2.2.42).
-            if frame.0[0] == 0xFE || frame.0[0] == 0xFD || frame.0[0] == 0xFC || conn.upgraded_smb2 {
+            if frame.0[0] == PROTO_ID_SMB2
+                || frame.0[0] == PROTO_ID_ENCRYPTED
+                || frame.0[0] == PROTO_ID_COMPRESSED
+                || conn.upgraded_smb2
+            {
                 if smb2_conn.is_none() {
                     smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge(), out_tx.clone()));
                 }
                 let c2 = smb2_conn.as_mut().unwrap();
                 // Decompress an SMB3 compressed transform before dispatch.
                 let decompressed;
-                let msg: &[u8] = if frame.0[0] == 0xFC {
+                let msg: &[u8] = if frame.0[0] == PROTO_ID_COMPRESSED {
                     match smb_proto_smb2::compress::decompress_message(&frame.0) {
                         Some(d) => {
                             decompressed = d;
@@ -138,7 +145,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                     // Opportunistically compress large plaintext responses when
                     // the peer negotiated compression (never a sealed frame).
                     if let Some(algo) = c2.compress_algo {
-                        if resp.len() > 1024 && resp.first() != Some(&0xFD) {
+                        if resp.len() > 1024 && resp.first() != Some(&PROTO_ID_ENCRYPTED) {
                             if let Some(packed) = smb_proto_smb2::compress::compress_message(&resp, algo) {
                                 resp = packed;
                             }

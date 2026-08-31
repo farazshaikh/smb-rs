@@ -14,17 +14,29 @@ use crate::CaseResult;
 /// A full run: metadata plus every case result.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RunReport {
+    /// Unique run identifier (`<epoch>-<short-commit>`).
     pub run_id: String,
+    /// Run start time (seconds since the Unix epoch).
     pub timestamp_epoch: u64,
+    /// Git commit the server was built from.
     pub commit: String,
+    /// Server version string.
     pub server_version: String,
+    /// Host the run executed against.
     pub host: String,
+    /// Total cases in the run.
     pub total: usize,
+    /// Cases that passed.
     pub passed: usize,
+    /// Cases that failed an assertion.
     pub failed: usize,
+    /// Cases skipped (precondition unmet).
     pub skipped: usize,
+    /// Cases that aborted unexpectedly.
     pub errored: usize,
+    /// Total wall-clock duration in milliseconds.
     pub duration_ms: u128,
+    /// Every case result in the run.
     pub cases: Vec<CaseResult>,
 }
 
@@ -57,6 +69,7 @@ impl RunReport {
         r
     }
 
+    /// Fraction of non-skipped cases that passed (0.0 when none ran).
     pub fn pass_rate(&self) -> f64 {
         let ran = (self.total - self.skipped) as f64;
         if ran <= 0.0 { 0.0 } else { self.passed as f64 / ran }

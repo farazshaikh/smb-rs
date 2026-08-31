@@ -31,14 +31,19 @@ pub type Guid = [u8; 16];
 /// Persisted state for one durable/persistent handle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandleRecord {
+    /// Server-assigned create GUID that keys this handle ([MS-SMB2] §2.2.13.2.3).
     pub create_guid: Guid,
     /// Share-relative path of the open, used to re-open on reclaim.
     pub path: String,
     /// Share name the handle belongs to.
     pub share: String,
+    /// Session that owns the open, validated on reclaim.
     pub session_id: u64,
+    /// Granted access mask re-applied when the handle is re-opened.
     pub access: u32,
+    /// Share access (`FILE_SHARE_*`) the open was granted.
     pub share_access: u32,
+    /// CreateOptions the open was made with, re-applied on reclaim.
     pub create_options: u32,
     /// Directory handle (re-opened as a directory on reclaim).
     pub is_dir: bool,
@@ -48,6 +53,7 @@ pub struct HandleRecord {
     pub match_guid: Option<Guid>,
     /// Node currently owning the handle; empty when free for reclaim.
     pub owner_node: String,
+    /// Lease key bound to the handle when it was opened with a lease.
     pub lease_key: Option<Guid>,
     /// Client GUID that opened the handle; validated on a lease reconnect
     /// ([MS-SMB2] §3.3.5.9.7).
@@ -56,6 +62,7 @@ pub struct HandleRecord {
     pub timeout_ms: u64,
     /// Absolute expiry (ms since epoch); 0 means persistent / never expires.
     pub deadline_ms: u64,
+    /// Whether the open is marked delete-on-close.
     pub delete_on_close: bool,
 }
 
@@ -73,8 +80,10 @@ impl HandleRecord {
 /// Errors surfaced by a [`HandleStore`] backend.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// The backend (KV store, network, filesystem) failed.
     #[error("handle store backend error: {0}")]
     Backend(String),
+    /// A record failed to serialize or deserialize.
     #[error("handle store serialization error: {0}")]
     Serde(String),
 }
@@ -130,6 +139,7 @@ pub struct MemStore {
 }
 
 impl MemStore {
+    /// Create an empty in-memory store.
     pub fn new() -> MemStore {
         MemStore { map: Mutex::new(HashMap::new()) }
     }
