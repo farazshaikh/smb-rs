@@ -36,6 +36,17 @@ impl Decode for SessionSetupReq {
     }
 }
 
+/// SMB2 NEGOTIATE request ([MS-SMB2] §2.2.3): dialects and negotiate contexts are
+/// parsed from the frame by the negotiator, so the marker itself decodes nothing.
+#[derive(Debug)]
+pub struct NegotiateReq;
+impl Decode for NegotiateReq {
+    const COMMAND: u16 = cmd::NEGOTIATE;
+    fn decode(_frame: &[u8]) -> Result<Self, Status> {
+        Ok(NegotiateReq)
+    }
+}
+
 /// SMB2 TREE_DISCONNECT request ([MS-SMB2] §2.2.11): no fields we act on.
 #[derive(Debug)]
 pub struct TreeDisconnectReq;
@@ -410,6 +421,23 @@ impl Command for OplockBreakCmd {
     }
 }
 
+/// NEGOTIATE handler ([MS-SMB2] §3.3.5.3-4): negotiates the dialect and
+/// cipher/compression. A repeat NEGOTIATE on an already-negotiated connection
+/// terminates it ([MS-SMB2] §3.3.5.4), yielding no reply.
+pub struct NegotiateCmd;
+impl Command for NegotiateCmd {
+    type Request = NegotiateReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: NegotiateReq, res: &mut Resources<'_>) -> Outcome {
+        let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new()));
+        };
+        match crate::smb2::negotiate(res.conn, res.server, &hdr, res.frame) {
+            crate::smb2::NegotiateReply::Reply(status, body) => Outcome::Final(ctx.respond(status, body)),
+            crate::smb2::NegotiateReply::Silent => Outcome::Silent,
+        }
+    }
+}
+
 /// SESSION_SETUP handler ([MS-SMB2] §3.3.5.5): runs one NTLM/SPNEGO leg via the
 /// existing authenticator. Kept thin so the shared framing tail still folds the
 /// pre-auth hash, derives the signing key and registers the session in one place.
@@ -448,6 +476,7 @@ impl Command for TreeConnectCmd {
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
+    Negotiate      = cmd::NEGOTIATE       => NegotiateReq;
     Echo           = cmd::ECHO            => EchoReq;
     SessionSetup   = cmd::SESSION_SETUP   => SessionSetupReq;
     TreeConnect    = cmd::TREE_CONNECT    => TreeConnectReq;
@@ -469,6 +498,7 @@ smb_request_table! {
 }
 
 smb_dispatch! {
+    Negotiate      => NegotiateCmd;
     Echo           => EchoCmd;
     SessionSetup   => SessionSetupCmd;
     TreeConnect    => TreeConnectCmd;

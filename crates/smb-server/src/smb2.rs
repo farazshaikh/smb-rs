@@ -641,8 +641,6 @@ async fn process_single(
         joined.extend_from_slice(buf);
         conn.preauth_hash = smb_auth::crypto::sha512(&joined);
     }
-    let body_start = 64usize;
-    let tid = hdr.tree_id;
     let sid = hdr.session_id;
 
     // Commands valid without an authenticated session.
@@ -715,157 +713,7 @@ async fn process_single(
     }
 
     let (status, mut body): (Status, Vec<u8>) = match hdr.command {
-        ss::cmd::NEGOTIATE => {
-            // A NEGOTIATE received after the connection already negotiated a
-            // dialect is invalid: the server MUST disconnect and not reply
-            // ([MS-SMB2] §3.3.5.4).
-            if conn.dialect.is_some() {
-                conn.disconnect = true;
-                return None;
-            }
-            // Clients probing for SMB2 support send either a header-only
-            // NEGOTIATE or one carrying Status = STATUS_INVALID_PARAMETER
-            // ([MS-SMB2] §3.3.5.3). Answer both with the wildcard-dialect
-            // response so they retry a real negotiation.
-            let parsed = smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]));
-            tracing::debug!(status = hdr.status, parsed_ok = parsed.is_some(), len = buf.len(), "negotiate probe check");
-            if hdr.status == Status::INVALID_PARAMETER.raw() || parsed.is_none() {
-                if parsed.is_none() {
-                    tracing::debug!(len = buf.len(), body = %hex_str(buf.get(body_start..).unwrap_or(&[])), "negotiate parse failed");
-                }
-                return Some((
-                    response(&hdr, Status::INVALID_PARAMETER, probe_negotiate_resp(), 0),
-                    false,
-                ));
-            }
-            let req = parsed.expect("validated above");
-            let Some(dialect) = smb_proto_smb2::negotiate::pick(&req.dialects) else {
-                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0), true));
-            };
-            conn.dialect = Some(dialect);
-            // Retain the client's NEGOTIATE fields for a later
-            // FSCTL_VALIDATE_NEGOTIATE_INFO downgrade check ([MS-SMB2] §3.3.5.15.12).
-            conn.client_guid = req.client_guid;
-            conn.client_dialects = req.dialects.clone();
-            conn.client_security_mode = g16(buf, body_start + 4);
-            conn.client_capabilities = buf
-                .get(body_start + 8..body_start + 12)
-                .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
-                .unwrap_or(0);
-            // SMB 3.1.1 negotiate-context validation ([MS-SMB2] §3.3.5.4):
-            // exactly one PREAUTH_INTEGRITY context is required, and it must
-            // offer a hash algorithm the server supports (SHA-512).
-            if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
-                let preauth: Vec<_> = req
-                    .contexts
-                    .iter()
-                    .filter(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::PREAUTH_INTEGRITY)
-                    .collect();
-                if preauth.len() != 1 {
-                    return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), 0), true));
-                }
-                // HashAlgorithmCount(2) SaltLength(2) HashAlgorithms[] ([MS-SMB2] §2.2.3.1.1).
-                let pd = &preauth[0].data;
-                let count = pd.get(0..2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize).unwrap_or(0);
-                let algos: Vec<u16> = pd
-                    .get(4..)
-                    .map(|d| d.chunks_exact(2).take(count).map(|w| u16::from_le_bytes([w[0], w[1]])).collect())
-                    .unwrap_or_default();
-                if !algos.contains(&smb_proto_smb2::negotiate::ctx_type::SHA512) {
-                    return Some((response(&hdr, Status::SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP, Vec::new(), 0), true));
-                }
-            }
-            // Must match the Capabilities word written by
-            // build_response_full below so VALIDATE_NEGOTIATE_INFO echoes it.
-            conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
-                smb_proto_smb2::negotiate::caps::LARGE_MTU
-                    | smb_proto_smb2::negotiate::caps::MULTI_CHANNEL
-                    | smb_proto_smb2::negotiate::caps::LEASING
-            } else if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
-                smb_proto_smb2::negotiate::caps::LARGE_MTU
-                    | smb_proto_smb2::negotiate::caps::LEASING
-            } else {
-                0
-            };
-            tracing::debug!(dialect = format!("{:#06x}", dialect), "negotiated");
-            let mut salt = [0u8; 32];
-            salt.copy_from_slice(&crate::dispatch::rand_bytes(32));
-            // Pick one cipher the client offered (GCM preferred).
-            let client_ciphers: Vec<u16> = req
-                .contexts
-                .iter()
-                .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::ENCRYPTION)
-                .and_then(|c| {
-                    if c.data.len() >= 2 {
-                        let n = u16::from_le_bytes([c.data[0], c.data[1]]) as usize;
-                        Some(
-                            c.data[2..]
-                                .chunks_exact(2)
-                                .take(n)
-                                .map(|w| u16::from_le_bytes([w[0], w[1]]))
-                                .collect::<Vec<_>>(),
-                        )
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            let chosen = {
-                // GCM preferred by default ([MS-SMB2] §3.1.4.1); override
-                // with RUSTSMB_CIPHER=ccm to exercise the CCM path live.
-                let prefer_ccm = std::env::var("RUSTSMB_CIPHER")
-                    .map(|v| v.eq_ignore_ascii_case("ccm"))
-                    .unwrap_or(false);
-                let order = if prefer_ccm {
-                    [smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
-                     smb_proto_smb2::negotiate::ctx_type::AES128_GCM]
-                } else {
-                    [smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
-                     smb_proto_smb2::negotiate::ctx_type::AES128_CCM]
-                };
-                order.into_iter().find(|ours| client_ciphers.contains(ours))
-            };
-            // Dialects without negotiate contexts (or clients that did not
-            // offer ENCRYPTION_CAPABILITIES) must leave conn.cipher unset —
-            // otherwise --encrypt would seal sessions the peer cannot read.
-            if dialect == smb_proto_smb2::negotiate::DIALECT_311 && !client_ciphers.is_empty() {
-                conn.cipher = chosen;
-            }
-            // Compression: intersect the client's advertised algorithms with
-            // ours; a common set enables compressed transforms both ways.
-            let comp_algos = req
-                .contexts
-                .iter()
-                .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION)
-                .map(|c| smb_proto_smb2::compress::negotiate_algos(
-                    &smb_proto_smb2::compress::parse_compression_caps(&c.data),
-                ))
-                .unwrap_or_default();
-            if dialect == smb_proto_smb2::negotiate::DIALECT_311
-                && comp_algos.contains(&smb_proto_smb2::compress::algo::LZNT1)
-            {
-                conn.compress_algo = Some(smb_proto_smb2::compress::algo::LZNT1);
-            }
-            (
-                Status::SUCCESS,
-                smb_proto_smb2::negotiate::build_response_full(
-                    dialect,
-                    &server.guid,
-                    smb_proto::types::FileTime::now().0,
-                    &salt,
-                    // Echo ENCRYPTION/SIGNING only when the client offered them
-                    // ([MS-SMB2] §3.3.5.4). With no common cipher, echo
-                    // ENCRYPTION_NONE (0) so the client clears Connection.CipherId.
-                    (!client_ciphers.is_empty())
-                        .then(|| chosen.unwrap_or(0)),
-                    req.contexts
-                        .iter()
-                        .any(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING),
-                    &comp_algos,
-                    server.require_signing,
-                ),
-            )
-        }
+        ss::cmd::NEGOTIATE => route!(),
         ss::cmd::SESSION_SETUP => route!(),
         ss::cmd::TREE_CONNECT => route!(),
         ss::cmd::TREE_DISCONNECT => route!(),
@@ -1501,6 +1349,170 @@ fn probe_negotiate_resp() -> Vec<u8> {
 
 /// Handle one leg of SPNEGO/NTLMSSP session establishment ([MS-SMB2]
 /// §3.3.5.5).
+/// How a NEGOTIATE resolves: an immediate reply, or silence because a repeat
+/// NEGOTIATE on an already-negotiated connection terminates it ([MS-SMB2]
+/// §3.3.5.4).
+pub(crate) enum NegotiateReply {
+    Reply(Status, Vec<u8>),
+    Silent,
+}
+
+/// Negotiate a dialect ([MS-SMB2] §3.3.5.3-4): answer probes with the wildcard
+/// response, pick a common dialect, validate 3.1.1 pre-auth contexts, and choose
+/// cipher/compression. The response is framed and pre-auth-hashed by the shared
+/// tail in `process_single`.
+pub(crate) fn negotiate(
+    conn: &mut Smb2Conn,
+    server: &Arc<ServerShared>,
+    hdr: &smb_proto_smb2::Header2,
+    buf: &[u8],
+) -> NegotiateReply {
+    let body_start = 64usize;
+    // A NEGOTIATE received after the connection already negotiated a dialect is
+    // invalid: the server MUST disconnect and not reply ([MS-SMB2] §3.3.5.4).
+    if conn.dialect.is_some() {
+        conn.disconnect = true;
+        return NegotiateReply::Silent;
+    }
+    // Clients probing for SMB2 support send either a header-only NEGOTIATE or one
+    // carrying Status = STATUS_INVALID_PARAMETER ([MS-SMB2] §3.3.5.3). Answer
+    // both with the wildcard-dialect response so they retry a real negotiation.
+    let parsed = smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]));
+    tracing::debug!(status = hdr.status, parsed_ok = parsed.is_some(), len = buf.len(), "negotiate probe check");
+    if hdr.status == Status::INVALID_PARAMETER.raw() || parsed.is_none() {
+        if parsed.is_none() {
+            tracing::debug!(len = buf.len(), body = %hex_str(buf.get(body_start..).unwrap_or(&[])), "negotiate parse failed");
+        }
+        return NegotiateReply::Reply(Status::INVALID_PARAMETER, probe_negotiate_resp());
+    }
+    let req = parsed.expect("validated above");
+    let Some(dialect) = smb_proto_smb2::negotiate::pick(&req.dialects) else {
+        return NegotiateReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+    };
+    conn.dialect = Some(dialect);
+    // Retain the client's NEGOTIATE fields for a later
+    // FSCTL_VALIDATE_NEGOTIATE_INFO downgrade check ([MS-SMB2] §3.3.5.15.12).
+    conn.client_guid = req.client_guid;
+    conn.client_dialects = req.dialects.clone();
+    conn.client_security_mode = g16(buf, body_start + 4);
+    conn.client_capabilities = buf
+        .get(body_start + 8..body_start + 12)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .unwrap_or(0);
+    // SMB 3.1.1 negotiate-context validation ([MS-SMB2] §3.3.5.4): exactly one
+    // PREAUTH_INTEGRITY context is required, and it must offer a hash algorithm
+    // the server supports (SHA-512).
+    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+        let preauth: Vec<_> = req
+            .contexts
+            .iter()
+            .filter(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::PREAUTH_INTEGRITY)
+            .collect();
+        if preauth.len() != 1 {
+            return NegotiateReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+        }
+        // HashAlgorithmCount(2) SaltLength(2) HashAlgorithms[] ([MS-SMB2] §2.2.3.1.1).
+        let pd = &preauth[0].data;
+        let count = pd.get(0..2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize).unwrap_or(0);
+        let algos: Vec<u16> = pd
+            .get(4..)
+            .map(|d| d.chunks_exact(2).take(count).map(|w| u16::from_le_bytes([w[0], w[1]])).collect())
+            .unwrap_or_default();
+        if !algos.contains(&smb_proto_smb2::negotiate::ctx_type::SHA512) {
+            return NegotiateReply::Reply(Status::SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP, Vec::new());
+        }
+    }
+    // Must match the Capabilities word written by build_response_full below so
+    // VALIDATE_NEGOTIATE_INFO echoes it.
+    conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
+        smb_proto_smb2::negotiate::caps::LARGE_MTU
+            | smb_proto_smb2::negotiate::caps::MULTI_CHANNEL
+            | smb_proto_smb2::negotiate::caps::LEASING
+    } else if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
+        smb_proto_smb2::negotiate::caps::LARGE_MTU
+            | smb_proto_smb2::negotiate::caps::LEASING
+    } else {
+        0
+    };
+    tracing::debug!(dialect = format!("{:#06x}", dialect), "negotiated");
+    let mut salt = [0u8; 32];
+    salt.copy_from_slice(&crate::dispatch::rand_bytes(32));
+    // Pick one cipher the client offered (GCM preferred).
+    let client_ciphers: Vec<u16> = req
+        .contexts
+        .iter()
+        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::ENCRYPTION)
+        .and_then(|c| {
+            if c.data.len() >= 2 {
+                let n = u16::from_le_bytes([c.data[0], c.data[1]]) as usize;
+                Some(
+                    c.data[2..]
+                        .chunks_exact(2)
+                        .take(n)
+                        .map(|w| u16::from_le_bytes([w[0], w[1]]))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let chosen = {
+        // GCM preferred by default ([MS-SMB2] §3.1.4.1); override with
+        // RUSTSMB_CIPHER=ccm to exercise the CCM path live.
+        let prefer_ccm = std::env::var("RUSTSMB_CIPHER")
+            .map(|v| v.eq_ignore_ascii_case("ccm"))
+            .unwrap_or(false);
+        let order = if prefer_ccm {
+            [smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
+             smb_proto_smb2::negotiate::ctx_type::AES128_GCM]
+        } else {
+            [smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
+             smb_proto_smb2::negotiate::ctx_type::AES128_CCM]
+        };
+        order.into_iter().find(|ours| client_ciphers.contains(ours))
+    };
+    // Dialects without negotiate contexts (or clients that did not offer
+    // ENCRYPTION_CAPABILITIES) must leave conn.cipher unset — otherwise
+    // --encrypt would seal sessions the peer cannot read.
+    if dialect == smb_proto_smb2::negotiate::DIALECT_311 && !client_ciphers.is_empty() {
+        conn.cipher = chosen;
+    }
+    // Compression: intersect the client's advertised algorithms with ours; a
+    // common set enables compressed transforms both ways.
+    let comp_algos = req
+        .contexts
+        .iter()
+        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION)
+        .map(|c| smb_proto_smb2::compress::negotiate_algos(
+            &smb_proto_smb2::compress::parse_compression_caps(&c.data),
+        ))
+        .unwrap_or_default();
+    if dialect == smb_proto_smb2::negotiate::DIALECT_311
+        && comp_algos.contains(&smb_proto_smb2::compress::algo::LZNT1)
+    {
+        conn.compress_algo = Some(smb_proto_smb2::compress::algo::LZNT1);
+    }
+    NegotiateReply::Reply(
+        Status::SUCCESS,
+        smb_proto_smb2::negotiate::build_response_full(
+            dialect,
+            &server.guid,
+            smb_proto::types::FileTime::now().0,
+            &salt,
+            // Echo ENCRYPTION/SIGNING only when the client offered them
+            // ([MS-SMB2] §3.3.5.4). With no common cipher, echo ENCRYPTION_NONE
+            // (0) so the client clears Connection.CipherId.
+            (!client_ciphers.is_empty()).then(|| chosen.unwrap_or(0)),
+            req.contexts
+                .iter()
+                .any(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING),
+            &comp_algos,
+            server.require_signing,
+        ),
+    )
+}
+
 pub(crate) fn session_setup(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
