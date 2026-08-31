@@ -52,7 +52,7 @@ a function, re-check that each `///` block still sits on its intended item.
 If undocumented `pub` code ever compiles, that crate is missing its `[lints]` +
 `workspace = true` opt-in — add it.
 
-## 3. No hardcoded protocol constants (review-enforced)
+## 3. No hardcoded protocol constants (lint-enforced)
 
 Never write wire-level magic numbers inline — protocol magic bytes, command
 codes, NT status values, structure sizes, field offsets, FSCTL codes,
@@ -89,17 +89,43 @@ use it — don't inline the literal.
 
 ### On lints for this rule
 
-There is **no** Rust or Clippy lint that bans magic-number literals or forces
-named constants (verified with clippy 0.1.93). The `clippy::disallowed_*` family
-only covers **types, methods, macros, names, and script-idents** — not literals —
-so there is nothing to put in `clippy.toml` for this. The literal-related lints
-(`clippy::unreadable_literal`, `clippy::decimal_literal_representation`) are
-readability-only and do not enforce the rule.
+No **built-in** Rust or Clippy lint bans magic-number literals (the
+`clippy::disallowed_*` family covers types, methods, macros, names, and
+script-idents — not literals). So this repo ships its **own** [dylint](https://github.com/trailofbits/dylint)
+lint that does enforce it.
 
-So this convention is **enforced by code review**, not the compiler. Optional
-partial nudge: enabling `clippy::unreadable_literal` (pedantic) flags long
-un-separated literals, which often surfaces a magic number worth naming — but it
-does not catch short ones like `0xFE`. Do not claim a lint enforces this.
+- The lint lives in `lints/no_magic_numbers/` (a standalone crate, `exclude`d
+  from the workspace) and is wired via `[workspace.metadata.dylint]` in the root
+  `Cargo.toml`. Run it with `cargo dylint --all -- --workspace` (or `-- -p
+  <crate>`). It flags every integer literal `> 1` except: const contexts,
+  macro expansions, `#[test]` functions, and the `smb_proto*` crates (which are
+  the sanctioned home for wire constants).
+- **The whole workspace is at zero.** Keep it there: a new inline literal is a
+  lint error, not a style nit.
+
+Two ways to satisfy the lint — pick by the literal's nature:
+
+1. **Name genuine wire constants** (offsets, command/status/FSCTL codes, masks,
+   structure sizes, dialects). Add the constant in the owning `smb-proto*` crate
+   (with a `///` citing the spec section) and reference it. This is the default
+   and preferred fix. Also prefer `size_of::<uN>()` / `.len()` for field widths
+   and reuse existing helpers (e.g. `FileTime::from_unix`) over re-deriving
+   constants.
+2. **Allow inherent-algorithm domains.** Functions dominated by an intrinsic
+   format or math — calendar/FILETIME arithmetic, crypto primitives (DES/MD4/
+   KDF/AEAD), ASN.1/DER + SPNEGO parsing, DCERPC/NDR and TRANS2 wire layout,
+   POSIX/statfs mapping, base64/JSON escaping, test-fixture sizes — carry a
+   function-level attribute **with a rationale comment**:
+
+   ```rust
+   #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // NTLM proof field widths ([MS-NLMP])
+   fn derive_session_key(...) { ... }
+   ```
+
+   The `unexpected_cfgs` check-cfg in the root `Cargo.toml` makes this attribute
+   build warning-free even when dylint isn't running. Do not blanket-allow a
+   whole module or reach for the allow when a named constant is the honest fix.
+
 
 ## 4. Build / test gate (review-enforced)
 
@@ -112,4 +138,6 @@ does not catch short ones like `0xFE`. Do not claim a lint enforces this.
 - Protocol-affecting changes must keep the regression gate: SMB2Basic BVT 27/27,
   the home-grown conformance run 30/30, and the MS-SMB2 protocol sweep count
   unchanged. See `session_summary_*.txt` and the test dashboard for the baseline.
+- Keep `cargo dylint --all -- --workspace` at **zero** magic-number findings
+  (see §3).
 - Commit messages carry **no** model/AI attribution.
