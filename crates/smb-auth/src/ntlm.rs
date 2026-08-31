@@ -66,12 +66,14 @@ pub struct Type3 {
     pub flags: u32,
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 fn rd_u32(b: &[u8], off: usize) -> u32 {
     b.get(off..off + 4)
         .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
         .unwrap_or(0)
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 fn rd_u16(b: &[u8], off: usize) -> u16 {
     b.get(off..off + 2)
         .map(|s| u16::from_le_bytes(s.try_into().unwrap()))
@@ -91,11 +93,13 @@ pub fn unwrap_blob(blob: &[u8]) -> Option<&[u8]> {
 
 /// True when the blob looks like DER/SPNEGO (starts with ASN.1 tags) rather
 /// than a raw NTLMSSP message.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 pub fn is_spnego(blob: &[u8]) -> bool {
     matches!(blob.first(), Some(0x60) | Some(0xA1)) || (blob.len() > 1 && blob[0] == 0x06)
 }
 
 /// Identify an NTLMSSP message type (1/2/3), if the buffer is one.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 pub fn msg_type(blob: &[u8]) -> Option<u32> {
     if blob.len() < 12 || &blob[..8] != NTLMSSP_SIG {
         return None;
@@ -108,6 +112,8 @@ pub fn msg_type(blob: &[u8]) -> Option<u32> {
 ///
 /// The layout follows [MS-NLMP] §2.2.1.2 including the `Version` field
 /// (NEGOTIATE_VERSION is always granted here, matching what Windows sends).
+/// Build an NTLMSSP CHALLENGE (Type 2) message ([MS-NLMP] §2.2.1.2 fixed layout).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 pub fn build_type2(challenge: &[u8; 8], domain: &str, hostname: &str) -> Vec<u8> {
     // TargetInfo AV pairs — required input for client-side NTLMv2.
     let mut ti = Vec::new();
@@ -182,6 +188,7 @@ pub fn build_type2(challenge: &[u8; 8], domain: &str, hostname: &str) -> Vec<u8>
 }
 
 /// Session key field ([MS-NLMP] §2.2.1.3): len @52, max @54, offset @56.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 pub fn parse_type3_session_key(blob: &[u8]) -> Vec<u8> {
     let len = rd_u16(blob, 52) as usize;
     let off = rd_u32(blob, 56) as usize;
@@ -192,6 +199,8 @@ pub fn parse_type3_session_key(blob: &[u8]) -> Vec<u8> {
 }
 
 /// Parse an NTLMSSP AUTHENTICATE (type 3) message per [MS-NLMP] §2.2.1.3.
+/// Parse an NTLMSSP AUTHENTICATE (Type 3) message ([MS-NLMP] §2.2.1.3 fixed layout).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 pub fn parse_type3(blob: &[u8]) -> Option<Type3> {
     if blob.len() < 32 || msg_type(blob) != Some(MSG_TYPE3) {
         return None;
@@ -224,6 +233,8 @@ pub fn parse_type3(blob: &[u8]) -> Option<Type3> {
 
 // ---------------- Minimal DER/SPNEGO helpers ----------------
 
+/// Encode an ASN.1 DER length ([X.690] §8.1.3): short form < 128, else long form.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 fn der_len(len: usize) -> Vec<u8> {
     if len < 0x80 {
         vec![len as u8]
@@ -243,6 +254,7 @@ fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
 
 /// Wrap an NTLMSSP token in a SPNEGO NegTokenTarg declaring
 /// `negResult = accept-incomplete` and `supportedMech = NTLMSSP`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SPNEGO negTokenTarg DER
 pub fn wrap_negtoken_targ(token: &[u8]) -> Vec<u8> {
     let result = der_tlv(0xA0, &der_tlv(0x0A, &[0x01]));
     let oid_bytes = [0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a]; // 1.3.6.1.4.1.311.2.2.10
@@ -255,6 +267,7 @@ pub fn wrap_negtoken_targ(token: &[u8]) -> Vec<u8> {
 }
 
 /// SPNEGO NegTokenTarg carrying only `negResult = accept-completed`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SPNEGO negTokenTarg DER
 pub fn wrap_accept_complete() -> Vec<u8> {
     let result = der_tlv(0xA0, &der_tlv(0x0A, &[0x00]));
     der_tlv(0xA1, &der_tlv(0x30, &result))
@@ -266,6 +279,7 @@ pub fn wrap_accept_complete() -> Vec<u8> {
 ///
 /// `mic` is HMAC-MD5(ExportedSessionKey, init || targ || auth) computed by
 /// the caller over the exact exchanged SPNEGO blobs.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SPNEGO negTokenTarg DER
 pub fn wrap_accept_complete_with_mic(mic: &[u8]) -> Vec<u8> {
     let result = der_tlv(0xA0, &der_tlv(0x0A, &[0x00]));
     let mic_field = der_tlv(0xA3, &der_tlv(0x04, mic));

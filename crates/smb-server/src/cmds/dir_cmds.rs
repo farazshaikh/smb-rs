@@ -6,24 +6,24 @@ use smb_proto_smb1::header::RespBody;
 use smb_proto_smb1::legacy as legacy_codec;
 use smb_vfs::SetOp;
 
-use crate::cmds::{share_vfs, IoCtx};
+use crate::cmds::{IoCtx, share_vfs};
 use crate::dispatch::ReqView;
 
 fn read_path(req: &ReqView<'_>) -> String {
     let mut rd = smb_proto::buf::Reader::new(req.data, 0);
-    if !req.data.is_empty() && req.data[0] == 0x04 {
+    if !req.data.is_empty() && req.data[0] == consts::BUFFER_FORMAT_DATA {
         rd.skip(1);
     }
-    rd.zstring(req.unicode(), req.bc_off_abs + 2)
+    rd.zstring(req.unicode(), req.bc_off_abs + consts::BYTE_COUNT_LEN)
 }
 
 fn read_two_paths(req: &ReqView<'_>) -> (String, String) {
     let data = req.data;
     let mut rd = smb_proto::buf::Reader::new(data, 0);
-    let base = req.bc_off_abs + 2;
-    if !data.is_empty() && data[0] == 0x04 {
+    let base = req.bc_off_abs + consts::BYTE_COUNT_LEN;
+    if !data.is_empty() && data[0] == consts::BUFFER_FORMAT_DATA {
         rd.skip(1);
-    } else if unicode(req) && base % 2 != 0 && !data.is_empty() {
+    } else if unicode(req) && base % consts::WORD_LEN != 0 && !data.is_empty() {
         rd.skip(1);
     }
     let a = rd.zstring(unicode(req), base);
@@ -31,7 +31,7 @@ fn read_two_paths(req: &ReqView<'_>) -> (String, String) {
         if unicode(req) && (base + rd.pos()) & 1 != 0 {
             rd.skip(1);
         }
-        if rd.pos() < data.len() && data[rd.pos()] == 0x04 {
+        if rd.pos() < data.len() && data[rd.pos()] == consts::BUFFER_FORMAT_DATA {
             rd.skip(1);
         }
     }
@@ -51,7 +51,11 @@ pub async fn mkdir(
 ) -> Result<Status, Status> {
     let vfs = share_vfs(io, req.hdr.tid);
     vfs.mkdir(&read_path(req)).await.map_err(vfs_err)?;
-    bodies.push(RespBody::new(consts::COM_CREATE_DIRECTORY, Vec::new(), Vec::new()));
+    bodies.push(RespBody::new(
+        consts::COM_CREATE_DIRECTORY,
+        Vec::new(),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -63,7 +67,11 @@ pub async fn rmdir(
 ) -> Result<Status, Status> {
     let vfs = share_vfs(io, req.hdr.tid);
     vfs.rmdir(&read_path(req)).await.map_err(vfs_err)?;
-    bodies.push(RespBody::new(consts::COM_DELETE_DIRECTORY, Vec::new(), Vec::new()));
+    bodies.push(RespBody::new(
+        consts::COM_DELETE_DIRECTORY,
+        Vec::new(),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -75,7 +83,11 @@ pub async fn check_dir(
 ) -> Result<Status, Status> {
     let vfs = share_vfs(io, req.hdr.tid);
     vfs.check_dir(&read_path(req)).await.map_err(vfs_err)?;
-    bodies.push(RespBody::new(consts::COM_CHECK_DIRECTORY, Vec::new(), Vec::new()));
+    bodies.push(RespBody::new(
+        consts::COM_CHECK_DIRECTORY,
+        Vec::new(),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -93,7 +105,10 @@ pub async fn delete(
         let rel = join_rel(&dir_rel, &name_pat);
         vfs.unlink(&rel).await.map_err(vfs_err)?;
     } else {
-        let deleted = vfs.delete_pattern(&dir_rel, &name_pat).await.map_err(vfs_err)?;
+        let deleted = vfs
+            .delete_pattern(&dir_rel, &name_pat)
+            .await
+            .map_err(vfs_err)?;
         if !deleted {
             return Err(Status::NO_SUCH_FILE);
         }
@@ -119,6 +134,9 @@ pub async fn rename(
 }
 
 /// QUERY_INFORMATION (0x08): attributes + DOS time + size.
+/// QUERY_INFORMATION (0x08): pack size/attributes and the DOS date/time word
+/// ([MS-DTYP] §2.3.4/5 bit-packing uses fixed calendar/field constants).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 pub async fn query_info_legacy(
     io: &mut IoCtx<'_>,
     req: &ReqView<'_>,
@@ -138,8 +156,7 @@ pub async fn query_info_legacy(
     let minutes = (tod % 3600) / 60;
     let seconds = tod % 60 / 2 * 2;
     let dos_time = ((hours as u32) << 11) | ((minutes as u32) << 5) | (seconds as u32);
-    let dos_date =
-        (((year - 1980).clamp(0, 127) as u32) << 9) | ((month as u32) << 5) | day as u32;
+    let dos_date = (((year - 1980).clamp(0, 127) as u32) << 9) | ((month as u32) << 5) | day as u32;
 
     let attrs = if m.is_dir {
         0x10u16
@@ -148,12 +165,21 @@ pub async fn query_info_legacy(
     } else {
         0x20u16
     };
-    let resp = legacy_codec::QueryInfoResp { attrs, dos_time: dos_date | dos_time, size: m.eof as u32 };
-    bodies.push(RespBody::new(consts::COM_QUERY_INFORMATION, resp.encode(), Vec::new()));
+    let resp = legacy_codec::QueryInfoResp {
+        attrs,
+        dos_time: dos_date | dos_time,
+        size: m.eof as u32,
+    };
+    bodies.push(RespBody::new(
+        consts::COM_QUERY_INFORMATION,
+        resp.encode(),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
-/// SET_INFORMATION (0x09): apply the last-write time.
+/// SET_INFORMATION (0x09): apply the last-write time (Unix->FILETIME epoch math).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 pub async fn set_info_legacy(
     io: &mut IoCtx<'_>,
     req: &ReqView<'_>,
@@ -166,12 +192,22 @@ pub async fn set_info_legacy(
         let utime = u32::from_le_bytes([w[2], w[3], w[4], w[5]]);
         if utime != 0 && utime != u32::MAX {
             let ft = smb_proto::types::FileTime((utime as u64 + 11_644_473_600) * 10_000_000);
-            vfs.set_info_path(&path, &SetOp::Basic { access: None, write: Some(ft) })
-                .await
-                .map_err(vfs_err)?;
+            vfs.set_info_path(
+                &path,
+                &SetOp::Basic {
+                    access: None,
+                    write: Some(ft),
+                },
+            )
+            .await
+            .map_err(vfs_err)?;
         }
     }
-    bodies.push(RespBody::new(consts::COM_SET_INFORMATION, Vec::new(), Vec::new()));
+    bodies.push(RespBody::new(
+        consts::COM_SET_INFORMATION,
+        Vec::new(),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -209,6 +245,9 @@ pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
     }
 }
 
+/// Gregorian civil date from a Unix day number (Howard Hinnant's `civil_from_days`
+/// algorithm; its era/day constants are canonical to the algorithm).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);

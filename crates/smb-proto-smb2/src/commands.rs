@@ -8,8 +8,6 @@
 /// Byte offset where each request body begins.
 pub const BODY: usize = 64;
 
-
-
 /// SMB2 file identifier (16 bytes, replaces SMB1's 16-bit FID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileId(pub [u8; 16]);
@@ -162,7 +160,12 @@ pub mod durable {
 }
 
 /// Walk a CREATE create-context chain, invoking `f(name, data)` for each entry.
-fn walk_create_contexts(frame: &[u8], ctx_off: usize, ctx_len: usize, mut f: impl FnMut(&[u8], &[u8])) {
+fn walk_create_contexts(
+    frame: &[u8],
+    ctx_off: usize,
+    ctx_len: usize,
+    mut f: impl FnMut(&[u8], &[u8]),
+) {
     if ctx_len == 0 || ctx_off < BODY {
         return;
     }
@@ -211,7 +214,9 @@ fn parse_durable_context(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option
                 create_guid: data[16..32].try_into().unwrap(),
             })
         } else if name == durable::RECONNECT_V1 && data.len() >= 16 {
-            Some(DurableReq::ReconnectV1 { file_id: data[0..16].try_into().unwrap() })
+            Some(DurableReq::ReconnectV1 {
+                file_id: data[0..16].try_into().unwrap(),
+            })
         } else if name == durable::REQ_V1 {
             Some(DurableReq::RequestV1)
         } else {
@@ -393,7 +398,6 @@ pub mod lease {
     pub const BREAK_FLAG_ACK_REQUIRED: u32 = 0x01;
 }
 
-
 /// Granted lease returned in a CREATE response `RqLs` context.
 #[derive(Debug, Clone, Copy)]
 pub struct LeaseResp {
@@ -502,7 +506,6 @@ pub fn build_create_resp(
     b
 }
 
-
 /// Build an OPLOCK_BREAK notification body ([MS-SMB2] §2.2.23.1): a 24-byte
 /// structure telling the holder to break its oplock down to `new_level`.
 pub fn build_oplock_break(file_id: FileId, new_level: u8) -> Vec<u8> {
@@ -597,7 +600,6 @@ impl LeaseBreakAck {
     }
 }
 
-
 // ---------------- READ (§2.2.19 / §2.2.19.1) ----------------
 
 /// READ request fixed-part offsets.
@@ -644,7 +646,12 @@ impl ReadReq {
         Some(ReadReq {
             length: g32(frame, read_off::LENGTH),
             offset: g64(frame, read_off::OFFSET),
-            file_id: FileId(frame.get(read_off::FILE_ID..read_off::FILE_ID + 16)?.try_into().ok()?),
+            file_id: FileId(
+                frame
+                    .get(read_off::FILE_ID..read_off::FILE_ID + 16)?
+                    .try_into()
+                    .ok()?,
+            ),
             min_count: g32(frame, read_off::MIN_COUNT),
         })
     }
@@ -721,7 +728,12 @@ impl WriteReq {
         };
         Some(WriteReq {
             offset: g64(frame, write_off::OFFSET),
-            file_id: FileId(frame.get(write_off::FILE_ID..write_off::FILE_ID + 16)?.try_into().ok()?),
+            file_id: FileId(
+                frame
+                    .get(write_off::FILE_ID..write_off::FILE_ID + 16)?
+                    .try_into()
+                    .ok()?,
+            ),
             payload,
         })
     }
@@ -771,7 +783,12 @@ impl CloseReq {
         }
         Some(CloseReq {
             query_attrs: g16(frame, close_off::FLAGS) & 0x0001 != 0,
-            file_id: FileId(frame.get(close_off::FILE_ID..close_off::FILE_ID + 16)?.try_into().ok()?),
+            file_id: FileId(
+                frame
+                    .get(close_off::FILE_ID..close_off::FILE_ID + 16)?
+                    .try_into()
+                    .ok()?,
+            ),
         })
     }
 }
@@ -807,7 +824,9 @@ impl FlushReq {
         if frame.len() < BODY + 20 || g16(frame, BODY) != 24 {
             return None;
         }
-        Some(FlushReq { file_id: FileId(frame.get(BODY + 4..BODY + 20)?.try_into().ok()?) })
+        Some(FlushReq {
+            file_id: FileId(frame.get(BODY + 4..BODY + 20)?.try_into().ok()?),
+        })
     }
 }
 
@@ -894,7 +913,12 @@ impl QueryDirReq {
             class: *frame.get(qdir_off::CLASS)?,
             flags: *frame.get(qdir_off::FLAGS)?,
             file_index: g32(frame, qdir_off::FILE_INDEX),
-            file_id: FileId(frame.get(qdir_off::FILE_ID..qdir_off::FILE_ID + 16)?.try_into().ok()?),
+            file_id: FileId(
+                frame
+                    .get(qdir_off::FILE_ID..qdir_off::FILE_ID + 16)?
+                    .try_into()
+                    .ok()?,
+            ),
             pattern: String::from_utf16_lossy(&units),
         })
     }
@@ -991,7 +1015,12 @@ impl QueryInfoReq {
             class: *frame.get(qinfo_off::CLASS)?,
             output_len: g32(frame, qinfo_off::OUTPUT_LEN),
             additional: g32(frame, qinfo_off::ADDITIONAL),
-            file_id: FileId(frame.get(qinfo_off::FILE_ID..qinfo_off::FILE_ID + 16)?.try_into().ok()?),
+            file_id: FileId(
+                frame
+                    .get(qinfo_off::FILE_ID..qinfo_off::FILE_ID + 16)?
+                    .try_into()
+                    .ok()?,
+            ),
             input,
         })
     }
@@ -1054,7 +1083,12 @@ impl SetInfoReq {
             info_type: *frame.get(sinfo_off::INFO_TYPE)?,
             class: *frame.get(sinfo_off::CLASS)?,
             additional: g32(frame, sinfo_off::ADDITIONAL),
-            file_id: FileId(frame.get(sinfo_off::FILE_ID..sinfo_off::FILE_ID + 16)?.try_into().ok()?),
+            file_id: FileId(
+                frame
+                    .get(sinfo_off::FILE_ID..sinfo_off::FILE_ID + 16)?
+                    .try_into()
+                    .ok()?,
+            ),
             buffer,
         })
     }
@@ -1189,7 +1223,10 @@ impl LockReq {
                 fail_immediately: flags & 0x10 != 0,
             });
         }
-        Some(LockReq { file_id: fid, locks })
+        Some(LockReq {
+            file_id: fid,
+            locks,
+        })
     }
 }
 
@@ -1233,10 +1270,17 @@ pub fn build_symlink_error_response(
     unparsed_path_len: u16,
     relative: bool,
 ) -> Vec<u8> {
-    let sub: Vec<u8> = substitute.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let sub: Vec<u8> = substitute
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
     let prt: Vec<u8> = print.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     let path_len = (sub.len() + prt.len()) as u16;
-    let flags = if relative { error::SYMLINK_FLAG_RELATIVE } else { 0 };
+    let flags = if relative {
+        error::SYMLINK_FLAG_RELATIVE
+    } else {
+        0
+    };
 
     let mut data = Vec::new();
     data.extend_from_slice(&(error::SYMLINK_FIXED_LEN + path_len as u32).to_le_bytes()); // SymLinkLength
@@ -1456,7 +1500,10 @@ impl IoctlReq {
         Some(IoctlReq {
             ctl_code: g32(frame, ioctl_off::CTL_CODE),
             file_id: FileId(
-                frame.get(ioctl_off::FILE_ID..ioctl_off::FILE_ID + 16)?.try_into().ok()?,
+                frame
+                    .get(ioctl_off::FILE_ID..ioctl_off::FILE_ID + 16)?
+                    .try_into()
+                    .ok()?,
             ),
             input,
             max_output: g32(frame, ioctl_off::MAX_OUTPUT),
@@ -1558,7 +1605,11 @@ pub fn build_resume_key_resp(key: &[u8; 24]) -> Vec<u8> {
 /// Build the SRV_COPYCHUNK_RESPONSE ([MS-SMB2] §2.2.32.1). On success it
 /// reports chunks/bytes written; on a limits violation the caller sends it
 /// with STATUS_INVALID_PARAMETER carrying the server's maximums.
-pub fn build_copychunk_resp(chunks_written: u32, chunk_bytes_written: u32, total_bytes_written: u32) -> Vec<u8> {
+pub fn build_copychunk_resp(
+    chunks_written: u32,
+    chunk_bytes_written: u32,
+    total_bytes_written: u32,
+) -> Vec<u8> {
     let mut b = Vec::with_capacity(12);
     b.extend_from_slice(&chunks_written.to_le_bytes());
     b.extend_from_slice(&chunk_bytes_written.to_le_bytes());
@@ -1632,18 +1683,12 @@ impl TransformHdr {
     pub fn aad<'a>(&self, frame: &'a [u8]) -> &'a [u8] {
         &frame[tf_off::NONCE..tf_off::HDR_SIZE]
     }
-
 }
-
 
 /// Build the 52-byte transform header with a zeroed Signature field
 /// (the AEAD tag is copied in after sealing).
 #[allow(clippy::too_many_arguments)]
-pub fn build_transform(
-    session_id: u64,
-    nonce: &[u8; 16],
-    original_len: usize,
-) -> Vec<u8> {
+pub fn build_transform(session_id: u64, nonce: &[u8; 16], original_len: usize) -> Vec<u8> {
     let mut t = Vec::with_capacity(tf_off::HDR_SIZE);
     t.extend_from_slice(&TF_MAGIC);
     t.extend_from_slice(&[0u8; 16]); // Signature (tag lands here)
@@ -1674,12 +1719,19 @@ mod change_notify_tests {
     #[test]
     fn parses_change_notify_request() {
         let fid = [7u8; 16];
-        let frame = change_notify_request(fid, true, notify_filter::FILE_NAME | notify_filter::LAST_WRITE);
+        let frame = change_notify_request(
+            fid,
+            true,
+            notify_filter::FILE_NAME | notify_filter::LAST_WRITE,
+        );
         let req = ChangeNotifyReq::parse(&frame).expect("parse");
         assert_eq!(req.file_id.0, fid);
         assert!(req.watch_tree);
         assert_eq!(req.output_len, 65536);
-        assert_eq!(req.filter, notify_filter::FILE_NAME | notify_filter::LAST_WRITE);
+        assert_eq!(
+            req.filter,
+            notify_filter::FILE_NAME | notify_filter::LAST_WRITE
+        );
     }
 
     #[test]
@@ -1696,7 +1748,13 @@ mod change_notify_tests {
         assert_eq!(&buf[0..4], &0u32.to_le_bytes());
         assert_eq!(&buf[4..8], &notify_action::ADDED.to_le_bytes());
         assert_eq!(&buf[8..12], &14u32.to_le_bytes());
-        assert_eq!(&buf[12..26], &"new.txt".encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<_>>()[..]);
+        assert_eq!(
+            &buf[12..26],
+            &"new.txt"
+                .encode_utf16()
+                .flat_map(|u| u.to_le_bytes())
+                .collect::<Vec<_>>()[..]
+        );
         assert_eq!(buf.len() % 4, 0);
     }
 
@@ -1709,8 +1767,15 @@ mod change_notify_tests {
         let next = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
         assert_ne!(next, 0, "first record must point to the second");
         assert_eq!(next % 4, 0, "records are 4-byte aligned");
-        assert_eq!(&buf[next..next + 4], &0u32.to_le_bytes(), "second record terminates");
-        assert_eq!(&buf[next + 4..next + 8], &notify_action::REMOVED.to_le_bytes());
+        assert_eq!(
+            &buf[next..next + 4],
+            &0u32.to_le_bytes(),
+            "second record terminates"
+        );
+        assert_eq!(
+            &buf[next + 4..next + 8],
+            &notify_action::REMOVED.to_le_bytes()
+        );
     }
 
     #[test]
@@ -1719,7 +1784,11 @@ mod change_notify_tests {
         let body = build_change_notify_resp(&notify);
         assert_eq!(&body[0..2], &9u16.to_le_bytes(), "StructureSize");
         assert_eq!(&body[2..4], &72u16.to_le_bytes(), "OutputBufferOffset");
-        assert_eq!(&body[4..8], &(notify.len() as u32).to_le_bytes(), "OutputBufferLength");
+        assert_eq!(
+            &body[4..8],
+            &(notify.len() as u32).to_le_bytes(),
+            "OutputBufferLength"
+        );
         assert_eq!(&body[8..], &notify[..]);
     }
 
@@ -1843,7 +1912,17 @@ mod oplock_codec_tests {
 
     #[test]
     fn create_response_carries_oplock_level() {
-        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::EXCLUSIVE, &[]);
+        let body = build_create_resp(
+            FileId([1; 16]),
+            1,
+            [0; 4],
+            0,
+            0,
+            0,
+            false,
+            oplock::EXCLUSIVE,
+            &[],
+        );
         assert_eq!(body[2], oplock::EXCLUSIVE, "OplockLevel @2");
         assert_eq!(&body[80..84], &0u32.to_le_bytes(), "no contexts");
     }
@@ -1875,25 +1954,63 @@ mod symlink_error_tests {
     fn symlink_error_response_matches_spec_layout() {
         // Relative symlink "t" with an unparsed tail of 8 bytes (4 UTF-16 units).
         let body = build_symlink_error_response("t", "t", 8, true);
-        assert_eq!(u16::from_le_bytes([body[0], body[1]]), error::RESPONSE_STRUCTURE_SIZE);
+        assert_eq!(
+            u16::from_le_bytes([body[0], body[1]]),
+            error::RESPONSE_STRUCTURE_SIZE
+        );
         assert_eq!(body[2], 0, "ErrorContextCount");
         let byte_count = u32::from_le_bytes(body[4..8].try_into().unwrap()) as usize;
         let data = &body[8..];
         assert_eq!(byte_count, data.len());
 
         let name_bytes = 2u16; // "t" as one UTF-16 unit
-        assert_eq!(u32::from_le_bytes(data[0..4].try_into().unwrap()),
-            error::SYMLINK_FIXED_LEN + (2 * name_bytes) as u32, "SymLinkLength");
-        assert_eq!(u32::from_le_bytes(data[4..8].try_into().unwrap()), error::SYMLINK_ERROR_TAG);
-        assert_eq!(u32::from_le_bytes(data[8..12].try_into().unwrap()), error::IO_REPARSE_TAG_SYMLINK);
-        assert_eq!(u16::from_le_bytes(data[12..14].try_into().unwrap()),
-            error::REPARSE_HEADER_LEN + 2 * name_bytes, "ReparseDataLength");
-        assert_eq!(u16::from_le_bytes(data[14..16].try_into().unwrap()), 8, "UnparsedPathLength");
-        assert_eq!(u16::from_le_bytes(data[16..18].try_into().unwrap()), 0, "SubstituteNameOffset");
-        assert_eq!(u16::from_le_bytes(data[18..20].try_into().unwrap()), name_bytes, "SubstituteNameLength");
-        assert_eq!(u16::from_le_bytes(data[20..22].try_into().unwrap()), name_bytes, "PrintNameOffset");
-        assert_eq!(u16::from_le_bytes(data[22..24].try_into().unwrap()), name_bytes, "PrintNameLength");
-        assert_eq!(u32::from_le_bytes(data[24..28].try_into().unwrap()), error::SYMLINK_FLAG_RELATIVE);
+        assert_eq!(
+            u32::from_le_bytes(data[0..4].try_into().unwrap()),
+            error::SYMLINK_FIXED_LEN + (2 * name_bytes) as u32,
+            "SymLinkLength"
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[4..8].try_into().unwrap()),
+            error::SYMLINK_ERROR_TAG
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[8..12].try_into().unwrap()),
+            error::IO_REPARSE_TAG_SYMLINK
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[12..14].try_into().unwrap()),
+            error::REPARSE_HEADER_LEN + 2 * name_bytes,
+            "ReparseDataLength"
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[14..16].try_into().unwrap()),
+            8,
+            "UnparsedPathLength"
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[16..18].try_into().unwrap()),
+            0,
+            "SubstituteNameOffset"
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[18..20].try_into().unwrap()),
+            name_bytes,
+            "SubstituteNameLength"
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[20..22].try_into().unwrap()),
+            name_bytes,
+            "PrintNameOffset"
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[22..24].try_into().unwrap()),
+            name_bytes,
+            "PrintNameLength"
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[24..28].try_into().unwrap()),
+            error::SYMLINK_FLAG_RELATIVE
+        );
     }
 
     #[test]
@@ -1963,9 +2080,25 @@ mod lease_codec_tests {
 
     #[test]
     fn create_response_appends_lease_context() {
-        let grant = LeaseResp { key: [0x33; 16], state: lease::RH, flags: 0, epoch: 1, v2: true };
+        let grant = LeaseResp {
+            key: [0x33; 16],
+            state: lease::RH,
+            flags: 0,
+            epoch: 1,
+            v2: true,
+        };
         let ctx = encode_create_contexts(&[(lease::CONTEXT_NAME, lease_context_data(&grant))]);
-        let body = build_create_resp(FileId([1; 16]), 1, [0; 4], 0, 0, 0, false, oplock::LEASE, &ctx);
+        let body = build_create_resp(
+            FileId([1; 16]),
+            1,
+            [0; 4],
+            0,
+            0,
+            0,
+            false,
+            oplock::LEASE,
+            &ctx,
+        );
         assert_eq!(body[2], oplock::LEASE, "OplockLevel = lease");
         let off = u32::from_le_bytes(body[80..84].try_into().unwrap()) as usize;
         let len = u32::from_le_bytes(body[84..88].try_into().unwrap()) as usize;
@@ -1993,7 +2126,11 @@ mod lease_codec_tests {
         frame.extend_from_slice(&body);
         frame.extend_from_slice(&ctx);
         match CreateReq::parse(&frame).unwrap().durable.expect("durable") {
-            DurableReq::RequestV2 { timeout, flags, create_guid } => {
+            DurableReq::RequestV2 {
+                timeout,
+                flags,
+                create_guid,
+            } => {
                 assert_eq!(timeout, 5000);
                 assert_eq!(flags, durable::FLAG_PERSISTENT);
                 assert_eq!(create_guid, [0xAB; 16]);
@@ -2004,12 +2141,26 @@ mod lease_codec_tests {
 
     #[test]
     fn lease_break_notification_shape() {
-        let brk = build_lease_break([9; 16], lease::RWH, lease::RH, 2, lease::BREAK_FLAG_ACK_REQUIRED);
+        let brk = build_lease_break(
+            [9; 16],
+            lease::RWH,
+            lease::RH,
+            2,
+            lease::BREAK_FLAG_ACK_REQUIRED,
+        );
         assert_eq!(brk.len(), 44);
         assert_eq!(&brk[0..2], &44u16.to_le_bytes(), "StructureSize");
         assert_eq!(&brk[8..24], &[9u8; 16], "LeaseKey");
-        assert_eq!(u32::from_le_bytes(brk[24..28].try_into().unwrap()), lease::RWH, "Current");
-        assert_eq!(u32::from_le_bytes(brk[28..32].try_into().unwrap()), lease::RH, "New");
+        assert_eq!(
+            u32::from_le_bytes(brk[24..28].try_into().unwrap()),
+            lease::RWH,
+            "Current"
+        );
+        assert_eq!(
+            u32::from_le_bytes(brk[28..32].try_into().unwrap()),
+            lease::RH,
+            "New"
+        );
     }
 
     #[test]
@@ -2021,7 +2172,6 @@ mod lease_codec_tests {
         assert_eq!(ack.state, lease::RH);
     }
 }
-
 
 #[cfg(test)]
 mod query_dir_tests {
@@ -2037,6 +2187,9 @@ mod query_dir_tests {
         f.extend_from_slice(&body);
         let req = QueryDirReq::parse(&f).expect("parse");
         assert_eq!(req.file_index, 7, "resume index parsed");
-        assert_eq!(req.flags & find_flags::INDEX_SPECIFIED, find_flags::INDEX_SPECIFIED);
+        assert_eq!(
+            req.flags & find_flags::INDEX_SPECIFIED,
+            find_flags::INDEX_SPECIFIED
+        );
     }
 }

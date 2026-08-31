@@ -26,6 +26,8 @@ mod nb_type {
 
 /// Largest NBSS session-message payload we accept (2 MiB).
 const MAX_FRAME: usize = 0x20_0000;
+/// NBSS header length: message type (1 byte) + 24-bit length (3 bytes).
+const NBSS_HEADER_LEN: usize = 4;
 /// Per-read socket scratch size handed to io_uring.
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -77,7 +79,7 @@ impl NbssReader {
         mut answer: Option<&Rc<TcpStream>>,
     ) -> Result<Option<Frame>, TransportError> {
         loop {
-            let hdr = match self.take(4).await? {
+            let hdr = match self.take(NBSS_HEADER_LEN).await? {
                 Some(h) => h,
                 None => return Ok(None),
             };
@@ -118,11 +120,13 @@ impl NbssReader {
 /// participates. Masking to the RFC 1002 17-bit limit would truncate any frame
 /// >= 128 KiB (multi-credit reads/writes, sealed transforms) and desync the
 /// stream; the length must decode symmetrically with [`encode_nbss_len`].
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 fn decode_nbss_len(hdr: &[u8]) -> usize {
     ((hdr[1] as usize) << 16) | ((hdr[2] as usize) << 8) | hdr[3] as usize
 }
 
 /// Encode a 24-bit NBSS session-message length into the 3 length bytes.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 fn encode_nbss_len(len: usize) -> [u8; 3] {
     [(len >> 16) as u8, (len >> 8) as u8, (len & 0xff) as u8]
 }
@@ -132,7 +136,7 @@ async fn write_nbss(stream: &TcpStream, data: &[u8]) -> Result<(), TransportErro
     // Frames above 64 KiB (multi-credit reads/writes, sealed transform
     // payloads) need the middle byte, and above 128 KiB the high byte.
     let len = encode_nbss_len(data.len());
-    let mut frame = Vec::with_capacity(4 + data.len());
+    let mut frame = Vec::with_capacity(NBSS_HEADER_LEN + data.len());
     frame.push(nb_type::SESSION_MESSAGE);
     frame.extend_from_slice(&len);
     frame.extend_from_slice(data);

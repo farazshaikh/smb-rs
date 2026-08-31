@@ -77,6 +77,7 @@ pub(crate) mod csp_call {
 
 
 /// NT hash = MD4 of the UTF-16LE encoded password ([MS-NLMP] §3.3.1.1).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // MD4 of UTF-16LE password
 pub fn nt_hash(password: &str) -> [u8; 16] {
     let mut bytes = Vec::with_capacity(password.len() * 2);
     for u in password.encode_utf16() {
@@ -90,6 +91,7 @@ pub fn nt_hash(password: &str) -> [u8; 16] {
 ///
 /// This is protocol plumbing on top of the backend primitive rather than a
 /// primitive itself, so it is shared by both backends unchanged.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SP800-108 counter-mode KDF
 pub fn kdf_counter_mode_hmac_sha256(
     key: &[u8],
     label: &[u8],

@@ -79,6 +79,7 @@ impl PosixVfs {
     /// Open or create an alternate data stream, backed by an extended attribute
     /// on the base file. The base file's own data stream is never truncated
     /// here; create/overwrite dispositions apply to the stream contents only.
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
     async fn create_stream(
         &self,
         base_rel: &str,
@@ -183,6 +184,7 @@ fn stream_xattr(name: &str) -> String {
 }
 
 /// Decode an NT desired-access mask into `(read, write)` capability flags.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // Windows ACCESS_MASK bits
 fn access_flags(access: u32) -> (bool, bool) {
     let read = access & (0x8000_0000 | 0x0000_0001 | 0x0000_0008 | 0x0000_0080 | 0x1000_0000) != 0;
     let write = access
@@ -220,7 +222,7 @@ fn symlink_stop(root: &std::path::Path, rel: &str) -> Option<(String, u16, bool)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         // The unparsed portion is the request path after the symlink component.
-        let unparsed_len = (rel[i..].encode_utf16().count() * 2) as u16;
+        let unparsed_len = (rel[i..].encode_utf16().count() * size_of::<u16>()) as u16;
         let relative = !std::path::Path::new(&target).is_absolute();
         return Some((target, unparsed_len, relative));
     }
@@ -260,6 +262,7 @@ fn find_case_insensitive(dir: &std::path::Path, name: &str) -> Option<String> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // POSIX mode/stat + block-size math
 fn meta_of(md: &std::fs::Metadata) -> FileMeta {
     use std::os::unix::fs::MetadataExt;
     let attrs = AttrFlags::new(if md.is_dir() {
@@ -322,6 +325,7 @@ pub fn wildcard_match(name: &str, pattern: &str) -> bool {
 
 #[async_trait(?Send)]
 impl Vfs for PosixVfs {
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB CreateAction/disposition codes
     async fn create(
         &self,
         rel: &str,
@@ -485,6 +489,7 @@ impl Vfs for PosixVfs {
         Ok(total as u64)
     }
 
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB seek-mode codes
     async fn seek(&self, open: &mut OpenFile, mode: u16, offset: i64) -> VfsResult<u64> {
         // Positional I/O needs no lseek; track the cursor for SMB1 SEEK.
         let size = std::fs::metadata(&open.path).map(|m| m.len()).unwrap_or(0);
@@ -688,6 +693,7 @@ impl Vfs for PosixVfs {
         Ok(())
     }
 
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // reported statfs figures
     async fn query_disk(&self) -> VfsResult<(u32, u32, u16, u16)> {
         // Static values keep clients happy; real statvfs wiring can come later.
         Ok((100_000, 50_000, 512, 64))

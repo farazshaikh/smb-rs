@@ -95,7 +95,8 @@ pub trait Vfs: Send + Sync {
     /// (FSCTL_SET_ZERO_DATA). The default writes zeros through [`Vfs::write`];
     /// backends may override to punch a sparse hole.
     async fn zero_range(&self, open: &mut OpenFile, offset: u64, len: u64) -> VfsResult<()> {
-        let zeros = vec![0u8; 64 * 1024];
+        const ZERO_CHUNK: usize = 64 * 1024;
+        let zeros = vec![0u8; ZERO_CHUNK];
         let mut pos = offset;
         let mut remaining = len;
         while remaining > 0 {

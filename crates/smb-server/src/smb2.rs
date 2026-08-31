@@ -7,8 +7,8 @@
 //! `\xFESMB` route here from [`crate::dispatch`].
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use metrics::{counter, gauge};
 use tokio::sync::{mpsc, oneshot};
@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use smb_proto::types::Status;
 use smb_proto_smb2::commands as c;
 use smb_proto_smb2::consts::{aead, hdr, hdr_flags};
-use smb_proto_smb2::info as info;
+use smb_proto_smb2::info;
 use smb_proto_smb2::session_setup as ss;
 use smb_transport::Transport;
 
@@ -253,10 +253,7 @@ pub async fn serve_client(
 
 /// Respond to an SMB1 multi-protocol NEGOTIATE that carries the `\xFESMB`
 /// dialect marker: builds the SMB2 negotiate response so the client upgrades.
-pub fn handle_multiprotocol_negotiate(
-    buf: &[u8],
-    guid: &[u8; 16],
-) -> Option<Vec<u8>> {
+pub fn handle_multiprotocol_negotiate(buf: &[u8], guid: &[u8; 16]) -> Option<Vec<u8>> {
     let (hdr, _wc_off) = smb_proto_smb1::header::parse_header(buf)?;
     let _ = hdr;
     // The multi-protocol NEGOTIATE response is MessageId 0 ([MS-SMB2]
@@ -367,9 +364,8 @@ pub(crate) async fn process_frame(
 
     // Assemble compound reply: every frame except the last carries
     // NextCommand pointing at the following frame, 8-byte aligned.
-    let mut out: Vec<u8> = Vec::with_capacity(
-        parts.iter().map(|p| p.0.len() + (hdr::ALIGN - 1)).sum(),
-    );
+    let mut out: Vec<u8> =
+        Vec::with_capacity(parts.iter().map(|p| p.0.len() + (hdr::ALIGN - 1)).sum());
     let mut starts = Vec::with_capacity(parts.len());
     for (p, _) in &parts {
         while out.len() % hdr::ALIGN != 0 {
@@ -425,7 +421,12 @@ fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
     None
 }
 #[cfg(not(feature = "lib"))]
-fn seal_pdu(session_id: u64, enc_keys: ([u8; 16], [u8; 16]), cipher: u16, msg: &[u8]) -> Option<Vec<u8>> {
+fn seal_pdu(
+    session_id: u64,
+    enc_keys: ([u8; 16], [u8; 16]),
+    cipher: u16,
+    msg: &[u8],
+) -> Option<Vec<u8>> {
     let _ = (session_id, enc_keys, cipher, msg);
     None
 }
@@ -437,10 +438,19 @@ fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
 /// request path and background async tasks can encrypt without borrowing the
 /// whole connection.
 #[cfg(not(feature = "handrolled"))]
-fn seal_pdu(session_id: u64, enc_keys: ([u8; 16], [u8; 16]), cipher: u16, msg: &[u8]) -> Option<Vec<u8>> {
+fn seal_pdu(
+    session_id: u64,
+    enc_keys: ([u8; 16], [u8; 16]),
+    cipher: u16,
+    msg: &[u8],
+) -> Option<Vec<u8>> {
     let (_c2s, s2c) = enc_keys;
     let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
-    let iv_size = if gcm { aead::GCM_NONCE_LEN } else { aead::CCM_NONCE_LEN };
+    let iv_size = if gcm {
+        aead::GCM_NONCE_LEN
+    } else {
+        aead::CCM_NONCE_LEN
+    };
 
     let mut nonce_field = [0u8; 16];
     nonce_field[..iv_size].copy_from_slice(&crate::dispatch::rand_bytes(iv_size));
@@ -487,7 +497,10 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
         }
     };
     if tf.session_id != conn.session_id {
-        tracing::warn!(sid = format!("{:#x}", tf.session_id), "transform sid mismatch");
+        tracing::warn!(
+            sid = format!("{:#x}", tf.session_id),
+            "transform sid mismatch"
+        );
         return None;
     }
     let Some((c2s, _s2c)) = conn.enc_keys else {
@@ -499,12 +512,10 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
         return None;
     };
     let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
-    let aad = frame.get(
-        smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::HDR_SIZE,
-    )?;
-    let payload = frame.get(
-        smb_proto_smb2::commands::tf_off::HDR_SIZE..tf_off_end(tf.original_len),
-    )?;
+    let aad = frame
+        .get(smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::HDR_SIZE)?;
+    let payload =
+        frame.get(smb_proto_smb2::commands::tf_off::HDR_SIZE..tf_off_end(tf.original_len))?;
     // The GCM/CCM tag travels in the TF Signature field ([MS-SMB2]
     // §2.2.41), detached from the ciphertext; re-attach it for the AEAD
     // open, which expects ct||tag.
@@ -592,7 +603,11 @@ async fn via_typestate(
     };
     let ctx = crate::io::IoContext::accept(reply, req);
     let outcome = {
-        let mut res = crate::io::Resources { conn, server, frame: buf };
+        let mut res = crate::io::Resources {
+            conn,
+            server,
+            frame: buf,
+        };
         crate::io::dispatch(ctx, &mut res).await
     };
     match outcome {
@@ -652,7 +667,10 @@ async fn process_single(
     let sid = hdr.session_id;
 
     // Commands valid without an authenticated session.
-    let pre_session = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP | ss::cmd::ECHO);
+    let pre_session = matches!(
+        hdr.command,
+        ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP | ss::cmd::ECHO
+    );
     if !pre_session && (!conn.authenticated || sid != conn.session_id) {
         return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), 0), false));
     }
@@ -697,11 +715,17 @@ async fn process_single(
         if hdr.is_signed() {
             if !is_311 && !verify_pdu_signature(buf, &key, conn.dialect) {
                 counter!("smb_reject_bad_signature_total").increment(1);
-                return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
+                return Some((
+                    response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id),
+                    true,
+                ));
             }
         } else if server.require_signing {
             counter!("smb_reject_unsigned_total").increment(1);
-            return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
+            return Some((
+                response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id),
+                true,
+            ));
         }
     }
 
@@ -752,7 +776,9 @@ async fn process_single(
     {
         let key = conn.session_key.unwrap();
         conn.signing_key = match conn.dialect {
-            Some(smb_proto_smb2::negotiate::DIALECT_300 | smb_proto_smb2::negotiate::DIALECT_302) => {
+            Some(
+                smb_proto_smb2::negotiate::DIALECT_300 | smb_proto_smb2::negotiate::DIALECT_302,
+            ) => {
                 let k = smb_auth::crypto::kdf_counter_mode_hmac_sha256(
                     &key,
                     b"SMB2AESCMAC\0",
@@ -798,9 +824,10 @@ async fn process_single(
     {
         if let Some(key) = conn.session_key {
             let (c2s_label, s2c_label) = match conn.dialect {
-                Some(smb_proto_smb2::negotiate::DIALECT_311) => {
-                    (b"SMBC2SCipherKey\0".as_slice(), b"SMBS2CCipherKey\0".as_slice())
-                }
+                Some(smb_proto_smb2::negotiate::DIALECT_311) => (
+                    b"SMBC2SCipherKey\0".as_slice(),
+                    b"SMBS2CCipherKey\0".as_slice(),
+                ),
                 _ => (b"SMB2AESCCM\0".as_slice(), b"SMB2AESCCM\0".as_slice()),
             };
             let s2c_ctx: &[u8] = match conn.dialect {
@@ -831,7 +858,6 @@ async fn process_single(
             );
         }
     }
-
 
     let mut resp = response(&hdr, status, body, conn.session_id);
     if let Some(new_tid) = conn.resp_tree_id.take() {
@@ -896,9 +922,11 @@ fn sign_pdu(resp: &mut [u8], key: &[u8; 16], dialect: Option<u16>) {
     msg.extend_from_slice(&resp[hdr::LEN..]);
     let sig = if matches!(
         dialect,
-        Some(smb_proto_smb2::negotiate::DIALECT_300
-            | smb_proto_smb2::negotiate::DIALECT_302
-            | smb_proto_smb2::negotiate::DIALECT_311)
+        Some(
+            smb_proto_smb2::negotiate::DIALECT_300
+                | smb_proto_smb2::negotiate::DIALECT_302
+                | smb_proto_smb2::negotiate::DIALECT_311
+        )
     ) {
         let t = smb_auth::crypto::aes128_cmac(key, &msg);
         let mut s = [0u8; 16];
@@ -926,13 +954,19 @@ fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>) -> boo
     msg.extend_from_slice(&buf[hdr::LEN..]);
     let expected: [u8; 16] = if matches!(
         dialect,
-        Some(smb_proto_smb2::negotiate::DIALECT_300
-            | smb_proto_smb2::negotiate::DIALECT_302
-            | smb_proto_smb2::negotiate::DIALECT_311)
+        Some(
+            smb_proto_smb2::negotiate::DIALECT_300
+                | smb_proto_smb2::negotiate::DIALECT_302
+                | smb_proto_smb2::negotiate::DIALECT_311
+        )
     ) {
-        smb_auth::crypto::aes128_cmac(key, &msg)[..hdr::SIGNATURE_LEN].try_into().unwrap()
+        smb_auth::crypto::aes128_cmac(key, &msg)[..hdr::SIGNATURE_LEN]
+            .try_into()
+            .unwrap()
     } else {
-        smb_auth::crypto::hmac_sha256(key, &msg)[..hdr::SIGNATURE_LEN].try_into().unwrap()
+        smb_auth::crypto::hmac_sha256(key, &msg)[..hdr::SIGNATURE_LEN]
+            .try_into()
+            .unwrap()
     };
     expected == buf[hdr::SIGNATURE..hdr::LEN]
 }
@@ -1109,7 +1143,10 @@ pub(crate) fn begin_change_notify(
     let (cancel_tx, cancel_rx) = oneshot::channel();
     conn.async_cancels.insert(async_id, cancel_tx);
     conn.async_msgids.insert(hdr.message_id, async_id);
-    conn.async_by_file.entry(req.file_id.0).or_default().push(async_id);
+    conn.async_by_file
+        .entry(req.file_id.0)
+        .or_default()
+        .push(async_id);
     gauge!("smb_async_pending").increment(1.0);
     tokio_uring::spawn(run_change_notify(
         dir_path,
@@ -1130,13 +1167,17 @@ pub(crate) fn begin_change_notify(
 pub(crate) fn cancel(conn: &mut Smb2Conn, hdr: &smb_proto_smb2::Header2, buf: &[u8]) {
     counter!("smb_cancels_total").increment(1);
     let async_id = if hdr.is_async() && buf.len() >= hdr::ASYNC_ID + size_of::<u64>() {
-        Some(u64::from_le_bytes(buf[hdr::ASYNC_ID..hdr::SESSION_ID].try_into().unwrap()))
+        Some(u64::from_le_bytes(
+            buf[hdr::ASYNC_ID..hdr::SESSION_ID].try_into().unwrap(),
+        ))
     } else {
         conn.async_msgids.get(&hdr.message_id).copied()
     };
     if let Some(aid) = async_id {
         conn.async_msgids.retain(|_, v| *v != aid);
-        conn.async_by_file.values_mut().for_each(|v| v.retain(|x| *x != aid));
+        conn.async_by_file
+            .values_mut()
+            .for_each(|v| v.retain(|x| *x != aid));
         if let Some(tx) = conn.async_cancels.remove(&aid) {
             let _ = tx.send(Status::CANCELLED);
         }
@@ -1174,7 +1215,14 @@ async fn run_lock_wait(
     };
     let frame = finalize_async(
         &crypto,
-        build_async_frame(crypto.session_id, message_id, async_id, ss::cmd::LOCK, status, &body),
+        build_async_frame(
+            crypto.session_id,
+            message_id,
+            async_id,
+            ss::cmd::LOCK,
+            status,
+            &body,
+        ),
     );
     let _ = outbound.send(frame).await;
     gauge!("smb_async_pending").decrement(1.0);
@@ -1194,12 +1242,18 @@ async fn run_change_notify(
 ) {
     let frame = match watch_one_event(&dir_path, watch_tree, filter, &mut cancel).await {
         Ok(entries) => {
-            let pairs: Vec<(u32, &str)> =
-                entries.iter().map(|(a, n)| (*a, n.as_str())).collect();
+            let pairs: Vec<(u32, &str)> = entries.iter().map(|(a, n)| (*a, n.as_str())).collect();
             let buf = c::build_file_notify_information(&pairs);
             let body = c::build_change_notify_resp(&buf);
             counter!("smb_notifies_sent").increment(1);
-            build_async_frame(crypto.session_id, message_id, async_id, ss::cmd::CHANGE_NOTIFY, Status::SUCCESS, &body)
+            build_async_frame(
+                crypto.session_id,
+                message_id,
+                async_id,
+                ss::cmd::CHANGE_NOTIFY,
+                Status::SUCCESS,
+                &body,
+            )
         }
         Err(status) => {
             // NOTIFY_CLEANUP is severity-success: clients parse it as a normal
@@ -1210,7 +1264,14 @@ async fn run_change_notify(
             } else {
                 error_resp()
             };
-            build_async_frame(crypto.session_id, message_id, async_id, ss::cmd::CHANGE_NOTIFY, status, &body)
+            build_async_frame(
+                crypto.session_id,
+                message_id,
+                async_id,
+                ss::cmd::CHANGE_NOTIFY,
+                status,
+                &body,
+            )
         }
     };
     let _ = outbound.send(finalize_async(&crypto, frame)).await;
@@ -1237,7 +1298,10 @@ async fn watch_one_event(
     // Map each watch descriptor to its path relative to the watched root so a
     // recursive event names the file as `subdir\name`.
     let mut wd_rel: HashMap<inotify::WatchDescriptor, String> = HashMap::new();
-    let root_wd = inotify.watches().add(dir_path, mask).map_err(|_| Status::CANCELLED)?;
+    let root_wd = inotify
+        .watches()
+        .add(dir_path, mask)
+        .map_err(|_| Status::CANCELLED)?;
     wd_rel.insert(root_wd, String::new());
     if watch_tree {
         for (abs, rel) in collect_subdirs(std::path::Path::new(dir_path)) {
@@ -1247,7 +1311,9 @@ async fn watch_one_event(
         }
     }
     let mut buf = [0u8; 4096];
-    let mut stream = inotify.into_event_stream(&mut buf).map_err(|_| Status::CANCELLED)?;
+    let mut stream = inotify
+        .into_event_stream(&mut buf)
+        .map_err(|_| Status::CANCELLED)?;
 
     tokio::select! {
         ev = stream.next() => {
@@ -1272,11 +1338,17 @@ fn collect_subdirs(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> 
     let mut out = Vec::new();
     let mut stack = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, rel)) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 let name = e.file_name().to_string_lossy().into_owned();
-                let child = if rel.is_empty() { name } else { format!("{rel}\\{name}") };
+                let child = if rel.is_empty() {
+                    name
+                } else {
+                    format!("{rel}\\{name}")
+                };
                 out.push((e.path(), child.clone()));
                 stack.push((e.path(), child));
                 if out.len() >= CAP {
@@ -1303,7 +1375,9 @@ fn filter_to_mask(filter: u32) -> inotify::WatchMask {
     if filter & (nf::ATTRIBUTES | nf::LAST_WRITE | nf::LAST_ACCESS | nf::CREATION | nf::EA) != 0 {
         m |= M::ATTRIB;
     }
-    if filter & (nf::SIZE | nf::LAST_WRITE | nf::STREAM_SIZE | nf::STREAM_WRITE | nf::STREAM_NAME) != 0 {
+    if filter & (nf::SIZE | nf::LAST_WRITE | nf::STREAM_SIZE | nf::STREAM_WRITE | nf::STREAM_NAME)
+        != 0
+    {
         m |= M::MODIFY | M::CLOSE_WRITE;
     }
     if m.is_empty() {
@@ -1386,7 +1460,12 @@ pub(crate) fn negotiate(
     // carrying Status = STATUS_INVALID_PARAMETER ([MS-SMB2] §3.3.5.3). Answer
     // both with the wildcard-dialect response so they retry a real negotiation.
     let parsed = smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]));
-    tracing::debug!(status = hdr.status, parsed_ok = parsed.is_some(), len = buf.len(), "negotiate probe check");
+    tracing::debug!(
+        status = hdr.status,
+        parsed_ok = parsed.is_some(),
+        len = buf.len(),
+        "negotiate probe check"
+    );
     if hdr.status == Status::INVALID_PARAMETER.raw() || parsed.is_none() {
         if parsed.is_none() {
             tracing::debug!(len = buf.len(), body = %hex_str(buf.get(body_start..).unwrap_or(&[])), "negotiate parse failed");
@@ -1421,13 +1500,24 @@ pub(crate) fn negotiate(
         }
         // HashAlgorithmCount(2) SaltLength(2) HashAlgorithms[] ([MS-SMB2] §2.2.3.1.1).
         let pd = &preauth[0].data;
-        let count = pd.get(0..2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize).unwrap_or(0);
+        let count = pd
+            .get(0..2)
+            .map(|s| u16::from_le_bytes([s[0], s[1]]) as usize)
+            .unwrap_or(0);
         let algos: Vec<u16> = pd
             .get(4..)
-            .map(|d| d.chunks_exact(2).take(count).map(|w| u16::from_le_bytes([w[0], w[1]])).collect())
+            .map(|d| {
+                d.chunks_exact(2)
+                    .take(count)
+                    .map(|w| u16::from_le_bytes([w[0], w[1]]))
+                    .collect()
+            })
             .unwrap_or_default();
         if !algos.contains(&smb_proto_smb2::negotiate::ctx_type::SHA512) {
-            return NegotiateReply::Reply(Status::SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP, Vec::new());
+            return NegotiateReply::Reply(
+                Status::SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP,
+                Vec::new(),
+            );
         }
     }
     // Must match the Capabilities word written by build_response_full below so
@@ -1437,8 +1527,7 @@ pub(crate) fn negotiate(
             | smb_proto_smb2::negotiate::caps::MULTI_CHANNEL
             | smb_proto_smb2::negotiate::caps::LEASING
     } else if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
-        smb_proto_smb2::negotiate::caps::LARGE_MTU
-            | smb_proto_smb2::negotiate::caps::LEASING
+        smb_proto_smb2::negotiate::caps::LARGE_MTU | smb_proto_smb2::negotiate::caps::LEASING
     } else {
         0
     };
@@ -1472,11 +1561,15 @@ pub(crate) fn negotiate(
             .map(|v| v.eq_ignore_ascii_case("ccm"))
             .unwrap_or(false);
         let order = if prefer_ccm {
-            [smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
-             smb_proto_smb2::negotiate::ctx_type::AES128_GCM]
+            [
+                smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
+                smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
+            ]
         } else {
-            [smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
-             smb_proto_smb2::negotiate::ctx_type::AES128_CCM]
+            [
+                smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
+                smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
+            ]
         };
         order.into_iter().find(|ours| client_ciphers.contains(ours))
     };
@@ -1492,9 +1585,11 @@ pub(crate) fn negotiate(
         .contexts
         .iter()
         .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION)
-        .map(|c| smb_proto_smb2::compress::negotiate_algos(
-            &smb_proto_smb2::compress::parse_compression_caps(&c.data),
-        ))
+        .map(|c| {
+            smb_proto_smb2::compress::negotiate_algos(
+                &smb_proto_smb2::compress::parse_compression_caps(&c.data),
+            )
+        })
         .unwrap_or_default();
     if dialect == smb_proto_smb2::negotiate::DIALECT_311
         && comp_algos.contains(&smb_proto_smb2::compress::algo::LZNT1)
@@ -1548,7 +1643,11 @@ pub(crate) fn session_setup(
         Some(smb_auth::ntlm::MSG_TYPE1) | None => {
             // Leg 1: issue CHALLENGE under MORE_PROCESSING_REQUIRED. A binding
             // channel keeps the existing session id instead of allocating one.
-            conn.session_id = if binding { hdr_session } else { next_session_id() };
+            conn.session_id = if binding {
+                hdr_session
+            } else {
+                next_session_id()
+            };
             let mut t2 =
                 smb_auth::ntlm::build_type2(&conn.challenge, &server.domain, &server.server_name);
             // Grant SIGN|SEAL so clients may negotiate protected sessions
@@ -1632,12 +1731,18 @@ pub(crate) fn session_setup(
             const MIC_SIZE: usize = 16;
             let mic_field_present = req.blob.len() > MIC_OFFSET + MIC_SIZE;
             let client_mic_nonzero = mic_field_present
-                && req.blob[MIC_OFFSET..MIC_OFFSET + MIC_SIZE].iter().any(|&b| b != 0);
+                && req.blob[MIC_OFFSET..MIC_OFFSET + MIC_SIZE]
+                    .iter()
+                    .any(|&b| b != 0);
             let wrapped = if client_mic_nonzero {
                 let Some(key) = conn.session_key else {
                     return Err(Status::INVALID_PARAMETER);
                 };
-                let init = conn.ntlm_blobs.as_ref().map(|b| b.0.clone()).unwrap_or_default();
+                let init = conn
+                    .ntlm_blobs
+                    .as_ref()
+                    .map(|b| b.0.clone())
+                    .unwrap_or_default();
                 // Locate MechTypes: smbclient's token nests as
                 //   60{ OID, A0{ 30{ A0{ 30<OIDs> }, A2{ntlm} } } }
                 // and samba signs exactly the bare `30<OIDs>` SEQUENCE
@@ -1702,13 +1807,8 @@ pub(crate) fn session_setup(
                 // signing; samba resets them to 0 at sign_reset right
                 // after auth, and the accept-complete MIC is the first
                 // SEND (ntlmssp_make_packet_signature: sending.seq_num++).
-                let mic = smb_auth::crypto::ntlm_mech_list_mic(
-                    &key,
-                    true,
-                    key_exch,
-                    0,
-                    &mech_types,
-                );
+                let mic =
+                    smb_auth::crypto::ntlm_mech_list_mic(&key, true, key_exch, 0, &mech_types);
                 #[cfg(not(feature = "lib"))]
                 let mic = [0u8; 16];
                 tracing::debug!(
@@ -1820,9 +1920,17 @@ pub(crate) async fn create(
         // Traversal hit a symlink: build the Symbolic Link Error Response from
         // the target and unparsed path ([MS-SMB2] §2.2.2.2.1) for the caller to
         // frame with STATUS_STOPPED_ON_SYMLINK.
-        Err(smb_vfs::VfsError::StoppedOnSymlink { target, unparsed_len, relative }) => {
-            conn.symlink_error =
-                Some(c::build_symlink_error_response(&target, &target, unparsed_len, relative));
+        Err(smb_vfs::VfsError::StoppedOnSymlink {
+            target,
+            unparsed_len,
+            relative,
+        }) => {
+            conn.symlink_error = Some(c::build_symlink_error_response(
+                &target,
+                &target,
+                unparsed_len,
+                relative,
+            ));
             return Err(Status::STOPPED_ON_SYMLINK);
         }
         Err(e) => return Err(vfs_err(e)),
@@ -1840,7 +1948,12 @@ pub(crate) async fn create(
     // or share flags conflict with an existing open on the same file. Undo the
     // just-opened handle on rejection. Directories are not share-checked.
     if !is_dir
-        && !server.share_modes.try_open(&path, req.desired_access, req.share_access, (conn.session_id, fid_bytes))
+        && !server.share_modes.try_open(
+            &path,
+            req.desired_access,
+            req.share_access,
+            (conn.session_id, fid_bytes),
+        )
     {
         let _ = vfs.close(open).await;
         counter!("smb_sharing_violations_total").increment(1);
@@ -1858,9 +1971,12 @@ pub(crate) async fn create(
     // write caching (RWH -> RH) ([MS-SMB2] §3.3.4.7); lease-context opens are
     // handled by arbitrate_lease below.
     if req.lease.is_none() && !is_dir {
-        if let Some((k, old, new, ep, out, crypto)) =
-            server.leases.break_conflict(&path, (conn.session_id, fid_bytes), None, c::lease::WRITE_CACHING)
-        {
+        if let Some((k, old, new, ep, out, crypto)) = server.leases.break_conflict(
+            &path,
+            (conn.session_id, fid_bytes),
+            None,
+            c::lease::WRITE_CACHING,
+        ) {
             send_lease_break(&out, &crypto, k, old, new, ep);
         }
     }
@@ -1879,7 +1995,9 @@ pub(crate) async fn create(
         c::oplock::NONE
     } else if req.oplock_level == c::oplock::LEASE {
         if let Some(lr) = req.lease {
-            lease_grant = Some(arbitrate_lease(server, conn, &path, fid_bytes, &lr, req_signed));
+            lease_grant = Some(arbitrate_lease(
+                server, conn, &path, fid_bytes, &lr, req_signed,
+            ));
             conn.lease_keys.insert(fid_bytes, lr.key);
             c::oplock::LEASE
         } else {
@@ -1938,7 +2056,12 @@ pub(crate) async fn create(
     Ok(c::build_create_resp(
         fid,
         action,
-        [meta.times[0].0, meta.times[1].0, meta.times[2].0, meta.times[3].0],
+        [
+            meta.times[0].0,
+            meta.times[1].0,
+            meta.times[2].0,
+            meta.times[3].0,
+        ],
         meta.attrs.0,
         meta.alloc,
         meta.eof,
@@ -1952,7 +2075,10 @@ pub(crate) async fn create(
 /// reconnect context.
 fn durable_reconnect_ids(d: &Option<c::DurableReq>) -> Option<([u8; 16], Option<[u8; 16]>)> {
     match d {
-        Some(c::DurableReq::ReconnectV2 { file_id, create_guid }) => Some((*file_id, Some(*create_guid))),
+        Some(c::DurableReq::ReconnectV2 {
+            file_id,
+            create_guid,
+        }) => Some((*file_id, Some(*create_guid))),
         Some(c::DurableReq::ReconnectV1 { file_id }) => Some((*file_id, None)),
         _ => None,
     }
@@ -1977,7 +2103,10 @@ async fn durable_reconnect(
         if tags & (c::durable::tag::REQ_V2 | c::durable::tag::RECONNECT_V2) != 0 {
             return Err(Status::INVALID_PARAMETER);
         }
-    } else if tags & (c::durable::tag::REQ_V1 | c::durable::tag::RECONNECT_V1 | c::durable::tag::REQ_V2) != 0 {
+    } else if tags
+        & (c::durable::tag::REQ_V1 | c::durable::tag::RECONNECT_V1 | c::durable::tag::REQ_V2)
+        != 0
+    {
         return Err(Status::OBJECT_NAME_NOT_FOUND);
     }
 
@@ -2026,29 +2155,43 @@ async fn durable_reconnect(
     let timeout = record.timeout_ms as u32;
     // FILE_OPEN (disposition 1): the file already exists.
     let (mut open, meta, _action) = vfs
-        .create(&record.path, record.is_dir, record.access, 1, record.create_options, 0)
+        .create(
+            &record.path,
+            record.is_dir,
+            record.access,
+            1,
+            record.create_options,
+            0,
+        )
         .await
         .map_err(vfs_err)?;
     open.delete_on_close = false;
     conn.handles.insert(id, open);
-    conn.durable.insert(id, crate::state::DurableEntry {
-        persistent_id: id,
-        create_guid: record.match_guid.unwrap_or([0u8; 16]),
-        rel: record.path.clone(),
-        is_dir: record.is_dir,
-        access: record.access,
-        options: record.create_options,
-        session_id: conn.session_id,
-        client_guid: record.client_guid,
-        lease_key: record.lease_key,
-        persistent,
-        timeout,
-        deadline: std::time::Instant::now(),
-    });
+    conn.durable.insert(
+        id,
+        crate::state::DurableEntry {
+            persistent_id: id,
+            create_guid: record.match_guid.unwrap_or([0u8; 16]),
+            rel: record.path.clone(),
+            is_dir: record.is_dir,
+            access: record.access,
+            options: record.create_options,
+            session_id: conn.session_id,
+            client_guid: record.client_guid,
+            lease_key: record.lease_key,
+            persistent,
+            timeout,
+            deadline: std::time::Instant::now(),
+        },
+    );
     counter!("smb_durable_reconnects_total").increment(1);
 
     let (name, data): (&[u8], Vec<u8>) = if guid.is_some() {
-        let flags = if persistent { c::durable::FLAG_PERSISTENT } else { 0 };
+        let flags = if persistent {
+            c::durable::FLAG_PERSISTENT
+        } else {
+            0
+        };
         (c::durable::REQ_V2, c::durable_v2_resp_data(timeout, flags))
     } else {
         (c::durable::REQ_V1, c::durable_v1_resp_data())
@@ -2057,7 +2200,12 @@ async fn durable_reconnect(
     Ok(c::build_create_resp(
         c::FileId(id),
         1, // FILE_OPENED
-        [meta.times[0].0, meta.times[1].0, meta.times[2].0, meta.times[3].0],
+        [
+            meta.times[0].0,
+            meta.times[1].0,
+            meta.times[2].0,
+            meta.times[3].0,
+        ],
         meta.attrs.0,
         meta.alloc,
         meta.eof,
@@ -2105,20 +2253,36 @@ fn grant_durable(
         deadline: std::time::Instant::now(),
     };
     match req.durable {
-        Some(c::DurableReq::RequestV2 { timeout, flags, create_guid }) => {
+        Some(c::DurableReq::RequestV2 {
+            timeout,
+            flags,
+            create_guid,
+        }) => {
             // Persistence requires a CA share ([MS-SMB2] §3.3.5.9.11); otherwise
             // the persistent bit is ignored and a plain durable handle granted.
             let persistent = is_ca && flags & c::durable::FLAG_PERSISTENT != 0;
-            let to = if timeout == 0 { DEFAULT_TIMEOUT_MS } else { timeout };
+            let to = if timeout == 0 {
+                DEFAULT_TIMEOUT_MS
+            } else {
+                timeout
+            };
             conn.durable.insert(fid, make(create_guid, persistent, to));
             counter!("smb_durables_granted_total").increment(1);
             Some((
                 c::durable::REQ_V2,
-                c::durable_v2_resp_data(to, if persistent { c::durable::FLAG_PERSISTENT } else { 0 }),
+                c::durable_v2_resp_data(
+                    to,
+                    if persistent {
+                        c::durable::FLAG_PERSISTENT
+                    } else {
+                        0
+                    },
+                ),
             ))
         }
         Some(c::DurableReq::RequestV1) => {
-            conn.durable.insert(fid, make([0u8; 16], false, DEFAULT_TIMEOUT_MS));
+            conn.durable
+                .insert(fid, make([0u8; 16], false, DEFAULT_TIMEOUT_MS));
             counter!("smb_durables_granted_total").increment(1);
             Some((c::durable::REQ_V1, c::durable_v1_resp_data()))
         }
@@ -2142,14 +2306,28 @@ fn arbitrate_lease(
     let requested = lr.state & c::lease::RWH;
     if let Some((key, state, epoch, v2)) = server.leases.peek(path) {
         if key == lr.key {
-            return c::LeaseResp { key: lr.key, state, flags: 0, epoch, v2 };
+            return c::LeaseResp {
+                key: lr.key,
+                state,
+                flags: 0,
+                epoch,
+                v2,
+            };
         }
         let new_state = state & c::lease::RH;
-        if let Some((hkey, old, nepoch, outbound, crypto)) = server.leases.downgrade(path, new_state) {
+        if let Some((hkey, old, nepoch, outbound, crypto)) =
+            server.leases.downgrade(path, new_state)
+        {
             send_lease_break(&outbound, &crypto, hkey, old, new_state, nepoch);
         }
         let grant = requested & c::lease::RH;
-        return c::LeaseResp { key: lr.key, state: grant, flags: 0, epoch: lr.epoch, v2: lr.v2 };
+        return c::LeaseResp {
+            key: lr.key,
+            state: grant,
+            flags: 0,
+            epoch: lr.epoch,
+            v2: lr.v2,
+        };
     }
     // A newly established lease initializes its epoch from the request and
     // increments it by one for a LeaseV2 grant ([MS-SMB2] §3.3.5.9.11); V1
@@ -2167,7 +2345,13 @@ fn arbitrate_lease(
     };
     server.leases.grant(path, holder);
     counter!("smb_leases_granted_total").increment(1);
-    c::LeaseResp { key: lr.key, state: requested, flags: 0, epoch: granted_epoch, v2: lr.v2 }
+    c::LeaseResp {
+        key: lr.key,
+        state: requested,
+        flags: 0,
+        epoch: granted_epoch,
+        v2: lr.v2,
+    }
 }
 
 /// Build a NETWORK_INTERFACE_INFO list ([MS-SMB2] §2.2.32.5) from the host's
@@ -2230,7 +2414,6 @@ fn send_lease_break(
         counter!("smb_lease_breaks_total").increment(1);
     }
 }
-
 
 /// Snapshot the crypto material needed to protect an oplock break sent later
 /// to this holder.
@@ -2303,14 +2486,22 @@ pub(crate) async fn read(
     let req = c::ReadReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let len = (req.length as usize).min(1 << 20); // clamp to 1 MiB
     let (path, is_dir, can_read) = {
-        let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+        let h = conn
+            .handles
+            .get(&req.file_id.0)
+            .ok_or(Status::INVALID_HANDLE)?;
         (h.path.clone(), h.is_dir, h.can_read)
     };
     if is_dir || !can_read {
         return Err(Status::ACCESS_DENIED);
     }
     // An exclusive byte-range lock from another open blocks reads ([MS-FSA]).
-    if server.locks.read_conflict(&path, req.offset, len as u64, (conn.session_id, req.file_id.0)) {
+    if server.locks.read_conflict(
+        &path,
+        req.offset,
+        len as u64,
+        (conn.session_id, req.file_id.0),
+    ) {
         return Err(Status::FILE_LOCK_CONFLICT);
     }
     let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
@@ -2333,14 +2524,22 @@ pub(crate) async fn write(
 ) -> Result<Vec<u8>, Status> {
     let req = c::WriteReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let (path, is_dir, can_write) = {
-        let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+        let h = conn
+            .handles
+            .get(&req.file_id.0)
+            .ok_or(Status::INVALID_HANDLE)?;
         (h.path.clone(), h.is_dir, h.can_write)
     };
     if is_dir || !can_write {
         return Err(Status::ACCESS_DENIED);
     }
     // Byte-range lock enforcement ([MS-SMB2] §2.2.26 / [MS-FSA]).
-    if server.locks.write_conflict(&path, req.offset, req.payload.len() as u64, (conn.session_id, req.file_id.0)) {
+    if server.locks.write_conflict(
+        &path,
+        req.offset,
+        req.payload.len() as u64,
+        (conn.session_id, req.file_id.0),
+    ) {
         return Err(Status::FILE_LOCK_CONFLICT);
     }
     let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
@@ -2349,7 +2548,8 @@ pub(crate) async fn write(
     if h.is_dir || !h.can_write {
         return Err(Status::ACCESS_DENIED);
     }
-    let written = vfs.write(h, req.offset, &req.payload, false)
+    let written = vfs
+        .write(h, req.offset, &req.payload, false)
         .await
         .map_err(vfs_err)?;
     counter!("smb_bytes_written_total").increment(written);
@@ -2357,9 +2557,12 @@ pub(crate) async fn write(
     // A write from a non-holder invalidates cached reads: break the lease to
     // NONE ([MS-SMB2] §3.3.4.7). A co-holder of the same lease key is exempt.
     let req_key = conn.lease_keys.get(&req.file_id.0).copied();
-    if let Some((k, old, new, ep, out, crypto)) =
-        server.leases.break_conflict(&path, (conn.session_id, req.file_id.0), req_key, c::lease::RWH)
-    {
+    if let Some((k, old, new, ep, out, crypto)) = server.leases.break_conflict(
+        &path,
+        (conn.session_id, req.file_id.0),
+        req_key,
+        c::lease::RWH,
+    ) {
         send_lease_break(&out, &crypto, k, old, new, ep);
     }
     Ok(c::build_write_resp(written as u32))
@@ -2421,7 +2624,11 @@ pub(crate) async fn ioctl(
                     }
                 }
                 const SUPPORTED: [u16; 5] = [0x0202, 0x0210, 0x0300, 0x0302, 0x0311];
-                let gcd = dialects.iter().copied().filter(|d| SUPPORTED.contains(d)).max();
+                let gcd = dialects
+                    .iter()
+                    .copied()
+                    .filter(|d| SUPPORTED.contains(d))
+                    .max();
                 gcd != conn.dialect
             };
             if terminate {
@@ -2442,10 +2649,15 @@ pub(crate) async fn ioctl(
                 };
             out.extend_from_slice(&sec_mode.to_le_bytes()); // SecurityMode
             out.extend_from_slice(
-                &conn.dialect.unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
+                &conn
+                    .dialect
+                    .unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
                     .to_le_bytes(),
             );
-            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(req.file_id, req.ctl_code, &out),
+            )
         }
         // Resiliency handshake carries no output data. Preserve the
         // handle like a durable open ([MS-SMB2] §3.3.5.15.9) so a later
@@ -2458,7 +2670,11 @@ pub(crate) async fn ioctl(
                     .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
                     .filter(|t| *t != 0)
                     .unwrap_or(60_000);
-                let access = if open.can_write { 0x001F_01FF } else { 0x0012_0089 };
+                let access = if open.can_write {
+                    0x001F_01FF
+                } else {
+                    0x0012_0089
+                };
                 let options = if open.is_dir { 0x1 } else { 0x40 };
                 let entry = crate::state::DurableEntry {
                     persistent_id: req.file_id.0,
@@ -2476,7 +2692,10 @@ pub(crate) async fn ioctl(
                 };
                 conn.durable.insert(req.file_id.0, entry);
             }
-            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(req.file_id, req.ctl_code, &[]),
+            )
         }
         // FSCTL_PIPE_TRANSACT (0x0011C017): the DCERPC PDU arrives
         // in the input buffer and the reply leaves in the output
@@ -2496,7 +2715,10 @@ pub(crate) async fn ioctl(
             counter!("smb_pipe_reads_total").increment(1);
             let out_hex = hex_str(&out);
             tracing::debug!(out_len = out.len(), %out_hex, "pipe transact");
-            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(req.file_id, req.ctl_code, &out),
+            )
         }
         // Server-side copy: hand the client a resume key naming this
         // open so a later COPYCHUNK can use it as the source.
@@ -2508,7 +2730,10 @@ pub(crate) async fn ioctl(
             key[..16].copy_from_slice(&req.file_id.0);
             key[16..24].copy_from_slice(&next_resume_nonce().to_le_bytes());
             conn.resume_keys.insert(key, req.file_id.0);
-            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &c::build_resume_key_resp(&key)))
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(req.file_id, req.ctl_code, &c::build_resume_key_resp(&key)),
+            )
         }
         // Server-side copy: read from the source open (named by the
         // resume key in the input) and write into this target handle.
@@ -2520,7 +2745,10 @@ pub(crate) async fn ioctl(
             match do_copychunk(conn, vfs, &req).await {
                 Ok(out) => {
                     counter!("smb_copychunk_bytes_total").increment(copychunk_total(&out) as u64);
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+                    (
+                        Status::SUCCESS,
+                        c::build_ioctl_resp(req.file_id, req.ctl_code, &out),
+                    )
                 }
                 Err((status, out)) => {
                     let body = c::build_ioctl_resp(req.file_id, req.ctl_code, &out);
@@ -2529,14 +2757,16 @@ pub(crate) async fn ioctl(
             }
         }
         // Linux files are implicitly sparse; accept the hint.
-        c::fsctl::SET_SPARSE => {
-            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
-        }
+        c::fsctl::SET_SPARSE => (
+            Status::SUCCESS,
+            c::build_ioctl_resp(req.file_id, req.ctl_code, &[]),
+        ),
         // FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2): our named pipes are
         // always instantiable, so the wait completes immediately.
-        c::fsctl::PIPE_WAIT => {
-            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
-        }
+        c::fsctl::PIPE_WAIT => (
+            Status::SUCCESS,
+            c::build_ioctl_resp(req.file_id, req.ctl_code, &[]),
+        ),
         // DFS is not offered on this standalone server: a referral
         // query for any path is answered STATUS_NOT_FOUND so the client
         // treats the path as non-DFS ([MS-DFSC] §3.1.5.4.2).
@@ -2548,7 +2778,10 @@ pub(crate) async fn ioctl(
         // additional channels for the session.
         c::fsctl::QUERY_NETWORK_INTERFACE_INFO => {
             let out = network_interface_info();
-            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(req.file_id, req.ctl_code, &out),
+            )
         }
         // Zero a byte range in the target handle ([MS-FSCC] §2.3.79).
         c::fsctl::SET_ZERO_DATA => {
@@ -2565,7 +2798,10 @@ pub(crate) async fn ioctl(
             match vfs.zero_range(h, start, end - start).await {
                 Ok(()) => {
                     counter!("smb_zeroed_bytes_total").increment(end - start);
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+                    (
+                        Status::SUCCESS,
+                        c::build_ioctl_resp(req.file_id, req.ctl_code, &[]),
+                    )
                 }
                 Err(e) => (vfs_err(e), Vec::new()),
             }
@@ -2590,7 +2826,12 @@ pub(crate) async fn close(
     vfs.close(h).await.map_err(vfs_err)?;
     counter!("smb_closes_total").increment(1);
     Ok(c::build_close_resp(
-        [meta.times[0].0, meta.times[1].0, meta.times[2].0, meta.times[3].0],
+        [
+            meta.times[0].0,
+            meta.times[1].0,
+            meta.times[2].0,
+            meta.times[3].0,
+        ],
         meta.alloc,
         meta.eof,
         meta.attrs.0,
@@ -2625,7 +2866,8 @@ pub(crate) fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, St
     }
     let fid_bytes = next_file_id();
     let fid = c::FileId(fid_bytes);
-    conn.pipes.insert(fid_bytes, crate::srvsvc::Pipe::new(&name));
+    conn.pipes
+        .insert(fid_bytes, crate::srvsvc::Pipe::new(&name));
     tracing::debug!(pipe = %name, "pipe opened");
     // Zeroed timestamps/attrs; a pipe is a stream device.
     Ok(c::build_create_resp(
@@ -2660,7 +2902,11 @@ pub(crate) fn pipe_read(conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
 
 /// Feed client bytes into a pipe RPC dispatcher; `None` when `file_id` is
 /// not a pipe. Returns the WRITE response body.
-pub(crate) fn pipe_write(server: &Arc<ServerShared>, conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn pipe_write(
+    server: &Arc<ServerShared>,
+    conn: &mut Smb2Conn,
+    buf: &[u8],
+) -> Option<Vec<u8>> {
     let req = c::WriteReq::parse(buf);
     let Some(req) = req else {
         tracing::debug!("pipe_write: parse failed");
@@ -2730,9 +2976,8 @@ pub(crate) async fn query_directory(
             }
         };
 
-        let (_, name_pat) = crate::cmds::dir_cmds_split(
-            &req.pattern.trim_start_matches(['\\', '/']),
-        );
+        let (_, name_pat) =
+            crate::cmds::dir_cmds_split(&req.pattern.trim_start_matches(['\\', '/']));
         let entries = vfs.list(&dir_rel).await.map_err(vfs_err)?;
         // Windows precedes real children with "." (the directory itself) and
         // ".." (its parent) on a wildcard scan ([MS-FSCC] §2.4), so even an
@@ -2772,8 +3017,7 @@ pub(crate) async fn query_directory(
     let Some(queue) = conn.searches.get_mut(&req.file_id.0) else {
         return Err(Status::INVALID_PARAMETER);
     };
-    let out: Vec<info::FindEntry> =
-        (0..take).filter_map(|_| queue.pop_front()).collect();
+    let out: Vec<info::FindEntry> = (0..take).filter_map(|_| queue.pop_front()).collect();
 
     if out.is_empty() {
         return Ok(None); // STATUS_NO_MORE_FILES
@@ -2791,7 +3035,10 @@ pub(crate) async fn query_info(
     let req = c::QueryInfoReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     match req.info_type {
         c::info_type::FILE => {
-            let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+            let h = conn
+                .handles
+                .get(&req.file_id.0)
+                .ok_or(Status::INVALID_HANDLE)?;
             let m = vfs.stat(&h.path).await.map_err(vfs_err)?;
             if req.class == info::file_class::STREAM {
                 // Default `::$DATA` data stream (files only) plus any ADS.
@@ -2803,21 +3050,19 @@ pub(crate) async fn query_info(
                 return Ok(Some(info::encode_stream_info(&streams)));
             }
             let qm = info::QueryMeta::from_vfs(&m);
-            let name = h
-                .rel
-                .rsplit(['\\', '/'])
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let name = h.rel.rsplit(['\\', '/']).next().unwrap_or("").to_string();
             info::encode_file_info(req.class, &qm, &name)
                 .map(Some)
                 .ok_or(Status::NOT_IMPLEMENTED)
         }
-        c::info_type::FS => {
-            info::encode_fs_info(req.class).map(Some).ok_or(Status::NOT_IMPLEMENTED)
-        }
+        c::info_type::FS => info::encode_fs_info(req.class)
+            .map(Some)
+            .ok_or(Status::NOT_IMPLEMENTED),
         c::info_type::SECURITY => {
-            let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+            let h = conn
+                .handles
+                .get(&req.file_id.0)
+                .ok_or(Status::INVALID_HANDLE)?;
             let stored = vfs.get_security(&h.path).await.map_err(vfs_err)?;
             let additional = if req.additional == 0 {
                 crate::security::sec_info::DEFAULT
@@ -2859,8 +3104,13 @@ pub(crate) async fn set_info(
             vfs.set_info_open(h, &op).await.map_err(vfs_err)
         }
         c::info_type::SECURITY => {
-            let h = conn.handles.get(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
-            vfs.set_security(&h.path, &req.buffer).await.map_err(vfs_err)
+            let h = conn
+                .handles
+                .get(&req.file_id.0)
+                .ok_or(Status::INVALID_HANDLE)?;
+            vfs.set_security(&h.path, &req.buffer)
+                .await
+                .map_err(vfs_err)
         }
         // Disk quotas are not tracked on this volume ([MS-FSCC] §2.4.33).
         c::info_type::QUOTA => Err(Status::INVALID_DEVICE_REQUEST),
@@ -2894,7 +3144,10 @@ pub(crate) fn share_vfs(
     conn: &Smb2Conn,
     tid: u32,
 ) -> Option<Arc<dyn smb_vfs::Vfs>> {
-    conn.trees.get(&tid).and_then(|n| server.shares.get(n)).map(|s| s.vfs.clone())
+    conn.trees
+        .get(&tid)
+        .and_then(|n| server.shares.get(n))
+        .map(|s| s.vfs.clone())
 }
 
 /// Server-side-copy nonce appended to a resume key so repeated keys on one
@@ -2928,7 +3181,8 @@ async fn do_copychunk(
         || cc.chunks.iter().any(|k| k.length > lim::MAX_CHUNK_SIZE)
         || total > lim::MAX_TOTAL_SIZE as u64
     {
-        let limits = c::build_copychunk_resp(lim::MAX_CHUNKS, lim::MAX_CHUNK_SIZE, lim::MAX_TOTAL_SIZE);
+        let limits =
+            c::build_copychunk_resp(lim::MAX_CHUNKS, lim::MAX_CHUNK_SIZE, lim::MAX_TOTAL_SIZE);
         return Err((Status::INVALID_PARAMETER, limits));
     }
 
@@ -2942,12 +3196,18 @@ async fn do_copychunk(
     let mut total_written = 0u32;
     for k in &cc.chunks {
         let data = {
-            let src = conn.handles.get_mut(&src_fid).ok_or((Status::INVALID_HANDLE, Vec::new()))?;
+            let src = conn
+                .handles
+                .get_mut(&src_fid)
+                .ok_or((Status::INVALID_HANDLE, Vec::new()))?;
             vfs.read(src, k.source_offset, k.length as usize)
                 .await
                 .map_err(|e| (vfs_err(e), Vec::new()))?
         };
-        let tgt = conn.handles.get_mut(&tgt_fid).ok_or((Status::INVALID_HANDLE, Vec::new()))?;
+        let tgt = conn
+            .handles
+            .get_mut(&tgt_fid)
+            .ok_or((Status::INVALID_HANDLE, Vec::new()))?;
         let w = vfs
             .write(tgt, k.target_offset, &data, false)
             .await
@@ -3031,15 +3291,37 @@ mod async_notify_tests {
 
     #[test]
     fn async_frame_sets_async_flag_and_ids() {
-        let f = build_async_frame(0xABCD, 42, 7, ss::cmd::CHANGE_NOTIFY, Status::PENDING, &[0u8; 8]);
+        let f = build_async_frame(
+            0xABCD,
+            42,
+            7,
+            ss::cmd::CHANGE_NOTIFY,
+            Status::PENDING,
+            &[0u8; 8],
+        );
         assert_eq!(&f[0..4], &smb_proto_smb2::SMB2_MAGIC);
         let flags = u32::from_le_bytes(f[16..20].try_into().unwrap());
         assert_eq!(flags & 0x2, 0x2, "ASYNC_COMMAND set");
         assert_eq!(flags & 0x1, 0x1, "SERVER_TO_REDIR set");
-        assert_eq!(u64::from_le_bytes(f[24..32].try_into().unwrap()), 42, "MessageId");
-        assert_eq!(u64::from_le_bytes(f[32..40].try_into().unwrap()), 7, "AsyncId");
-        assert_eq!(u64::from_le_bytes(f[40..48].try_into().unwrap()), 0xABCD, "SessionId");
-        assert_eq!(u32::from_le_bytes(f[8..12].try_into().unwrap()), Status::PENDING.raw());
+        assert_eq!(
+            u64::from_le_bytes(f[24..32].try_into().unwrap()),
+            42,
+            "MessageId"
+        );
+        assert_eq!(
+            u64::from_le_bytes(f[32..40].try_into().unwrap()),
+            7,
+            "AsyncId"
+        );
+        assert_eq!(
+            u64::from_le_bytes(f[40..48].try_into().unwrap()),
+            0xABCD,
+            "SessionId"
+        );
+        assert_eq!(
+            u32::from_le_bytes(f[8..12].try_into().unwrap()),
+            Status::PENDING.raw()
+        );
     }
 
     /// End-to-end of the real inotify watcher: arm a watch on a temp dir, drop
@@ -3047,22 +3329,28 @@ mod async_notify_tests {
     #[test]
     fn watch_reports_created_file() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_notify_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.to_string_lossy().into_owned();
+            let dir = std::env::temp_dir().join(format!("rustsmb_notify_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.to_string_lossy().into_owned();
 
-        let (_tx, mut rx) = oneshot::channel();
-        let watch = tokio_uring::spawn(async move {
-            watch_one_event(&path, false, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        std::fs::write(dir.join("created.txt"), b"hi").unwrap();
+            let (_tx, mut rx) = oneshot::channel();
+            let watch = tokio_uring::spawn(async move {
+                watch_one_event(
+                    &path,
+                    false,
+                    smb_proto_smb2::commands::notify_filter::FILE_NAME,
+                    &mut rx,
+                )
+                .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            std::fs::write(dir.join("created.txt"), b"hi").unwrap();
 
-        let events = watch.await.unwrap().expect("event fired");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
-        assert_eq!(events[0].1, "created.txt");
-        std::fs::remove_dir_all(&dir).ok();
+            let events = watch.await.unwrap().expect("event fired");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
+            assert_eq!(events[0].1, "created.txt");
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3071,22 +3359,32 @@ mod async_notify_tests {
     #[test]
     fn recursive_watch_reports_subdir_file() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_notify_rec_{}", std::process::id()));
-        let sub = dir.join("nested");
-        std::fs::create_dir_all(&sub).unwrap();
-        let path = dir.to_string_lossy().into_owned();
+            let dir =
+                std::env::temp_dir().join(format!("rustsmb_notify_rec_{}", std::process::id()));
+            let sub = dir.join("nested");
+            std::fs::create_dir_all(&sub).unwrap();
+            let path = dir.to_string_lossy().into_owned();
 
-        let (_tx, mut rx) = oneshot::channel();
-        let watch = tokio_uring::spawn(async move {
-            watch_one_event(&path, true, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        std::fs::write(sub.join("deep.txt"), b"hi").unwrap();
+            let (_tx, mut rx) = oneshot::channel();
+            let watch = tokio_uring::spawn(async move {
+                watch_one_event(
+                    &path,
+                    true,
+                    smb_proto_smb2::commands::notify_filter::FILE_NAME,
+                    &mut rx,
+                )
+                .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            std::fs::write(sub.join("deep.txt"), b"hi").unwrap();
 
-        let events = watch.await.unwrap().expect("subdir event fired");
-        assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
-        assert_eq!(events[0].1, "nested\\deep.txt", "named relative to watch root");
-        std::fs::remove_dir_all(&dir).ok();
+            let events = watch.await.unwrap().expect("subdir event fired");
+            assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
+            assert_eq!(
+                events[0].1, "nested\\deep.txt",
+                "named relative to watch root"
+            );
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3094,18 +3392,28 @@ mod async_notify_tests {
     #[test]
     fn cancel_stops_watch() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_notify_cancel_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.to_string_lossy().into_owned();
+            let dir =
+                std::env::temp_dir().join(format!("rustsmb_notify_cancel_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.to_string_lossy().into_owned();
 
-        let (tx, mut rx) = oneshot::channel();
-        let watch = tokio_uring::spawn(async move {
-            watch_one_event(&path, false, smb_proto_smb2::commands::notify_filter::FILE_NAME, &mut rx).await
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tx.send(Status::CANCELLED).unwrap();
-        assert!(watch.await.unwrap().is_err(), "cancelled watch yields no events");
-        std::fs::remove_dir_all(&dir).ok();
+            let (tx, mut rx) = oneshot::channel();
+            let watch = tokio_uring::spawn(async move {
+                watch_one_event(
+                    &path,
+                    false,
+                    smb_proto_smb2::commands::notify_filter::FILE_NAME,
+                    &mut rx,
+                )
+                .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tx.send(Status::CANCELLED).unwrap();
+            assert!(
+                watch.await.unwrap().is_err(),
+                "cancelled watch yields no events"
+            );
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 }
@@ -3125,46 +3433,57 @@ mod fsctl_tests {
     #[test]
     fn copychunk_copies_between_handles() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_cc_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("src.txt"), b"hello copychunk world").unwrap();
-        std::fs::write(dir.join("dst.txt"), b"").unwrap();
+            let dir = std::env::temp_dir().join(format!("rustsmb_cc_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("src.txt"), b"hello copychunk world").unwrap();
+            std::fs::write(dir.join("dst.txt"), b"").unwrap();
 
-        let (mut conn, vfs) = conn_with_vfs(&dir);
-        let (src, _m, _a) = vfs.create("src.txt", false, 0x8000_0000, 1, 0, 0).await.unwrap();
-        let (dst, _m, _a) = vfs.create("dst.txt", false, 0x4000_0000, 1, 0, 0).await.unwrap();
-        let (src_fid, dst_fid) = ([1u8; 16], [2u8; 16]);
-        conn.handles.insert(src_fid, src);
-        conn.handles.insert(dst_fid, dst);
+            let (mut conn, vfs) = conn_with_vfs(&dir);
+            let (src, _m, _a) = vfs
+                .create("src.txt", false, 0x8000_0000, 1, 0, 0)
+                .await
+                .unwrap();
+            let (dst, _m, _a) = vfs
+                .create("dst.txt", false, 0x4000_0000, 1, 0, 0)
+                .await
+                .unwrap();
+            let (src_fid, dst_fid) = ([1u8; 16], [2u8; 16]);
+            conn.handles.insert(src_fid, src);
+            conn.handles.insert(dst_fid, dst);
 
-        let mut key = [0u8; 24];
-        key[..16].copy_from_slice(&src_fid);
-        conn.resume_keys.insert(key, src_fid);
+            let mut key = [0u8; 24];
+            key[..16].copy_from_slice(&src_fid);
+            conn.resume_keys.insert(key, src_fid);
 
-        let mut input = Vec::new();
-        input.extend_from_slice(&key);
-        input.extend_from_slice(&1u32.to_le_bytes()); // ChunkCount
-        input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
-        input.extend_from_slice(&0u64.to_le_bytes()); // SourceOffset
-        input.extend_from_slice(&0u64.to_le_bytes()); // TargetOffset
-        input.extend_from_slice(&21u32.to_le_bytes()); // Length
-        input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+            let mut input = Vec::new();
+            input.extend_from_slice(&key);
+            input.extend_from_slice(&1u32.to_le_bytes()); // ChunkCount
+            input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+            input.extend_from_slice(&0u64.to_le_bytes()); // SourceOffset
+            input.extend_from_slice(&0u64.to_le_bytes()); // TargetOffset
+            input.extend_from_slice(&21u32.to_le_bytes()); // Length
+            input.extend_from_slice(&0u32.to_le_bytes()); // Reserved
 
-        let req = c::IoctlReq {
-            ctl_code: c::fsctl::SRV_COPYCHUNK,
-            file_id: c::FileId(dst_fid),
-            input,
-            max_output: 4096,
-            is_fsctl: true,
-        };
-        let out = do_copychunk(&mut conn, vfs.clone(), &req).await.expect("copychunk");
-        assert_eq!(&out[0..4], &1u32.to_le_bytes(), "ChunksWritten");
-        assert_eq!(&out[8..12], &21u32.to_le_bytes(), "TotalBytesWritten");
+            let req = c::IoctlReq {
+                ctl_code: c::fsctl::SRV_COPYCHUNK,
+                file_id: c::FileId(dst_fid),
+                input,
+                max_output: 4096,
+                is_fsctl: true,
+            };
+            let out = do_copychunk(&mut conn, vfs.clone(), &req)
+                .await
+                .expect("copychunk");
+            assert_eq!(&out[0..4], &1u32.to_le_bytes(), "ChunksWritten");
+            assert_eq!(&out[8..12], &21u32.to_le_bytes(), "TotalBytesWritten");
 
-        let dst = conn.handles.remove(&dst_fid).unwrap();
-        vfs.close(dst).await.unwrap();
-        assert_eq!(std::fs::read(dir.join("dst.txt")).unwrap(), b"hello copychunk world");
-        std::fs::remove_dir_all(&dir).ok();
+            let dst = conn.handles.remove(&dst_fid).unwrap();
+            vfs.close(dst).await.unwrap();
+            assert_eq!(
+                std::fs::read(dir.join("dst.txt")).unwrap(),
+                b"hello copychunk world"
+            );
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3172,38 +3491,42 @@ mod fsctl_tests {
     #[test]
     fn copychunk_rejects_oversized_request() {
         tokio_uring::start(async {
-        use smb_proto_smb2::commands::copychunk_limits as lim;
-        let dir = std::env::temp_dir().join(format!("rustsmb_cc_lim_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("f"), b"x").unwrap();
-        let (mut conn, vfs) = conn_with_vfs(&dir);
-        let (f, _m, _a) = vfs.create("f", false, 0x8000_0000, 1, 0, 0).await.unwrap();
-        let fid = [3u8; 16];
-        conn.handles.insert(fid, f);
-        let mut key = [0u8; 24];
-        key[..16].copy_from_slice(&fid);
-        conn.resume_keys.insert(key, fid);
+            use smb_proto_smb2::commands::copychunk_limits as lim;
+            let dir = std::env::temp_dir().join(format!("rustsmb_cc_lim_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("f"), b"x").unwrap();
+            let (mut conn, vfs) = conn_with_vfs(&dir);
+            let (f, _m, _a) = vfs.create("f", false, 0x8000_0000, 1, 0, 0).await.unwrap();
+            let fid = [3u8; 16];
+            conn.handles.insert(fid, f);
+            let mut key = [0u8; 24];
+            key[..16].copy_from_slice(&fid);
+            conn.resume_keys.insert(key, fid);
 
-        let mut input = Vec::new();
-        input.extend_from_slice(&key);
-        input.extend_from_slice(&1u32.to_le_bytes());
-        input.extend_from_slice(&0u32.to_le_bytes());
-        input.extend_from_slice(&0u64.to_le_bytes());
-        input.extend_from_slice(&0u64.to_le_bytes());
-        input.extend_from_slice(&(lim::MAX_CHUNK_SIZE + 1).to_le_bytes()); // over per-chunk cap
-        input.extend_from_slice(&0u32.to_le_bytes());
+            let mut input = Vec::new();
+            input.extend_from_slice(&key);
+            input.extend_from_slice(&1u32.to_le_bytes());
+            input.extend_from_slice(&0u32.to_le_bytes());
+            input.extend_from_slice(&0u64.to_le_bytes());
+            input.extend_from_slice(&0u64.to_le_bytes());
+            input.extend_from_slice(&(lim::MAX_CHUNK_SIZE + 1).to_le_bytes()); // over per-chunk cap
+            input.extend_from_slice(&0u32.to_le_bytes());
 
-        let req = c::IoctlReq {
-            ctl_code: c::fsctl::SRV_COPYCHUNK,
-            file_id: c::FileId(fid),
-            input,
-            max_output: 4096,
-            is_fsctl: true,
-        };
-        let err = do_copychunk(&mut conn, vfs, &req).await.unwrap_err();
-        assert_eq!(err.0, Status::INVALID_PARAMETER);
-        assert_eq!(&err.1[4..8], &lim::MAX_CHUNK_SIZE.to_le_bytes(), "limits echoed");
-        std::fs::remove_dir_all(&dir).ok();
+            let req = c::IoctlReq {
+                ctl_code: c::fsctl::SRV_COPYCHUNK,
+                file_id: c::FileId(fid),
+                input,
+                max_output: 4096,
+                is_fsctl: true,
+            };
+            let err = do_copychunk(&mut conn, vfs, &req).await.unwrap_err();
+            assert_eq!(err.0, Status::INVALID_PARAMETER);
+            assert_eq!(
+                &err.1[4..8],
+                &lim::MAX_CHUNK_SIZE.to_le_bytes(),
+                "limits echoed"
+            );
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3211,25 +3534,28 @@ mod fsctl_tests {
     #[test]
     fn zero_range_zeros_bytes() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_zd_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("z.bin"), vec![0xFFu8; 16]).unwrap();
-        let (mut conn, vfs) = conn_with_vfs(&dir);
-        let (f, _m, _a) = vfs.create("z.bin", false, 0x4000_0000, 1, 0, 0).await.unwrap();
-        let fid = [4u8; 16];
-        conn.handles.insert(fid, f);
+            let dir = std::env::temp_dir().join(format!("rustsmb_zd_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("z.bin"), vec![0xFFu8; 16]).unwrap();
+            let (mut conn, vfs) = conn_with_vfs(&dir);
+            let (f, _m, _a) = vfs
+                .create("z.bin", false, 0x4000_0000, 1, 0, 0)
+                .await
+                .unwrap();
+            let fid = [4u8; 16];
+            conn.handles.insert(fid, f);
 
-        let h = conn.handles.get_mut(&fid).map(|b| &mut **b).unwrap();
-        vfs.zero_range(h, 4, 8).await.expect("zero range");
-        let f = conn.handles.remove(&fid).unwrap();
-        vfs.close(f).await.unwrap();
+            let h = conn.handles.get_mut(&fid).map(|b| &mut **b).unwrap();
+            vfs.zero_range(h, 4, 8).await.expect("zero range");
+            let f = conn.handles.remove(&fid).unwrap();
+            vfs.close(f).await.unwrap();
 
-        let mut expected = vec![0xFFu8; 16];
-        for b in &mut expected[4..12] {
-            *b = 0;
-        }
-        assert_eq!(std::fs::read(dir.join("z.bin")).unwrap(), expected);
-        std::fs::remove_dir_all(&dir).ok();
+            let mut expected = vec![0xFFu8; 16];
+            for b in &mut expected[4..12] {
+                *b = 0;
+            }
+            assert_eq!(std::fs::read(dir.join("z.bin")).unwrap(), expected);
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 }
@@ -3244,7 +3570,12 @@ mod oplock_tests {
         let mut shares = HashMap::new();
         shares.insert(
             "public".to_string(),
-            Share { name: "public".into(), root: dir.to_path_buf(), vfs, is_ipc: false },
+            Share {
+                name: "public".into(),
+                root: dir.to_path_buf(),
+                vfs,
+                is_ipc: false,
+            },
         );
         Arc::new(ServerShared {
             shares,
@@ -3287,52 +3618,56 @@ mod oplock_tests {
     #[test]
     fn oplock_granted_then_broken_on_second_open() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_op_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("shared.bin"), b"data").unwrap();
-        let server = server_with_share(&dir);
-        let vfs = server.shares["public"].vfs.clone();
+            let dir = std::env::temp_dir().join(format!("rustsmb_op_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("shared.bin"), b"data").unwrap();
+            let server = server_with_share(&dir);
+            let vfs = server.shares["public"].vfs.clone();
 
-        let access = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
-        let share = 0x7; // READ|WRITE|DELETE
+            let access = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
+            let share = 0x7; // READ|WRITE|DELETE
 
-        let (tx_a, mut rx_a) = mpsc::channel(8);
-        let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
-        conn_a.session_id = 1;
-        let resp_a = create(
-            &mut conn_a,
-            vfs.clone(),
-            &server,
-            false,
-            &create_request("shared.bin", c::oplock::BATCH, access, share),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp_a[2], c::oplock::EXCLUSIVE, "sole opener granted exclusive");
+            let (tx_a, mut rx_a) = mpsc::channel(8);
+            let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
+            conn_a.session_id = 1;
+            let resp_a = create(
+                &mut conn_a,
+                vfs.clone(),
+                &server,
+                false,
+                &create_request("shared.bin", c::oplock::BATCH, access, share),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                resp_a[2],
+                c::oplock::EXCLUSIVE,
+                "sole opener granted exclusive"
+            );
 
-        let (tx_b, _rx_b) = mpsc::channel(8);
-        let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
-        conn_b.session_id = 2;
-        let resp_b = create(
-            &mut conn_b,
-            vfs.clone(),
-            &server,
-            false,
-            &create_request("shared.bin", c::oplock::NONE, access, share),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp_b[2], c::oplock::NONE, "contending open gets no oplock");
+            let (tx_b, _rx_b) = mpsc::channel(8);
+            let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
+            conn_b.session_id = 2;
+            let resp_b = create(
+                &mut conn_b,
+                vfs.clone(),
+                &server,
+                false,
+                &create_request("shared.bin", c::oplock::NONE, access, share),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp_b[2], c::oplock::NONE, "contending open gets no oplock");
 
-        let brk = rx_a.try_recv().expect("break notification delivered to A");
-        assert_eq!(
-            u16::from_le_bytes([brk[12], brk[13]]),
-            ss::cmd::OPLOCK_BREAK,
-            "frame is an OPLOCK_BREAK",
-        );
-        assert_eq!(brk[64 + 2], c::oplock::NONE, "broken down to NONE");
+            let brk = rx_a.try_recv().expect("break notification delivered to A");
+            assert_eq!(
+                u16::from_le_bytes([brk[12], brk[13]]),
+                ss::cmd::OPLOCK_BREAK,
+                "frame is an OPLOCK_BREAK",
+            );
+            assert_eq!(brk[64 + 2], c::oplock::NONE, "broken down to NONE");
 
-        std::fs::remove_dir_all(&dir).ok();
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 }
@@ -3348,7 +3683,12 @@ mod lease_tests {
         let mut shares = HashMap::new();
         shares.insert(
             "public".to_string(),
-            Share { name: "public".into(), root: dir.to_path_buf(), vfs, is_ipc: false },
+            Share {
+                name: "public".into(),
+                root: dir.to_path_buf(),
+                vfs,
+                is_ipc: false,
+            },
         );
         Arc::new(ServerShared {
             shares,
@@ -3369,7 +3709,13 @@ mod lease_tests {
     }
 
     /// Build a CREATE request that requests a v1 lease via an `RqLs` context.
-    fn create_request_lease(name: &str, key: [u8; 16], state: u32, access: u32, share: u32) -> Vec<u8> {
+    fn create_request_lease(
+        name: &str,
+        key: [u8; 16],
+        state: u32,
+        access: u32,
+        share: u32,
+    ) -> Vec<u8> {
         let name16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         let name_off = 64 + 56; // header + fixed body
         let name_end = name_off + name16.len();
@@ -3422,58 +3768,78 @@ mod lease_tests {
     #[test]
     fn lease_granted_then_broken_on_second_key() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_ls_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("leased.bin"), b"data").unwrap();
-        let server = server_with_share(&dir);
-        let vfs = server.shares["public"].vfs.clone();
+            let dir = std::env::temp_dir().join(format!("rustsmb_ls_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("leased.bin"), b"data").unwrap();
+            let server = server_with_share(&dir);
+            let vfs = server.shares["public"].vfs.clone();
 
-        let access = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
-        let share = 0x7; // READ|WRITE|DELETE
-        let k1 = [0x11u8; 16];
-        let k2 = [0x22u8; 16];
+            let access = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
+            let share = 0x7; // READ|WRITE|DELETE
+            let k1 = [0x11u8; 16];
+            let k2 = [0x22u8; 16];
 
-        let (tx_a, mut rx_a) = mpsc::channel(8);
-        let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
-        conn_a.session_id = 1;
-        let resp_a = create(
-            &mut conn_a,
-            vfs.clone(),
-            &server,
-            false,
-            &create_request_lease("leased.bin", k1, c::lease::RWH, access, share),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp_a[2], c::oplock::LEASE, "response is a lease grant");
-        assert_eq!(granted_state(&resp_a), c::lease::RWH, "sole opener gets RWH");
+            let (tx_a, mut rx_a) = mpsc::channel(8);
+            let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
+            conn_a.session_id = 1;
+            let resp_a = create(
+                &mut conn_a,
+                vfs.clone(),
+                &server,
+                false,
+                &create_request_lease("leased.bin", k1, c::lease::RWH, access, share),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp_a[2], c::oplock::LEASE, "response is a lease grant");
+            assert_eq!(
+                granted_state(&resp_a),
+                c::lease::RWH,
+                "sole opener gets RWH"
+            );
 
-        let (tx_b, _rx_b) = mpsc::channel(8);
-        let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
-        conn_b.session_id = 2;
-        let resp_b = create(
-            &mut conn_b,
-            vfs.clone(),
-            &server,
-            false,
-            &create_request_lease("leased.bin", k2, c::lease::RWH, access, share),
-        )
-        .await
-        .unwrap();
-        assert_eq!(granted_state(&resp_b), c::lease::RH, "contender gets read+handle");
+            let (tx_b, _rx_b) = mpsc::channel(8);
+            let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
+            conn_b.session_id = 2;
+            let resp_b = create(
+                &mut conn_b,
+                vfs.clone(),
+                &server,
+                false,
+                &create_request_lease("leased.bin", k2, c::lease::RWH, access, share),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                granted_state(&resp_b),
+                c::lease::RH,
+                "contender gets read+handle"
+            );
 
-        let brk = rx_a.try_recv().expect("lease break delivered to A");
-        assert_eq!(
-            u16::from_le_bytes([brk[12], brk[13]]),
-            ss::cmd::OPLOCK_BREAK,
-            "break rides the OPLOCK_BREAK command",
-        );
-        assert_eq!(u16::from_le_bytes([brk[64], brk[65]]), 44, "lease-break StructureSize");
-        assert_eq!(&brk[72..88], &k1, "names holder A's lease key");
-        assert_eq!(u32::from_le_bytes(brk[88..92].try_into().unwrap()), c::lease::RWH, "current");
-        assert_eq!(u32::from_le_bytes(brk[92..96].try_into().unwrap()), c::lease::RH, "new");
+            let brk = rx_a.try_recv().expect("lease break delivered to A");
+            assert_eq!(
+                u16::from_le_bytes([brk[12], brk[13]]),
+                ss::cmd::OPLOCK_BREAK,
+                "break rides the OPLOCK_BREAK command",
+            );
+            assert_eq!(
+                u16::from_le_bytes([brk[64], brk[65]]),
+                44,
+                "lease-break StructureSize"
+            );
+            assert_eq!(&brk[72..88], &k1, "names holder A's lease key");
+            assert_eq!(
+                u32::from_le_bytes(brk[88..92].try_into().unwrap()),
+                c::lease::RWH,
+                "current"
+            );
+            assert_eq!(
+                u32::from_le_bytes(brk[92..96].try_into().unwrap()),
+                c::lease::RH,
+                "new"
+            );
 
-        std::fs::remove_dir_all(&dir).ok();
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3482,31 +3848,45 @@ mod lease_tests {
     #[test]
     fn same_lease_key_reopen_does_not_break() {
         tokio_uring::start(async {
-        let dir = std::env::temp_dir().join(format!("rustsmb_ls2_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("f.bin"), b"data").unwrap();
-        let server = server_with_share(&dir);
-        let vfs = server.shares["public"].vfs.clone();
-        let access = 0x8000_0000 | 0x4000_0000;
-        let share = 0x7;
-        let key = [0x55u8; 16];
+            let dir = std::env::temp_dir().join(format!("rustsmb_ls2_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("f.bin"), b"data").unwrap();
+            let server = server_with_share(&dir);
+            let vfs = server.shares["public"].vfs.clone();
+            let access = 0x8000_0000 | 0x4000_0000;
+            let share = 0x7;
+            let key = [0x55u8; 16];
 
-        let (tx_a, mut rx_a) = mpsc::channel(8);
-        let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
-        conn_a.session_id = 1;
-        let _ = create(&mut conn_a, vfs.clone(), &server, false,
-            &create_request_lease("f.bin", key, c::lease::RWH, access, share)).await.unwrap();
+            let (tx_a, mut rx_a) = mpsc::channel(8);
+            let mut conn_a = Smb2Conn::new([0u8; 8], tx_a);
+            conn_a.session_id = 1;
+            let _ = create(
+                &mut conn_a,
+                vfs.clone(),
+                &server,
+                false,
+                &create_request_lease("f.bin", key, c::lease::RWH, access, share),
+            )
+            .await
+            .unwrap();
 
-        let (tx_b, _rx_b) = mpsc::channel(8);
-        let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
-        conn_b.session_id = 2;
-        let resp_b = create(&mut conn_b, vfs.clone(), &server, false,
-            &create_request_lease("f.bin", key, c::lease::RWH, access, share)).await.unwrap();
+            let (tx_b, _rx_b) = mpsc::channel(8);
+            let mut conn_b = Smb2Conn::new([0u8; 8], tx_b);
+            conn_b.session_id = 2;
+            let resp_b = create(
+                &mut conn_b,
+                vfs.clone(),
+                &server,
+                false,
+                &create_request_lease("f.bin", key, c::lease::RWH, access, share),
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(granted_state(&resp_b), c::lease::RWH, "same key keeps RWH");
-        assert!(rx_a.try_recv().is_err(), "no break for same lease key");
+            assert_eq!(granted_state(&resp_b), c::lease::RWH, "same key keeps RWH");
+            assert!(rx_a.try_recv().is_err(), "no break for same lease key");
 
-        std::fs::remove_dir_all(&dir).ok();
+            std::fs::remove_dir_all(&dir).ok();
         });
     }
 }
@@ -3516,7 +3896,13 @@ mod security_tests {
     use super::*;
     use win_sd::{AccessMask, SecurityDescriptor, SecurityDescriptorBuilder, Sid};
 
-    fn query_info_frame(info_type: u8, class: u8, output_len: u32, additional: u32, fid: [u8; 16]) -> Vec<u8> {
+    fn query_info_frame(
+        info_type: u8,
+        class: u8,
+        output_len: u32,
+        additional: u32,
+        fid: [u8; 16],
+    ) -> Vec<u8> {
         let mut b = vec![0u8; 40];
         b[0..2].copy_from_slice(&41u16.to_le_bytes()); // StructureSize
         b[2] = info_type;
@@ -3529,7 +3915,13 @@ mod security_tests {
         f
     }
 
-    fn set_info_frame(info_type: u8, class: u8, additional: u32, fid: [u8; 16], buffer: &[u8]) -> Vec<u8> {
+    fn set_info_frame(
+        info_type: u8,
+        class: u8,
+        additional: u32,
+        fid: [u8; 16],
+        buffer: &[u8],
+    ) -> Vec<u8> {
         let mut b = vec![0u8; 32];
         b[0..2].copy_from_slice(&33u16.to_le_bytes()); // StructureSize
         b[2] = info_type;
@@ -3563,8 +3955,17 @@ mod security_tests {
             conn.handles.insert(fid, open);
 
             // Default query: parseable, DACL present.
-            let q = query_info_frame(c::info_type::SECURITY, 0, 4096, crate::security::sec_info::DEFAULT, fid);
-            let out = query_info(&mut conn, vfs.clone(), &q).await.unwrap().unwrap();
+            let q = query_info_frame(
+                c::info_type::SECURITY,
+                0,
+                4096,
+                crate::security::sec_info::DEFAULT,
+                fid,
+            );
+            let out = query_info(&mut conn, vfs.clone(), &q)
+                .await
+                .unwrap()
+                .unwrap();
             let sd = SecurityDescriptor::from_bytes(&out).expect("default parse");
             assert!(sd.dacl().is_some(), "default DACL present");
 
@@ -3582,12 +3983,27 @@ mod security_tests {
                 fid,
                 &custom,
             );
-            set_info(&mut conn, vfs.clone(), &s).await.expect("set security");
+            set_info(&mut conn, vfs.clone(), &s)
+                .await
+                .expect("set security");
 
-            let q2 = query_info_frame(c::info_type::SECURITY, 0, 4096, crate::security::sec_info::OWNER, fid);
-            let out2 = query_info(&mut conn, vfs.clone(), &q2).await.unwrap().unwrap();
+            let q2 = query_info_frame(
+                c::info_type::SECURITY,
+                0,
+                4096,
+                crate::security::sec_info::OWNER,
+                fid,
+            );
+            let out2 = query_info(&mut conn, vfs.clone(), &q2)
+                .await
+                .unwrap()
+                .unwrap();
             let sd2 = SecurityDescriptor::from_bytes(&out2).expect("stored parse");
-            assert_eq!(sd2.owner(), Some(&Sid::local_system()), "stored owner round-trips");
+            assert_eq!(
+                sd2.owner(),
+                Some(&Sid::local_system()),
+                "stored owner round-trips"
+            );
 
             std::fs::remove_dir_all(&dir).ok();
         });
@@ -3603,11 +4019,20 @@ mod security_tests {
             let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(&dir));
             let (tx, _rx) = mpsc::channel(8);
             let mut conn = Smb2Conn::new([0u8; 8], tx);
-            let (open, _m, _a) = vfs.create("s.bin", false, 0x8000_0000, 1, 0, 0).await.unwrap();
+            let (open, _m, _a) = vfs
+                .create("s.bin", false, 0x8000_0000, 1, 0, 0)
+                .await
+                .unwrap();
             let fid = [2u8; 16];
             conn.handles.insert(fid, open);
 
-            let q = query_info_frame(c::info_type::SECURITY, 0, 8, crate::security::sec_info::DEFAULT, fid);
+            let q = query_info_frame(
+                c::info_type::SECURITY,
+                0,
+                8,
+                crate::security::sec_info::DEFAULT,
+                fid,
+            );
             let err = query_info(&mut conn, vfs.clone(), &q).await.unwrap_err();
             assert_eq!(err, Status::BUFFER_TOO_SMALL);
 
@@ -3615,7 +4040,6 @@ mod security_tests {
         });
     }
 }
-
 
 #[cfg(test)]
 mod durable_tests {
@@ -3628,7 +4052,12 @@ mod durable_tests {
         let mut shares = HashMap::new();
         shares.insert(
             "public".to_string(),
-            Share { name: "public".into(), root: dir.to_path_buf(), vfs, is_ipc: false },
+            Share {
+                name: "public".into(),
+                root: dir.to_path_buf(),
+                vfs,
+                is_ipc: false,
+            },
         );
         Arc::new(ServerShared {
             shares,
@@ -3649,7 +4078,13 @@ mod durable_tests {
     }
 
     /// Build a CREATE frame carrying a single create-context (name, data).
-    fn create_req_ctx(name: &str, access: u32, disp: u32, ctx_name: &[u8], ctx_data: &[u8]) -> Vec<u8> {
+    fn create_req_ctx(
+        name: &str,
+        access: u32,
+        disp: u32,
+        ctx_name: &[u8],
+        ctx_data: &[u8],
+    ) -> Vec<u8> {
         let name16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         let name_off = 64 + 56;
         let name_end = name_off + name16.len();
@@ -3713,14 +4148,23 @@ mod durable_tests {
             conn.session_id = 1;
             let mut frame = frame;
             frame[67] = c::oplock::BATCH; // durable requires a batch oplock
-            let resp = create(&mut conn, vfs.clone(), &server, false, &frame).await.unwrap();
-            assert_ne!(u32::from_le_bytes(resp[80..84].try_into().unwrap()), 0, "durable resp ctx");
+            let resp = create(&mut conn, vfs.clone(), &server, false, &frame)
+                .await
+                .unwrap();
+            assert_ne!(
+                u32::from_le_bytes(resp[80..84].try_into().unwrap()),
+                0,
+                "durable resp ctx"
+            );
             assert_eq!(conn.durable.len(), 1, "durable handle recorded");
             let pid: [u8; 16] = resp[64..80].try_into().unwrap();
 
             // Simulate the connection dropping: preserve into the server table.
             for (_f, e) in conn.durable.drain() {
-                let _ = server.durables.put(e.into_record(crate::state::now_ms())).await;
+                let _ = server
+                    .durables
+                    .put(e.into_record(crate::state::now_ms()))
+                    .await;
             }
 
             // Fresh connection reclaims the handle via DH2C reconnect.
@@ -3732,10 +4176,15 @@ mod durable_tests {
             let (tx2, _rx2) = mpsc::channel(8);
             let mut conn2 = Smb2Conn::new([0u8; 8], tx2);
             conn2.session_id = 2;
-            let resp2 = create(&mut conn2, vfs.clone(), &server, false, &rframe).await.expect("reconnect");
+            let resp2 = create(&mut conn2, vfs.clone(), &server, false, &rframe)
+                .await
+                .expect("reconnect");
             let rid: [u8; 16] = resp2[64..80].try_into().unwrap();
             assert_eq!(rid, pid, "reconnect returns the persistent id");
-            assert!(conn2.handles.contains_key(&pid), "handle reinstated on new connection");
+            assert!(
+                conn2.handles.contains_key(&pid),
+                "handle reinstated on new connection"
+            );
 
             std::fs::remove_dir_all(&dir).ok();
         });
@@ -3757,7 +4206,9 @@ mod durable_tests {
             let rframe = create_req_ctx("x.bin", 0x8000_0000, 1, c::durable::RECONNECT_V2, &dc);
             let (tx, _rx) = mpsc::channel(8);
             let mut conn = Smb2Conn::new([0u8; 8], tx);
-            let err = create(&mut conn, vfs.clone(), &server, false, &rframe).await.unwrap_err();
+            let err = create(&mut conn, vfs.clone(), &server, false, &rframe)
+                .await
+                .unwrap_err();
             assert_eq!(err, Status::OBJECT_NAME_NOT_FOUND);
             std::fs::remove_dir_all(&dir).ok();
         });
@@ -3780,11 +4231,19 @@ mod interface_tests {
         // First entry: Next links to the second (152), IfIndex 1, AF_INET.
         assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 152);
         assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 1);
-        assert_eq!(u16::from_le_bytes(buf[24..26].try_into().unwrap()), 2, "AF_INET");
+        assert_eq!(
+            u16::from_le_bytes(buf[24..26].try_into().unwrap()),
+            2,
+            "AF_INET"
+        );
         assert_eq!(&buf[28..32], &[10, 0, 0, 5], "sin_addr");
         // Second entry terminates the chain and carries AF_INET6.
         assert_eq!(u32::from_le_bytes(buf[152..156].try_into().unwrap()), 0);
-        assert_eq!(u16::from_le_bytes(buf[152 + 24..152 + 26].try_into().unwrap()), 23, "AF_INET6");
+        assert_eq!(
+            u16::from_le_bytes(buf[152 + 24..152 + 26].try_into().unwrap()),
+            23,
+            "AF_INET6"
+        );
     }
 }
 
@@ -3802,12 +4261,21 @@ mod signing_tests {
             *b = i as u8; // arbitrary body bytes
         }
         sign_pdu(&mut pdu, &key, dialect);
-        assert!(verify_pdu_signature(&pdu, &key, dialect), "valid signature verifies");
+        assert!(
+            verify_pdu_signature(&pdu, &key, dialect),
+            "valid signature verifies"
+        );
         // Tamper with the body: verification must fail.
         pdu[70] ^= 0xFF;
-        assert!(!verify_pdu_signature(&pdu, &key, dialect), "tampered body rejected");
+        assert!(
+            !verify_pdu_signature(&pdu, &key, dialect),
+            "tampered body rejected"
+        );
         // Wrong key: fails.
         pdu[70] ^= 0xFF;
-        assert!(!verify_pdu_signature(&pdu, &[0u8; 16], dialect), "wrong key rejected");
+        assert!(
+            !verify_pdu_signature(&pdu, &[0u8; 16], dialect),
+            "wrong key rejected"
+        );
     }
 }

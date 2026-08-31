@@ -8,16 +8,16 @@ use std::sync::Arc;
 
 use smb_proto::types::Status;
 use smb_proto_smb1::consts;
-use smb_proto_smb1::header::{build_response, parse_header, Header, RespBody, HDR_LEN};
+use smb_proto_smb1::header::{HDR_LEN, Header, RespBody, build_response, parse_header};
 
-use smb_transport::{FrameSink, Transport};
 use smb_proto_smb1::consts::flags2;
 use smb_proto_smb2::{PROTO_ID_COMPRESSED, PROTO_ID_ENCRYPTED, PROTO_ID_SMB2};
+use smb_transport::{FrameSink, Transport};
 
 use metrics::{counter, histogram};
 use tokio::sync::mpsc;
 
-use crate::state::{next_uid, ServerShared, ConnState, Session};
+use crate::state::{ConnState, ServerShared, Session, next_uid};
 
 /// Depth of the per-connection outbound frame queue.
 const OUTBOUND_QUEUE_DEPTH: usize = 64;
@@ -64,7 +64,10 @@ impl<'a> ReqView<'a> {
         if self.wct < consts::andx::MIN_WCT {
             return None;
         }
-        self.words.first().copied().filter(|c| *c != consts::ANDX_NONE)
+        self.words
+            .first()
+            .copied()
+            .filter(|c| *c != consts::ANDX_NONE)
     }
 
     /// AndXOffset of the successor body relative to the SMB header start.
@@ -150,8 +153,12 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                     // Opportunistically compress large plaintext responses when
                     // the peer negotiated compression (never a sealed frame).
                     if let Some(algo) = c2.compress_algo {
-                        if resp.len() > COMPRESS_MIN_LEN && resp.first() != Some(&PROTO_ID_ENCRYPTED) {
-                            if let Some(packed) = smb_proto_smb2::compress::compress_message(&resp, algo) {
+                        if resp.len() > COMPRESS_MIN_LEN
+                            && resp.first() != Some(&PROTO_ID_ENCRYPTED)
+                        {
+                            if let Some(packed) =
+                                smb_proto_smb2::compress::compress_message(&resp, algo)
+                            {
                                 resp = packed;
                             }
                         }
@@ -265,7 +272,9 @@ pub(crate) async fn process_frame(
     // with an SMB2 NEGOTIATE and route later frames through the SMB2 processor.
     if hdr.command == consts::COM_NEGOTIATE
         && !conn.upgraded_smb2
-        && (buf.windows(smb_proto_smb2::SMB2_MAGIC.len()).any(|w| w == smb_proto_smb2::SMB2_MAGIC)
+        && (buf
+            .windows(smb_proto_smb2::SMB2_MAGIC.len())
+            .any(|w| w == smb_proto_smb2::SMB2_MAGIC)
             || buf.windows(b"SMB 2.".len()).any(|w| w == b"SMB 2."))
     {
         if let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {
@@ -308,7 +317,10 @@ pub(crate) async fn process_frame(
         };
     }
 
-    let mut io = IoContext { server: server.clone(), conn };
+    let mut io = IoContext {
+        server: server.clone(),
+        conn,
+    };
     let mut bodies: Vec<RespBody> = Vec::new();
     let mut last_status = Status::SUCCESS;
     let mut final_hdr = hdr.clone();
@@ -336,8 +348,11 @@ pub(crate) async fn process_frame(
     Some(build_response(&final_hdr, last_status, bodies))
 }
 
-
 /// Record the authenticated session on the SMB1-side connection state.
 fn io_conn_set_session(conn: &mut ConnState, user: String, guest: bool) {
-    conn.session = Some(Session { user, guest, trees: Vec::new() });
+    conn.session = Some(Session {
+        user,
+        guest,
+        trees: Vec::new(),
+    });
 }

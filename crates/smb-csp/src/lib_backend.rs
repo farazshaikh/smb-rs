@@ -89,6 +89,7 @@ pub fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// Expand a 56-bit NTLM key chunk (7 bytes) into an 8-byte DES key with
 /// zero parity bits — one bit inserted after every seven ([MS-NLMP]
 /// §3.3.1 / RFC 2437 style expansion used by LM/NTLMv1 responses).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES key parity expansion
 fn key7_to_key8(k7: &[u8; 7]) -> [u8; 8] {
     let mut bits = [0u8; 56];
     let mut bit = 0usize;
@@ -125,6 +126,7 @@ pub fn des_encrypt_key7(key56: [u8; 7], plaintext: [u8; 8]) -> [u8; 8] {
 
 /// NTLMv1/LM response: three DES encryptions of the challenge under
 /// successive 7-byte chunks of the 21-byte expanded hash ([MS-NLMP] §3.3.1).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // NTLMv1 DES response
 pub fn ntlmv1_response(hash21: &[u8; 21], challenge: &[u8; 8]) -> [u8; 24] {
     let mut out = [0u8; 24];
     for i in 0..3 {
@@ -170,6 +172,7 @@ pub fn aes128gcm_seal(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8], plaintext: &
 }
 
 /// AES-128-GCM open; `ciphertext` carries the trailing 16-byte tag.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-GCM AEAD
 pub fn aes128gcm_open(
     key: &[u8; 16],
     nonce: &[u8; 12],
@@ -199,6 +202,7 @@ pub fn aes128ccm_seal(key: &[u8; 16], nonce: &[u8; 11], aad: &[u8], plaintext: &
 }
 
 /// AES-128-CCM open; `ciphertext` carries the trailing 16-byte tag.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-CCM AEAD
 pub fn aes128ccm_open(
     key: &[u8; 16],
     nonce: &[u8; 11],
@@ -224,6 +228,7 @@ pub fn aes128ccm_open(
 ///   digest  = HMAC-MD5(SignKey, SeqNum_le || message)[0..8]
 ///   Checksum= RC4(SendSealKey, digest)   // only when KEY_EXCH negotiated
 ///   MAC     = 01000000 || Checksum || SeqNum_le
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // NTLM MIC over SPNEGO mechListMIC
 pub fn ntlm_mech_list_mic(
     session_key: &[u8; 16],
     server_role: bool,

@@ -62,6 +62,9 @@ pub const ANDX_NONE: u8 = 0xFF;
 pub const WORD_LEN: usize = 2;
 /// The ByteCount field preceding the data section is two bytes.
 pub const BYTE_COUNT_LEN: usize = 2;
+/// SMB_STRING/data-buffer format byte that prefixes a variable data block
+/// ([MS-CIFS] §2.2.3.3).
+pub const BUFFER_FORMAT_DATA: u8 = 0x04;
 
 /// AndX chaining block layout within the parameter words ([MS-CIFS] §2.2.3.4).
 pub mod andx {

@@ -44,6 +44,9 @@ license = "MIT"
 # Public items must be documented — an undocumented `pub` item is a hard error.
 [workspace.lints.rust]
 missing_docs = "deny"
+# Allow `#[cfg_attr(dylint_lib = "...", allow(...))]` to suppress dylint lints
+# (e.g. no_magic_numbers on inherent-math fns) without an unexpected-cfg warning.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dylint_lib, values(any()))"] }
 
 # Custom dylint lints (run via `cargo dylint --all`). The no_magic_numbers lint
 # flags integer literals that should be named constants in the smb-proto* crates.
