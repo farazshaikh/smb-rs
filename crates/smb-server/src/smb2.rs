@@ -567,7 +567,7 @@ async fn via_typestate(
     match crate::io::SmbRequest::parse(hdr.command, buf) {
         Ok(req) => {
             let ctx = crate::io::IoContext::accept(reply, req);
-            let mut res = crate::io::Resources { conn, server };
+            let mut res = crate::io::Resources { conn, server, frame: buf };
             match crate::io::dispatch(ctx, &mut res).await {
                 crate::io::Outcome::Final(r) => (r.status, r.body),
                 _ => (Status::UNSUCCESSFUL, Vec::new()),
@@ -861,36 +861,8 @@ async fn process_single(
                 }
             }
         }
-        ss::cmd::READ => {
-            if let Some(pipe_read) = pipe_read(conn, buf) {
-                return Some((response(&hdr, Status::SUCCESS, pipe_read, conn.session_id), true));
-            }
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                }
-            };
-            match read(conn, vfs, server, buf).await {
-                Ok(body) => (Status::SUCCESS, body),
-                Err(status) => (status, Vec::new()),
-            }
-        }
-        ss::cmd::WRITE => {
-            if let Some(written) = pipe_write(server, conn, buf) {
-                return Some((response(&hdr, Status::SUCCESS, written, conn.session_id), true));
-            }
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                }
-            };
-            match write(conn, vfs, server, buf).await {
-                Ok(body) => (Status::SUCCESS, body),
-                Err(status) => (status, Vec::new()),
-            }
-        }
+        ss::cmd::READ => via_typestate(&hdr, conn, server, buf).await,
+        ss::cmd::WRITE => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::CLOSE => {
             // Close a pipe handle first; fall through to file handles.
             if pipe_close(conn, buf) {
@@ -2588,7 +2560,7 @@ fn finalize_break(crypto: &crate::state::BreakCrypto, frame: Vec<u8>) -> Vec<u8>
 
 // ---------------- READ / WRITE / CLOSE / FLUSH ----------------
 
-async fn read(
+pub(crate) async fn read(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     server: &Arc<ServerShared>,
@@ -2619,7 +2591,7 @@ async fn read(
     Ok(c::build_read_resp(&data))
 }
 
-async fn write(
+pub(crate) async fn write(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     server: &Arc<ServerShared>,
@@ -2727,7 +2699,7 @@ fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
 
 /// Drain up to the requested byte count from a pipe's outbound queue;
 /// `None` when `file_id` is not a pipe.
-fn pipe_read(conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn pipe_read(conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
     let Some(req) = c::ReadReq::parse(buf) else {
         tracing::debug!("pipe_read: parse failed");
         return None;
@@ -2744,7 +2716,7 @@ fn pipe_read(conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
 
 /// Feed client bytes into a pipe RPC dispatcher; `None` when `file_id` is
 /// not a pipe. Returns the WRITE response body.
-fn pipe_write(server: &Arc<ServerShared>, conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn pipe_write(server: &Arc<ServerShared>, conn: &mut Smb2Conn, buf: &[u8]) -> Option<Vec<u8>> {
     let req = c::WriteReq::parse(buf);
     let Some(req) = req else {
         tracing::debug!("pipe_write: parse failed");

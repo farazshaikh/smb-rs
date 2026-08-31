@@ -106,6 +106,42 @@ impl Command for LogoffCmd {
     }
 }
 
+/// READ handler ([MS-SMB2] §3.3.5.12): a pipe read on IPC$, else a file read.
+pub struct ReadCmd;
+impl Command for ReadCmd {
+    type Request = ReadReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: ReadReq, res: &mut Resources<'_>) -> Outcome {
+        if let Some(body) = crate::smb2::pipe_read(res.conn, res.frame) {
+            return Outcome::Final(ctx.respond(Status::SUCCESS, body));
+        }
+        let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
+        };
+        match crate::smb2::read(res.conn, vfs, res.server, res.frame).await {
+            Ok(body) => Outcome::Final(ctx.respond(Status::SUCCESS, body)),
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
+/// WRITE handler ([MS-SMB2] §3.3.5.13): a pipe write on IPC$, else a file write.
+pub struct WriteCmd;
+impl Command for WriteCmd {
+    type Request = WriteReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: WriteReq, res: &mut Resources<'_>) -> Outcome {
+        if let Some(body) = crate::smb2::pipe_write(res.server, res.conn, res.frame) {
+            return Outcome::Final(ctx.respond(Status::SUCCESS, body));
+        }
+        let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
+        };
+        match crate::smb2::write(res.conn, vfs, res.server, res.frame).await {
+            Ok(body) => Outcome::Final(ctx.respond(Status::SUCCESS, body)),
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
@@ -130,6 +166,8 @@ smb_dispatch! {
     Flush          => FlushCmd;
     TreeDisconnect => TreeDisconnectCmd;
     Logoff         => LogoffCmd;
+    Read           => ReadCmd;
+    Write          => WriteCmd;
 }
 
 #[cfg(test)]

@@ -20,6 +20,9 @@ pub struct Resources<'r> {
     pub conn: &'r mut crate::smb2::Smb2Conn,
     /// Server-wide shared state (shares, lock/oplock/lease tables, sessions…).
     pub server: &'r std::sync::Arc<crate::state::ServerShared>,
+    /// The complete single-command frame, for handlers that read the raw body
+    /// (e.g. WRITE payload) zero-copy.
+    pub frame: &'r [u8],
 }
 
 /// The server's work item for one request (or one server event). Owns the reply
