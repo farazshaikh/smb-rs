@@ -38,6 +38,7 @@ pub fn load(path: &Path) -> Vec<TestRow> {
         .collect()
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // CSV column layout
 fn parse_row(line: &str) -> Option<TestRow> {
     let fields = split_csv_line(line);
     if fields.len() < 4 {

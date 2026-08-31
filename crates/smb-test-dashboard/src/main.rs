@@ -13,6 +13,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
+/// Default SMB port the dashboard sits next to (it listens on this plus one).
+const DEFAULT_SMB_PORT: u16 = 4450;
+/// Exit code for a command-line usage error.
+const EXIT_USAGE: i32 = 2;
+
 /// Runtime configuration resolved from the command line.
 struct Config {
     port: u16,
@@ -27,7 +32,7 @@ fn main() {
 /// Parse `--smb-port`, `--port` and `--csv`. The dashboard defaults to the SMB
 /// port (4450) plus one; an explicit `--port` overrides that.
 fn parse_args() -> Config {
-    let mut smb_port: u16 = 4450;
+    let mut smb_port: u16 = DEFAULT_SMB_PORT;
     let mut explicit_port: Option<u16> = None;
     let mut csv_path = PathBuf::from("test_status.csv");
 
@@ -67,7 +72,7 @@ fn print_help_and_exit() -> ! {
 
 fn fail(msg: &str) -> ! {
     eprintln!("smb-test-dashboard: {msg}");
-    std::process::exit(2);
+    std::process::exit(EXIT_USAGE);
 }
 
 /// Bind the listener and hand each connection to a worker thread. The CSV path

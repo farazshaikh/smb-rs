@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::{Ctx, Metrics, Opts, TestCase};
 
 /// The full catalog, in a stable order.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 test-fixture sizes/offsets
 pub fn all() -> Vec<TestCase> {
     vec![
         // ---- Negotiate ([MS-SMB2] §2.2.3/4) ----
@@ -516,6 +517,7 @@ fn expect_dialect(c: &Ctx, want: &str) -> Result<(), String> {
 }
 
 /// Write a filled pattern and read it back, asserting the crc matches.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // test I/O sizes
 fn roundtrip(c: &Ctx, opts: &Opts, path: &str, size: u64) -> Result<(), String> {
     let r = c.run_with(opts, json!([
         {"op":"open","handle":"f","path":path,"disposition":"overwrite_if","delete_on_close":true},
@@ -554,6 +556,7 @@ fn list_names(r: &crate::DriverResp, idx: usize) -> Result<Vec<String>, String> 
 }
 
 /// Length of the base64 output at a step (decoded byte count).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // base64 length arithmetic
 fn b64_len(r: &crate::DriverResp, idx: usize) -> Result<usize, String> {
     let step = r.step(idx).ok_or("missing ioctl step")?;
     let b64 = step.get("output_b64").and_then(Value::as_str).ok_or("no output_b64")?;

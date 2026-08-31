@@ -14,7 +14,12 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 use smb_testsuite::recorder::{self, RunReport};
-use smb_testsuite::{cases, run_case, Ctx, Driver, Endpoint, Status};
+use smb_testsuite::{cases, run_case, Ctx, Driver, Endpoint, Status, DEFAULT_PORT};
+
+/// Exit code for a command-line usage error.
+const EXIT_USAGE: i32 = 2;
+/// Grace period for a freshly spawned server to bind its port.
+const SERVER_BIND_DELAY_MS: u64 = 1500;
 
 struct Args {
     list: bool,
@@ -78,7 +83,7 @@ impl Args {
                 other => {
                     eprintln!("unknown argument: {other}");
                     print_help();
-                    std::process::exit(2);
+                    std::process::exit(EXIT_USAGE);
                 }
             }
         }
@@ -89,7 +94,7 @@ impl Args {
 fn next(it: &mut impl Iterator<Item = String>, flag: &str) -> String {
     it.next().unwrap_or_else(|| {
         eprintln!("{flag} requires a value");
-        std::process::exit(2);
+        std::process::exit(EXIT_USAGE);
     })
 }
 
@@ -198,7 +203,7 @@ fn badge(s: &Status) -> &'static str {
 fn resolve_endpoint(args: &Args) -> Endpoint {
     let mut ep = Endpoint::from_env().unwrap_or(Endpoint {
         host: "127.0.0.1".into(),
-        port: 445,
+        port: DEFAULT_PORT,
         user: "faraz".into(),
         pass: "pass".into(),
         share: "public".into(),
@@ -223,7 +228,7 @@ fn resolve_driver(args: &Args) -> Driver {
 
 /// Spawn a local server and give it a moment to bind before tests run.
 fn start_server(args: &Args) -> Child {
-    let port = args.port.unwrap_or(445);
+    let port = args.port.unwrap_or(DEFAULT_PORT);
     let share_dir = args
         .share_dir
         .clone()
@@ -246,9 +251,9 @@ fn start_server(args: &Args) -> Child {
         .spawn()
         .unwrap_or_else(|e| {
             eprintln!("failed to start server {}: {e}", args.server_bin);
-            std::process::exit(2);
+            std::process::exit(EXIT_USAGE);
         });
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(SERVER_BIND_DELAY_MS));
     child
 }
 

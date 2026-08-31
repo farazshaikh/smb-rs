@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 pub mod cases;
 pub mod recorder;
 
+/// Default SMB TCP port used when neither env nor CLI supplies one.
+pub const DEFAULT_PORT: u16 = 445;
+
 /// Metrics a case may emit (e.g. throughput MB/s), keyed by name.
 pub type Metrics = BTreeMap<String, f64>;
 
@@ -45,7 +48,7 @@ impl Endpoint {
         let host = non_empty(std::env::var("SMB_TEST_HOST").ok())?;
         Some(Endpoint {
             host,
-            port: std::env::var("SMB_TEST_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(445),
+            port: std::env::var("SMB_TEST_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT),
             user: std::env::var("SMB_TEST_USER").unwrap_or_default(),
             pass: std::env::var("SMB_TEST_PASS").unwrap_or_default(),
             share: std::env::var("SMB_TEST_SHARE").unwrap_or_else(|_| "public".into()),

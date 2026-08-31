@@ -77,7 +77,9 @@ impl RunReport {
 }
 
 fn short(commit: &str) -> String {
-    commit.chars().take(12).collect()
+    /// Length of an abbreviated git commit hash.
+    const SHORT_HASH_LEN: usize = 12;
+    commit.chars().take(SHORT_HASH_LEN).collect()
 }
 
 /// Persist a run and rebuild the aggregate the UI reads.

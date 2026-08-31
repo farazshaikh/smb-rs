@@ -19,6 +19,7 @@ pub fn status_body(rows: &[TestRow], summary: &Summary) -> String {
 }
 
 /// Group rows by a key and emit `[{"<label>":..,"passed":..,...}]`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // pass/fail/skip/error counter slots
 fn breakdown(rows: &[TestRow], key: impl Fn(&TestRow) -> &str, label: &str) -> String {
     let mut groups: BTreeMap<&str, [usize; 4]> = BTreeMap::new();
     for row in rows {
@@ -65,6 +66,7 @@ fn row_to_json(row: &TestRow) -> String {
 }
 
 /// Quote and escape a string as a JSON value.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // JSON string escaping ([RFC 8259])
 fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

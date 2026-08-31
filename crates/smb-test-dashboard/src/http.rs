@@ -9,6 +9,11 @@ use std::path::Path;
 /// The single-page dashboard, embedded so the binary is self-contained.
 const INDEX_HTML: &str = include_str!("index.html");
 
+/// HTTP status codes used by the dashboard's read-only routes.
+const HTTP_OK: u16 = 200;
+const HTTP_NOT_FOUND: u16 = 404;
+const HTTP_METHOD_NOT_ALLOWED: u16 = 405;
+
 /// Read the request line, route it, and write the response.
 pub fn handle_connection(stream: TcpStream, csv_path: &Path) {
     let mut reader = BufReader::new(stream);
@@ -19,7 +24,7 @@ pub fn handle_connection(stream: TcpStream, csv_path: &Path) {
     let stream = reader.get_mut();
 
     if method != "GET" {
-        respond(stream, 405, "text/plain", b"method not allowed");
+        respond(stream, HTTP_METHOD_NOT_ALLOWED, "text/plain", b"method not allowed");
         return;
     }
     route(stream, &target, csv_path);
@@ -50,11 +55,11 @@ fn drain_headers(reader: &mut BufReader<TcpStream>) {
 fn route(stream: &mut TcpStream, target: &str, csv_path: &Path) {
     let path = target.split('?').next().unwrap_or("/");
     match path {
-        "/" | "/index.html" => respond(stream, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes()),
+        "/" | "/index.html" => respond(stream, HTTP_OK, "text/html; charset=utf-8", INDEX_HTML.as_bytes()),
         "/api/status" => respond_json(stream, &status_json(csv_path)),
         "/api/tests" => respond_json(stream, &tests_json(csv_path)),
-        "/healthz" => respond(stream, 200, "text/plain", b"ok"),
-        _ => respond(stream, 404, "text/plain", b"not found"),
+        "/healthz" => respond(stream, HTTP_OK, "text/plain", b"ok"),
+        _ => respond(stream, HTTP_NOT_FOUND, "text/plain", b"not found"),
     }
 }
 
@@ -70,7 +75,7 @@ fn tests_json(csv_path: &Path) -> String {
 }
 
 fn respond_json(stream: &mut TcpStream, body: &str) {
-    respond(stream, 200, "application/json; charset=utf-8", body.as_bytes());
+    respond(stream, HTTP_OK, "application/json; charset=utf-8", body.as_bytes());
 }
 
 /// Write a complete HTTP/1.1 response and close the connection.
