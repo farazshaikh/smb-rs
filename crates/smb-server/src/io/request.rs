@@ -35,6 +35,17 @@ impl Decode for TreeDisconnectReq {
     }
 }
 
+/// SMB2 TREE_CONNECT request ([MS-SMB2] §2.2.9): the share path is parsed from
+/// the frame by the handler, so the marker itself decodes nothing.
+#[derive(Debug)]
+pub struct TreeConnectReq;
+impl Decode for TreeConnectReq {
+    const COMMAND: u16 = cmd::TREE_CONNECT;
+    fn decode(_frame: &[u8]) -> Result<Self, Status> {
+        Ok(TreeConnectReq)
+    }
+}
+
 /// SMB2 LOGOFF request ([MS-SMB2] §2.2.7): no fields we act on.
 #[derive(Debug)]
 pub struct LogoffReq;
@@ -388,10 +399,32 @@ impl Command for OplockBreakCmd {
     }
 }
 
+/// TREE_CONNECT handler ([MS-SMB2] §3.3.5.7): resolves the share, installs a
+/// fresh TreeId (surfaced to the reply header via conn.resp_tree_id), and
+/// answers with the share's type.
+pub struct TreeConnectCmd;
+impl Command for TreeConnectCmd {
+    type Request = TreeConnectReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: TreeConnectReq, res: &mut Resources<'_>) -> Outcome {
+        match crate::smb2::tree_connect(res.server, res.conn, res.frame) {
+            Ok((name, share_type)) => {
+                let new_tid = crate::smb2::next_tree_id();
+                res.conn.trees.insert(new_tid, name);
+                res.conn.resp_tree_id = Some(new_tid);
+                counter!("smb_tcons_total").increment(1);
+                gauge!("smb_trees_active").increment(1.0);
+                Outcome::Final(ctx.respond(Status::SUCCESS, c::build_tree_connect_resp(share_type)))
+            }
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
     Echo           = cmd::ECHO            => EchoReq;
+    TreeConnect    = cmd::TREE_CONNECT    => TreeConnectReq;
     TreeDisconnect = cmd::TREE_DISCONNECT => TreeDisconnectReq;
     Logoff         = cmd::LOGOFF          => LogoffReq;
     Create         = cmd::CREATE          => CreateReq;
@@ -411,6 +444,7 @@ smb_request_table! {
 
 smb_dispatch! {
     Echo           => EchoCmd;
+    TreeConnect    => TreeConnectCmd;
     Flush          => FlushCmd;
     TreeDisconnect => TreeDisconnectCmd;
     Logoff         => LogoffCmd;

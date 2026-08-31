@@ -124,6 +124,10 @@ pub struct Smb2Conn {
     /// Symbolic Link Error Response body built by the last CREATE that stopped
     /// on a symlink ([MS-SMB2] §2.2.2.2.1), consumed when framing the error.
     pub symlink_error: Option<Vec<u8>>,
+    /// TreeId a successful TREE_CONNECT installs into its response header
+    /// ([MS-SMB2] §3.3.5.7), set by the handler and consumed once when the
+    /// reply is framed.
+    pub resp_tree_id: Option<u32>,
 }
 
 impl Smb2Conn {
@@ -168,6 +172,7 @@ impl Smb2Conn {
             disconnect: false,
             chain_fid: None,
             symlink_error: None,
+            resp_tree_id: None,
         }
     }
 
@@ -198,7 +203,7 @@ fn next_file_id() -> [u8; 16] {
 }
 
 /// Allocate a fresh TreeId.
-fn next_tree_id() -> u32 {
+pub(crate) fn next_tree_id() -> u32 {
     static T: AtomicU64 = AtomicU64::new(1);
     (T.fetch_add(1, Ordering::Relaxed) & 0x7fff_ffff) as u32
 }
@@ -694,8 +699,7 @@ async fn process_single(
         }
     }
 
-    // TREE_CONNECT overrides the response TreeId with the fresh value.
-    let mut resp_tid: Option<u32> = None;
+    // TREE_CONNECT installs a fresh TreeId into its reply via conn.resp_tree_id.
 
     // Route a command through the typestate pipeline: a framed body flows the
     // common signing/sealing tail below, a pre-framed async interim is sent
@@ -866,18 +870,7 @@ async fn process_single(
             Ok((status, body)) => (status, body),
             Err(status) => (status, Vec::new()),
         },
-        ss::cmd::TREE_CONNECT => match tree_connect(server, conn, buf) {
-            Ok((name, share_type)) => {
-                let new_tid = next_tree_id();
-                conn.trees.insert(new_tid, name);
-                resp_tid = Some(new_tid);
-                counter!("smb_tcons_total").increment(1);
-                gauge!("smb_trees_active").increment(1.0);
-                tracing::debug!(share = %conn.trees[&new_tid], "tree connected");
-                (Status::SUCCESS, c::build_tree_connect_resp(share_type))
-            }
-            Err(status) => (status, Vec::new()),
-        },
+        ss::cmd::TREE_CONNECT => route!(),
         ss::cmd::TREE_DISCONNECT => route!(),
         ss::cmd::LOGOFF => route!(),
         ss::cmd::CREATE => route!(),
@@ -988,7 +981,7 @@ async fn process_single(
 
 
     let mut resp = response(&hdr, status, body, conn.session_id);
-    if let Some(new_tid) = resp_tid {
+    if let Some(new_tid) = conn.resp_tree_id.take() {
         resp[36..40].copy_from_slice(&new_tid.to_le_bytes()); // TreeId
     }
 
@@ -1721,7 +1714,7 @@ fn session_setup(
 
 // ---------------- TREE_CONNECT ----------------
 
-fn tree_connect(
+pub(crate) fn tree_connect(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
     buf: &[u8],
