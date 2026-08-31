@@ -190,6 +190,53 @@ fn complete_pending_notifies(conn: &mut crate::smb2::Smb2Conn, fid: [u8; 16]) {
     }
 }
 
+/// QUERY_DIRECTORY handler ([MS-SMB2] §3.3.5.18): enumerates a directory handle.
+pub struct QueryDirCmd;
+impl Command for QueryDirCmd {
+    type Request = QueryDirReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: QueryDirReq, res: &mut Resources<'_>) -> Outcome {
+        let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
+        };
+        match crate::smb2::query_directory(res.conn, vfs, res.frame).await {
+            Ok(Some(buffer)) => Outcome::Final(ctx.respond(Status::SUCCESS, c::build_info_resp(&buffer))),
+            Ok(None) => Outcome::Final(ctx.respond(Status::NO_MORE_FILES, Vec::new())),
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
+/// QUERY_INFO handler ([MS-SMB2] §3.3.5.20): file/filesystem/security info.
+pub struct QueryInfoCmd;
+impl Command for QueryInfoCmd {
+    type Request = QueryInfoReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: QueryInfoReq, res: &mut Resources<'_>) -> Outcome {
+        let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
+        };
+        match crate::smb2::query_info(res.conn, vfs, res.frame).await {
+            Ok(Some(buffer)) => Outcome::Final(ctx.respond(Status::SUCCESS, c::build_info_resp(&buffer))),
+            Ok(None) => Outcome::Final(ctx.respond(Status::NOT_IMPLEMENTED, Vec::new())),
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
+/// SET_INFO handler ([MS-SMB2] §3.3.5.21): applies file/filesystem info changes.
+pub struct SetInfoCmd;
+impl Command for SetInfoCmd {
+    type Request = SetInfoReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: SetInfoReq, res: &mut Resources<'_>) -> Outcome {
+        let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
+        };
+        match crate::smb2::set_info(res.conn, vfs, res.frame).await {
+            Ok(()) => Outcome::Final(ctx.respond(Status::SUCCESS, c::build_set_info_resp())),
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
@@ -217,6 +264,9 @@ smb_dispatch! {
     Read           => ReadCmd;
     Write          => WriteCmd;
     Close          => CloseCmd;
+    QueryDir       => QueryDirCmd;
+    QueryInfo      => QueryInfoCmd;
+    SetInfo        => SetInfoCmd;
 }
 
 #[cfg(test)]

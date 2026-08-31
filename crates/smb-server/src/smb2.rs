@@ -1178,44 +1178,9 @@ async fn process_single(
             }
             return Some((interim, true));
         }
-        ss::cmd::QUERY_DIRECTORY => {
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                }
-            };
-            match query_directory(conn, vfs, buf).await {
-                Ok(Some(buffer)) => (Status::SUCCESS, c::build_info_resp(&buffer)),
-                Ok(None) => (Status::NO_MORE_FILES, Vec::new()),
-                Err(status) => (status, Vec::new()),
-            }
-        }
-        ss::cmd::QUERY_INFO => {
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                }
-            };
-            match query_info(conn, vfs, buf).await {
-                Ok(Some(buffer)) => (Status::SUCCESS, c::build_info_resp(&buffer)),
-                Ok(None) => (Status::NOT_IMPLEMENTED, Vec::new()),
-                Err(status) => (status, Vec::new()),
-            }
-        }
-        ss::cmd::SET_INFO => {
-            let vfs = match share_vfs(server, conn, tid) {
-                Some(v) => v,
-                None => {
-                    return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                }
-            };
-            match set_info(conn, vfs, buf).await {
-                Ok(()) => (Status::SUCCESS, c::build_set_info_resp()),
-                Err(status) => (status, Vec::new()),
-            }
-        }
+        ss::cmd::QUERY_DIRECTORY => via_typestate(&hdr, conn, server, buf).await,
+        ss::cmd::QUERY_INFO => via_typestate(&hdr, conn, server, buf).await,
+        ss::cmd::SET_INFO => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::CANCEL => {
             // CANCEL ([MS-SMB2] §3.3.5.14): find the pending op either by the
             // AsyncId in the header (async CANCEL) or by MessageId (sync
@@ -2704,7 +2669,7 @@ pub(crate) fn pipe_close(conn: &mut Smb2Conn, buf: &[u8]) -> bool {
 
 // ---------------- QUERY_DIRECTORY ----------------
 
-async fn query_directory(
+pub(crate) async fn query_directory(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     buf: &[u8],
@@ -2799,7 +2764,7 @@ async fn query_directory(
 
 // ---------------- QUERY_INFO ----------------
 
-async fn query_info(
+pub(crate) async fn query_info(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     buf: &[u8],
@@ -2856,7 +2821,7 @@ async fn query_info(
 
 // ---------------- SET_INFO ----------------
 
-async fn set_info(
+pub(crate) async fn set_info(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     buf: &[u8],
