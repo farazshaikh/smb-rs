@@ -425,6 +425,89 @@ pub fn all() -> Vec<TestCase> {
                 ok(&r)
             },
         },
+        TestCase {
+            id: "locking.shared_compatible",
+            category: "Locking",
+            spec: "MS-SMB2 §2.2.26 / MS-FSA §2.1.5.9",
+            about: "Two shared locks on one range coexist; an exclusive lock over it is refused until both release",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"a","path":"lk_shared.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"write","handle":"a","offset":0,"fill_size":100},
+                    {"op":"open","handle":"b","path":"lk_shared.bin","disposition":"open"},
+                    {"op":"lock","handle":"a","kind":"shared","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"shared","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"exclusive","offset":0,"length":50,"expect_fail":true},
+                    {"op":"lock","handle":"a","kind":"unlock","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"unlock","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"exclusive","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"unlock","offset":0,"length":50},
+                    {"op":"close","handle":"b"},
+                    {"op":"close","handle":"a"}
+                ]))?;
+                ok(&r)
+            },
+        },
+        TestCase {
+            id: "locking.nonoverlap_ok",
+            category: "Locking",
+            spec: "MS-SMB2 §2.2.26 / MS-FSA §2.1.5.9",
+            about: "Exclusive locks on disjoint ranges of the same file do not conflict",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"a","path":"lk_disjoint.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"write","handle":"a","offset":0,"fill_size":200},
+                    {"op":"open","handle":"b","path":"lk_disjoint.bin","disposition":"open"},
+                    {"op":"lock","handle":"a","kind":"exclusive","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"exclusive","offset":100,"length":50},
+                    {"op":"lock","handle":"a","kind":"unlock","offset":0,"length":50},
+                    {"op":"lock","handle":"b","kind":"unlock","offset":100,"length":50},
+                    {"op":"close","handle":"b"},
+                    {"op":"close","handle":"a"}
+                ]))?;
+                ok(&r)
+            },
+        },
+        TestCase {
+            id: "locking.shared_blocks_write",
+            category: "Locking",
+            spec: "MS-FSA §2.1.5.9 (read lock forbids overlapping writes)",
+            about: "A shared (read) lock blocks a conflicting write by another open until released",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"a","path":"lk_wblock.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"write","handle":"a","offset":0,"fill_size":100},
+                    {"op":"open","handle":"b","path":"lk_wblock.bin","disposition":"open"},
+                    {"op":"lock","handle":"a","kind":"shared","offset":0,"length":50},
+                    {"op":"write","handle":"b","offset":0,"fill_size":50,"expect_fail":true},
+                    {"op":"lock","handle":"a","kind":"unlock","offset":0,"length":50},
+                    {"op":"write","handle":"b","offset":0,"fill_size":50},
+                    {"op":"close","handle":"b"},
+                    {"op":"close","handle":"a"}
+                ]))?;
+                ok(&r)
+            },
+        },
+        TestCase {
+            id: "locking.exclusive_blocks_read",
+            category: "Locking",
+            spec: "MS-FSA §2.1.5.9 (exclusive lock forbids other reads)",
+            about: "An exclusive lock blocks a read by another open until released",
+            run: |c| {
+                let r = c.run(json!([
+                    {"op":"open","handle":"a","path":"lk_rblock.bin","disposition":"overwrite_if","delete_on_close":true},
+                    {"op":"write","handle":"a","offset":0,"fill_size":100},
+                    {"op":"open","handle":"b","path":"lk_rblock.bin","disposition":"open"},
+                    {"op":"lock","handle":"a","kind":"exclusive","offset":0,"length":50},
+                    {"op":"read","handle":"b","offset":0,"length":50,"expect_fail":true},
+                    {"op":"lock","handle":"a","kind":"unlock","offset":0,"length":50},
+                    {"op":"read","handle":"b","offset":0,"length":50},
+                    {"op":"close","handle":"b"},
+                    {"op":"close","handle":"a"}
+                ]))?;
+                ok(&r)
+            },
+        },
         // ---- Alternate data streams ([MS-FSCC] §2.6) ----
         TestCase {
             id: "streams.roundtrip",
