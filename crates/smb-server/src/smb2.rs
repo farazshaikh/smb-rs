@@ -866,10 +866,7 @@ async fn process_single(
                 ),
             )
         }
-        ss::cmd::SESSION_SETUP => match session_setup(server, conn, buf) {
-            Ok((status, body)) => (status, body),
-            Err(status) => (status, Vec::new()),
-        },
+        ss::cmd::SESSION_SETUP => route!(),
         ss::cmd::TREE_CONNECT => route!(),
         ss::cmd::TREE_DISCONNECT => route!(),
         ss::cmd::LOGOFF => route!(),
@@ -1504,7 +1501,7 @@ fn probe_negotiate_resp() -> Vec<u8> {
 
 /// Handle one leg of SPNEGO/NTLMSSP session establishment ([MS-SMB2]
 /// §3.3.5.5).
-fn session_setup(
+pub(crate) fn session_setup(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
     buf: &[u8],

@@ -25,6 +25,17 @@ impl Decode for EchoReq {
     }
 }
 
+/// SMB2 SESSION_SETUP request ([MS-SMB2] §2.2.5): the NTLM/SPNEGO blob is parsed
+/// from the frame by the authenticator, so the marker itself decodes nothing.
+#[derive(Debug)]
+pub struct SessionSetupReq;
+impl Decode for SessionSetupReq {
+    const COMMAND: u16 = cmd::SESSION_SETUP;
+    fn decode(_frame: &[u8]) -> Result<Self, Status> {
+        Ok(SessionSetupReq)
+    }
+}
+
 /// SMB2 TREE_DISCONNECT request ([MS-SMB2] §2.2.11): no fields we act on.
 #[derive(Debug)]
 pub struct TreeDisconnectReq;
@@ -399,6 +410,20 @@ impl Command for OplockBreakCmd {
     }
 }
 
+/// SESSION_SETUP handler ([MS-SMB2] §3.3.5.5): runs one NTLM/SPNEGO leg via the
+/// existing authenticator. Kept thin so the shared framing tail still folds the
+/// pre-auth hash, derives the signing key and registers the session in one place.
+pub struct SessionSetupCmd;
+impl Command for SessionSetupCmd {
+    type Request = SessionSetupReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: SessionSetupReq, res: &mut Resources<'_>) -> Outcome {
+        match crate::smb2::session_setup(res.server, res.conn, res.frame) {
+            Ok((status, body)) => Outcome::Final(ctx.respond(status, body)),
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
 /// TREE_CONNECT handler ([MS-SMB2] §3.3.5.7): resolves the share, installs a
 /// fresh TreeId (surfaced to the reply header via conn.resp_tree_id), and
 /// answers with the share's type.
@@ -424,6 +449,7 @@ impl Command for TreeConnectCmd {
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
     Echo           = cmd::ECHO            => EchoReq;
+    SessionSetup   = cmd::SESSION_SETUP   => SessionSetupReq;
     TreeConnect    = cmd::TREE_CONNECT    => TreeConnectReq;
     TreeDisconnect = cmd::TREE_DISCONNECT => TreeDisconnectReq;
     Logoff         = cmd::LOGOFF          => LogoffReq;
@@ -444,6 +470,7 @@ smb_request_table! {
 
 smb_dispatch! {
     Echo           => EchoCmd;
+    SessionSetup   => SessionSetupCmd;
     TreeConnect    => TreeConnectCmd;
     Flush          => FlushCmd;
     TreeDisconnect => TreeDisconnectCmd;
