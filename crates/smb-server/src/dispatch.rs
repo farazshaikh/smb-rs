@@ -19,6 +19,11 @@ use tokio::sync::mpsc;
 
 use crate::state::{next_uid, ServerShared, ConnState, Session};
 
+/// Depth of the per-connection outbound frame queue.
+const OUTBOUND_QUEUE_DEPTH: usize = 64;
+/// Minimum plaintext response size before opportunistic compression is tried.
+const COMPRESS_MIN_LEN: usize = 1024;
+
 /// Short alias used by command handlers.
 pub type IoCtx<'a> = IoContext<'a>;
 
@@ -56,20 +61,20 @@ impl<'a> ReqView<'a> {
 
     /// AndX successor command byte when chaining continues past this request.
     pub fn andx_command(&self) -> Option<u8> {
-        if self.wct < 2 {
+        if self.wct < consts::andx::MIN_WCT {
             return None;
         }
-        self.words.first().copied().filter(|c| *c != 0xFF)
+        self.words.first().copied().filter(|c| *c != consts::ANDX_NONE)
     }
 
     /// AndXOffset of the successor body relative to the SMB header start.
     pub fn andx_offset(&self) -> Option<usize> {
-        if self.wct < 3 || self.andx_command().is_none() {
+        if self.wct < consts::andx::MIN_WCT_OFFSET || self.andx_command().is_none() {
             return None;
         }
         Some(u16::from_le_bytes([
-            *self.words.get(2)?,
-            *self.words.get(3)?,
+            *self.words.get(consts::andx::OFFSET_POS)?,
+            *self.words.get(consts::andx::OFFSET_POS + 1)?,
         ]) as usize)
     }
 }
@@ -94,7 +99,7 @@ pub(crate) async fn writer_loop(
 /// processors, and release the session's locks and durable handles on close.
 pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Box<dyn Transport>) {
     let (mut reader, writer) = transport.split();
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_DEPTH);
     let writer_task = tokio_uring::spawn(writer_loop(writer, out_rx));
 
     {
@@ -109,7 +114,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
             }) else {
                 break;
             };
-            if frame.0.len() < 4 {
+            if frame.0.len() < smb_proto_smb2::SMB2_MAGIC.len() {
                 continue;
             }
 
@@ -145,7 +150,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                     // Opportunistically compress large plaintext responses when
                     // the peer negotiated compression (never a sealed frame).
                     if let Some(algo) = c2.compress_algo {
-                        if resp.len() > 1024 && resp.first() != Some(&PROTO_ID_ENCRYPTED) {
+                        if resp.len() > COMPRESS_MIN_LEN && resp.first() != Some(&PROTO_ID_ENCRYPTED) {
                             if let Some(packed) = smb_proto_smb2::compress::compress_message(&resp, algo) {
                                 resp = packed;
                             }
@@ -217,7 +222,7 @@ pub fn rand_bytes(n: usize) -> Vec<u8> {
         .as_nanos()
         .to_le_bytes();
     for (i, b) in buf.iter_mut().enumerate() {
-        *b = nanos[i % 16];
+        *b = nanos[i % nanos.len()];
     }
     buf
 }
@@ -236,7 +241,8 @@ fn rand_challenge() -> [u8; 8] {
         .unwrap_or_default()
         .as_nanos()
         .to_le_bytes();
-    b.copy_from_slice(&nanos[..8]);
+    let n = b.len();
+    b.copy_from_slice(&nanos[..n]);
     b
 }
 
@@ -259,8 +265,8 @@ pub(crate) async fn process_frame(
     // with an SMB2 NEGOTIATE and route later frames through the SMB2 processor.
     if hdr.command == consts::COM_NEGOTIATE
         && !conn.upgraded_smb2
-        && (buf.windows(4).any(|w| w == [0xFE, b'S', b'M', b'B'])
-            || buf.windows(6).any(|w| w == b"SMB 2."))
+        && (buf.windows(smb_proto_smb2::SMB2_MAGIC.len()).any(|w| w == smb_proto_smb2::SMB2_MAGIC)
+            || buf.windows(b"SMB 2.".len()).any(|w| w == b"SMB 2."))
     {
         if let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {
             conn.upgraded_smb2 = true;
@@ -270,31 +276,32 @@ pub(crate) async fn process_frame(
     }
 
     let wct = buf[wc_off] as usize;
-    let bc_off_abs = wc_off + 1 + wct * 2;
+    let bc_off_abs = wc_off + 1 + wct * consts::WORD_LEN;
 
     // Build the AndX chain view over this single frame buffer.
     let mut views: Vec<ReqView> = Vec::new();
     let mut off = wc_off;
     while off + 1 <= buf.len() {
         let cwct = buf[off] as usize;
-        let cbc = off + 1 + cwct * 2;
-        if cbc + 2 > buf.len() {
+        let cbc = off + 1 + cwct * consts::WORD_LEN;
+        if cbc + consts::BYTE_COUNT_LEN > buf.len() {
             break;
         }
-        let words = &buf[off + 1..off + 1 + cwct * 2];
+        let words = &buf[off + 1..off + 1 + cwct * consts::WORD_LEN];
         views.push(ReqView {
             hdr: hdr.clone(),
             wct: cwct,
             words,
-            data: &buf[cbc + 2..],
+            data: &buf[cbc + consts::BYTE_COUNT_LEN..],
             bc_off_abs: cbc,
             frame: buf,
         });
-        let next_cmd = words.first().copied().unwrap_or(0xFF);
-        let next_off =
-            u16::from_le_bytes([*words.get(2).unwrap_or(&0), *words.get(3).unwrap_or(&0)])
-                as usize;
-        off = if next_cmd != 0xFF && next_off > off && next_off < buf.len() {
+        let next_cmd = words.first().copied().unwrap_or(consts::ANDX_NONE);
+        let next_off = u16::from_le_bytes([
+            *words.get(consts::andx::OFFSET_POS).unwrap_or(&0),
+            *words.get(consts::andx::OFFSET_POS + 1).unwrap_or(&0),
+        ]) as usize;
+        off = if next_cmd != consts::ANDX_NONE && next_off > off && next_off < buf.len() {
             next_off
         } else {
             break;

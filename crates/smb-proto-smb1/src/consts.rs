@@ -58,6 +58,21 @@ pub const COM_NT_CREATE_ANDX: u8 = 0xA2;
 /// AndX terminator: no successor command follows.
 pub const ANDX_NONE: u8 = 0xFF;
 
+/// A parameter "word" is two bytes ([MS-CIFS] §2.2.3.1).
+pub const WORD_LEN: usize = 2;
+/// The ByteCount field preceding the data section is two bytes.
+pub const BYTE_COUNT_LEN: usize = 2;
+
+/// AndX chaining block layout within the parameter words ([MS-CIFS] §2.2.3.4).
+pub mod andx {
+    /// Minimum WordCount to carry the AndXCommand + AndXReserved.
+    pub const MIN_WCT: usize = 2;
+    /// Minimum WordCount to also carry the AndXOffset.
+    pub const MIN_WCT_OFFSET: usize = 3;
+    /// Byte offset of the AndXOffset within the parameter words.
+    pub const OFFSET_POS: usize = 2;
+}
+
 /// Header flags ([MS-CIFS] §2.2.1.2).
 pub mod flags {
     /// This message is a response.
