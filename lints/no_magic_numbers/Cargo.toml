@@ -1,0 +1,24 @@
+[package]
+name = "no_magic_numbers"
+version = "0.1.0"
+authors = ["smb-rs"]
+description = "Dylint lint: flag magic-number integer literals that should be named constants in the smb-proto* crates"
+edition = "2024"
+publish = false
+
+# Standalone: not part of the main smb-rs workspace (uses rustc_private + a
+# pinned nightly).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "9fca3bc9fc2bc83c60bde26d18ed68f11564b228" }
+dylint_linting = "6.0"
+
+[dev-dependencies]
+dylint_testing = "6.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

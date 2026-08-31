@@ -17,6 +17,11 @@ pub struct FileId(pub [u8; 16]);
 impl FileId {
     /// All-zero file identifier.
     pub const ZERO: FileId = FileId([0u8; 16]);
+    /// FileId length in bytes.
+    pub const LEN: usize = 16;
+    /// Wildcard FileId `{0xFF..}` a related compound request uses to inherit the
+    /// prior CREATE's handle ([MS-SMB2] §3.3.5.2.7.2).
+    pub const WILDCARD: [u8; 16] = [0xFF; 16];
 }
 
 fn g16(b: &[u8], o: usize) -> u16 {

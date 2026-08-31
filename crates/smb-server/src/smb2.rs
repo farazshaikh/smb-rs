@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use smb_proto::types::Status;
 use smb_proto_smb2::commands as c;
+use smb_proto_smb2::consts::{aead, hdr, hdr_flags};
 use smb_proto_smb2::info as info;
 use smb_proto_smb2::session_setup as ss;
 use smb_transport::Transport;
@@ -320,20 +321,22 @@ pub(crate) async fn process_frame(
     conn.chain_fid = None;
     let mut off = 0usize;
     loop {
-        if off + 64 > work.len() {
+        if off + hdr::LEN > work.len() {
             break;
         }
         // A related request ([MS-SMB2] §3.3.5.2.7.2) that carries the wildcard
         // FileId {0xFF..} refers to the FileId produced by the previous CREATE
         // in this chain — substitute it before the handler parses the body.
-        let flags = u32::from_le_bytes(work[off + 16..off + 20].try_into().unwrap());
-        if flags & 0x04 != 0 {
+        let flags = g32(&work, off + hdr::FLAGS);
+        if flags & hdr_flags::RELATED_OPERATIONS != 0 {
             if let Some(fid) = conn.chain_fid {
-                let cmd = u16::from_le_bytes(work[off + 12..off + 14].try_into().unwrap());
+                let cmd = g16(&work, off + hdr::COMMAND);
                 if let Some(foff) = file_id_body_offset(cmd) {
-                    let abs = off + 64 + foff;
-                    if abs + 16 <= work.len() && work[abs..abs + 16] == [0xFFu8; 16] {
-                        work[abs..abs + 16].copy_from_slice(&fid);
+                    let abs = off + hdr::LEN + foff;
+                    if abs + c::FileId::LEN <= work.len()
+                        && work[abs..abs + c::FileId::LEN] == c::FileId::WILDCARD
+                    {
+                        work[abs..abs + c::FileId::LEN].copy_from_slice(&fid);
                     }
                 }
             }
@@ -345,14 +348,14 @@ pub(crate) async fn process_frame(
         // Refund the Credits this response grants back to the client's
         // balance ([MS-SMB2] §3.3.1.1) — the field was stamped by
         // response() as max(CreditCharge, 1).
-        let granted = u16::from_le_bytes(single[14..16].try_into().unwrap()) as u32;
+        let granted = g16(&single, hdr::CREDIT) as u32;
         conn.client_credits = conn.client_credits.saturating_add(granted);
         #[cfg(not(feature = "lib"))]
         let may_wrap = false; // sealing unsupported on this backend
         parts.push((single, may_wrap));
-        related_flags.push(flags & 0x04 != 0);
+        related_flags.push(flags & hdr_flags::RELATED_OPERATIONS != 0);
 
-        let next = u32::from_le_bytes(work[off + 20..off + 24].try_into().unwrap()) as usize;
+        let next = g32(&work, off + hdr::NEXT_COMMAND) as usize;
         if next == 0 || next >= work.len() - off {
             break;
         }
@@ -364,26 +367,29 @@ pub(crate) async fn process_frame(
 
     // Assemble compound reply: every frame except the last carries
     // NextCommand pointing at the following frame, 8-byte aligned.
-    let mut out: Vec<u8> = Vec::with_capacity(parts.iter().map(|p| p.0.len() + 7).sum());
+    let mut out: Vec<u8> = Vec::with_capacity(
+        parts.iter().map(|p| p.0.len() + (hdr::ALIGN - 1)).sum(),
+    );
     let mut starts = Vec::with_capacity(parts.len());
     for (p, _) in &parts {
-        while out.len() % 8 != 0 {
+        while out.len() % hdr::ALIGN != 0 {
             out.push(0);
         }
         starts.push(out.len());
         out.extend_from_slice(p);
     }
     for w in 0..starts.len().saturating_sub(1) {
-        let next = starts[w + 1] - starts[w];
-        let pos = starts[w] + 20; // NextCommand field offset
-        out[pos..pos + 4].copy_from_slice(&(next as u32).to_le_bytes());
+        let next = (starts[w + 1] - starts[w]) as u32;
+        let bytes = next.to_le_bytes();
+        let pos = starts[w] + hdr::NEXT_COMMAND;
+        out[pos..pos + bytes.len()].copy_from_slice(&bytes);
     }
     // Echo SMB2_FLAGS_RELATED_OPERATIONS on every chained response whose
     // request carried it, for all responses after the first ([MS-SMB2]
     // §3.3.4.1: the flag marks a response as part of a compounded chain).
     for w in 1..starts.len() {
         if related_flags[w] {
-            out[starts[w] + 16] |= 0x04;
+            out[starts[w] + hdr::FLAGS] |= hdr_flags::RELATED_OPERATIONS as u8;
         }
     }
 
@@ -434,7 +440,7 @@ fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
 fn seal_pdu(session_id: u64, enc_keys: ([u8; 16], [u8; 16]), cipher: u16, msg: &[u8]) -> Option<Vec<u8>> {
     let (_c2s, s2c) = enc_keys;
     let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
-    let iv_size = if gcm { 12 } else { 11 };
+    let iv_size = if gcm { aead::GCM_NONCE_LEN } else { aead::CCM_NONCE_LEN };
 
     let mut nonce_field = [0u8; 16];
     nonce_field[..iv_size].copy_from_slice(&crate::dispatch::rand_bytes(iv_size));
@@ -444,23 +450,23 @@ fn seal_pdu(session_id: u64, enc_keys: ([u8; 16], [u8; 16]), cipher: u16, msg: &
     let sealed = if gcm {
         smb_auth::crypto::aes128gcm_seal(
             &s2c,
-            nonce_field[..12].try_into().ok()?,
+            nonce_field[..aead::GCM_NONCE_LEN].try_into().ok()?,
             &tf[smb_proto_smb2::commands::tf_off::NONCE..],
             msg,
         )
     } else {
         smb_auth::crypto::aes128ccm_seal(
             &s2c,
-            nonce_field[..11].try_into().ok()?,
+            nonce_field[..aead::CCM_NONCE_LEN].try_into().ok()?,
             &tf[smb_proto_smb2::commands::tf_off::NONCE..],
             msg,
         )
     };
     // Tag lands in the Signature field; ciphertext follows the header.
     let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
-    tf[tag_at..tag_at + 16].copy_from_slice(&sealed[sealed.len() - 16..]);
+    tf[tag_at..tag_at + aead::TAG_LEN].copy_from_slice(&sealed[sealed.len() - aead::TAG_LEN..]);
     let mut frame = tf;
-    frame.extend_from_slice(&sealed[..sealed.len() - 16]);
+    frame.extend_from_slice(&sealed[..sealed.len() - aead::TAG_LEN]);
     counter!("smb_encrypted_responses_total").increment(1);
     counter!("smb_encrypted_bytes_total").increment(msg.len() as u64);
     Some(frame)
@@ -493,7 +499,6 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
         return None;
     };
     let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
-    let iv_size = if gcm { 12 } else { 11 };
     let aad = frame.get(
         smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::HDR_SIZE,
     )?;
@@ -505,12 +510,12 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
     // open, which expects ct||tag.
     let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
     let mut sealed = payload.to_vec();
-    sealed.extend_from_slice(frame.get(tag_at..tag_at + 16)?);
+    sealed.extend_from_slice(frame.get(tag_at..tag_at + aead::TAG_LEN)?);
     let pt = if gcm {
         match smb_auth::crypto::aes128gcm_open(
             &c2s,
             frame[smb_proto_smb2::commands::tf_off::NONCE..]
-                .get(..12)?
+                .get(..aead::GCM_NONCE_LEN)?
                 .try_into()
                 .ok()?,
             aad,
@@ -519,7 +524,7 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
             Some(p) => p,
             None => {
                 tracing::warn!(
-                    nonce = %hex_str(&frame[smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::NONCE+12]),
+                    nonce = %hex_str(&frame[smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::NONCE+aead::GCM_NONCE_LEN]),
                     aad_len = aad.len(),
                     payload_len = payload.len(),
                     orig_len = tf.original_len,
@@ -532,7 +537,7 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
         match smb_auth::crypto::aes128ccm_open(
             &c2s,
             frame[smb_proto_smb2::commands::tf_off::NONCE..]
-                .get(..11)?
+                .get(..aead::CCM_NONCE_LEN)?
                 .try_into()
                 .ok()?,
             aad,
@@ -639,7 +644,7 @@ async fn process_single(
     // every NEGOTIATE / SESSION_SETUP message updates it before processing.
     let is_preauth_msg = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP);
     if is_preauth_msg {
-        let mut joined = Vec::with_capacity(64 + buf.len());
+        let mut joined = Vec::with_capacity(hdr::LEN + buf.len());
         joined.extend_from_slice(&conn.preauth_hash);
         joined.extend_from_slice(buf);
         conn.preauth_hash = smb_auth::crypto::sha512(&joined);
@@ -830,7 +835,7 @@ async fn process_single(
 
     let mut resp = response(&hdr, status, body, conn.session_id);
     if let Some(new_tid) = conn.resp_tree_id.take() {
-        resp[36..40].copy_from_slice(&new_tid.to_le_bytes()); // TreeId
+        resp[hdr::TREE_ID..hdr::SESSION_ID].copy_from_slice(&new_tid.to_le_bytes()); // TreeId
     }
 
     // Register the established session so later channels can bind to it
@@ -856,7 +861,7 @@ async fn process_single(
     }
 
     if is_preauth_msg && conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
-        let mut joined = Vec::with_capacity(64 + resp.len());
+        let mut joined = Vec::with_capacity(hdr::LEN + resp.len());
         joined.extend_from_slice(&conn.preauth_hash);
         joined.extend_from_slice(&resp);
         conn.preauth_hash = smb_auth::crypto::sha512(&joined);
@@ -884,11 +889,11 @@ async fn process_single(
 /// AES-CMAC for 3.x dialects, HMAC-SHA256 for 2.x. Sets the SIGNED flag and
 /// fills the 16-byte Signature field (bytes 48..64).
 fn sign_pdu(resp: &mut [u8], key: &[u8; 16], dialect: Option<u16>) {
-    resp[16] |= 0x08; // SMB2_FLAGS_SIGNED
+    resp[hdr::FLAGS] |= hdr_flags::SIGNED as u8;
     let mut msg = Vec::with_capacity(resp.len());
-    msg.extend_from_slice(&resp[..48]);
+    msg.extend_from_slice(&resp[..hdr::SIGNATURE]);
     msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
-    msg.extend_from_slice(&resp[64..]);
+    msg.extend_from_slice(&resp[hdr::LEN..]);
     let sig = if matches!(
         dialect,
         Some(smb_proto_smb2::negotiate::DIALECT_300
@@ -902,34 +907,34 @@ fn sign_pdu(resp: &mut [u8], key: &[u8; 16], dialect: Option<u16>) {
     } else {
         let t = smb_auth::crypto::hmac_sha256(key, &msg);
         let mut s = [0u8; 16];
-        s.copy_from_slice(&t[..16]);
+        s.copy_from_slice(&t[..hdr::SIGNATURE_LEN]);
         s
     };
-    resp[48..64].copy_from_slice(&sig);
+    resp[hdr::SIGNATURE..hdr::LEN].copy_from_slice(&sig);
 }
 
 /// Verify a request PDU's signature against `key` for `dialect`: recompute the
 /// AES-CMAC (3.x) / HMAC-SHA256 (2.x) over the PDU with the signature field
 /// zeroed and compare to the header's Signature ([MS-SMB2] §3.3.5.2.4).
 fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>) -> bool {
-    if buf.len() < 64 {
+    if buf.len() < hdr::LEN {
         return false;
     }
     let mut msg = Vec::with_capacity(buf.len());
-    msg.extend_from_slice(&buf[..48]);
+    msg.extend_from_slice(&buf[..hdr::SIGNATURE]);
     msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
-    msg.extend_from_slice(&buf[64..]);
+    msg.extend_from_slice(&buf[hdr::LEN..]);
     let expected: [u8; 16] = if matches!(
         dialect,
         Some(smb_proto_smb2::negotiate::DIALECT_300
             | smb_proto_smb2::negotiate::DIALECT_302
             | smb_proto_smb2::negotiate::DIALECT_311)
     ) {
-        smb_auth::crypto::aes128_cmac(key, &msg)[..16].try_into().unwrap()
+        smb_auth::crypto::aes128_cmac(key, &msg)[..hdr::SIGNATURE_LEN].try_into().unwrap()
     } else {
-        smb_auth::crypto::hmac_sha256(key, &msg)[..16].try_into().unwrap()
+        smb_auth::crypto::hmac_sha256(key, &msg)[..hdr::SIGNATURE_LEN].try_into().unwrap()
     };
-    expected == buf[48..64]
+    expected == buf[hdr::SIGNATURE..hdr::LEN]
 }
 
 /// Per-session crypto material an async completion needs to sign/seal a frame
@@ -971,14 +976,14 @@ fn build_async_frame(
     status: Status,
     body: &[u8],
 ) -> Vec<u8> {
-    let mut f = Vec::with_capacity(64 + body.len());
+    let mut f = Vec::with_capacity(hdr::LEN + body.len());
     f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
-    f.extend_from_slice(&64u16.to_le_bytes()); // StructureSize
+    f.extend_from_slice(&(hdr::LEN as u16).to_le_bytes()); // StructureSize
     f.extend_from_slice(&1u16.to_le_bytes()); // CreditCharge
     f.extend_from_slice(&status.raw().to_le_bytes());
     f.extend_from_slice(&command.to_le_bytes());
     f.extend_from_slice(&1u16.to_le_bytes()); // CreditResponse
-    f.extend_from_slice(&0x0000_0003u32.to_le_bytes()); // SERVER_TO_REDIR|ASYNC_COMMAND
+    f.extend_from_slice(&(hdr_flags::SERVER_TO_REDIR | hdr_flags::ASYNC_COMMAND).to_le_bytes());
     f.extend_from_slice(&0u32.to_le_bytes()); // NextCommand
     f.extend_from_slice(&message_id.to_le_bytes());
     f.extend_from_slice(&async_id.to_le_bytes()); // AsyncId
@@ -1124,8 +1129,8 @@ pub(crate) fn begin_change_notify(
 /// STATUS_CANCELLED. CANCEL itself carries no response.
 pub(crate) fn cancel(conn: &mut Smb2Conn, hdr: &smb_proto_smb2::Header2, buf: &[u8]) {
     counter!("smb_cancels_total").increment(1);
-    let async_id = if hdr.is_async() && buf.len() >= 40 {
-        Some(u64::from_le_bytes(buf[32..40].try_into().unwrap()))
+    let async_id = if hdr.is_async() && buf.len() >= hdr::ASYNC_ID + size_of::<u64>() {
+        Some(u64::from_le_bytes(buf[hdr::ASYNC_ID..hdr::SESSION_ID].try_into().unwrap()))
     } else {
         conn.async_msgids.get(&hdr.message_id).copied()
     };
@@ -1370,7 +1375,7 @@ pub(crate) fn negotiate(
     hdr: &smb_proto_smb2::Header2,
     buf: &[u8],
 ) -> NegotiateReply {
-    let body_start = 64usize;
+    let body_start = hdr::LEN;
     // A NEGOTIATE received after the connection already negotiated a dialect is
     // invalid: the server MUST disconnect and not reply ([MS-SMB2] §3.3.5.4).
     if conn.dialect.is_some() {
@@ -1526,7 +1531,7 @@ pub(crate) fn session_setup(
     // flag and the header names an existing session to attach this new
     // connection (channel) to.
     let hdr_session = buf
-        .get(40..48)
+        .get(hdr::SESSION_ID..hdr::SIGNATURE)
         .and_then(|s| s.try_into().ok())
         .map(u64::from_le_bytes)
         .unwrap_or(0);
@@ -2254,14 +2259,14 @@ fn send_oplock_break(holder: &crate::state::OplockHolder, level: u8) {
 /// Build a server-initiated OPLOCK_BREAK frame (unsolicited: MessageId all-ones,
 /// sync header). Returned unsigned and unsealed.
 fn build_break_frame(body: &[u8]) -> Vec<u8> {
-    let mut f = Vec::with_capacity(64 + body.len());
+    let mut f = Vec::with_capacity(hdr::LEN + body.len());
     f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
-    f.extend_from_slice(&64u16.to_le_bytes()); // StructureSize
+    f.extend_from_slice(&(hdr::LEN as u16).to_le_bytes()); // StructureSize
     f.extend_from_slice(&0u16.to_le_bytes()); // CreditCharge
     f.extend_from_slice(&0u32.to_le_bytes()); // Status
     f.extend_from_slice(&ss::cmd::OPLOCK_BREAK.to_le_bytes());
     f.extend_from_slice(&0u16.to_le_bytes()); // CreditResponse
-    f.extend_from_slice(&1u32.to_le_bytes()); // Flags = SERVER_TO_REDIR
+    f.extend_from_slice(&hdr_flags::SERVER_TO_REDIR.to_le_bytes()); // Flags
     f.extend_from_slice(&0u32.to_le_bytes()); // NextCommand
     f.extend_from_slice(&u64::MAX.to_le_bytes()); // MessageId (unsolicited)
     f.extend_from_slice(&0u32.to_le_bytes()); // Reserved
@@ -2870,8 +2875,15 @@ fn hex_str(b: &[u8]) -> String {
 }
 
 fn g16(b: &[u8], o: usize) -> u16 {
-    b.get(o..o + 2)
+    b.get(o..o + size_of::<u16>())
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
+        .unwrap_or(0)
+}
+
+fn g32(b: &[u8], o: usize) -> u32 {
+    b.get(o..o + size_of::<u32>())
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
         .unwrap_or(0)
 }
 
