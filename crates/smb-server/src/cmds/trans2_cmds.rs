@@ -49,6 +49,7 @@ pub async fn dispatch_trans2(
 
 // ---------------- FIND_FIRST2 / FIND_NEXT2 ----------------
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // TRANS2 FIND_FIRST2 wire layout
 async fn find_first2(
     io: &mut IoCtx<'_>,
     tid: u16,
@@ -134,6 +135,7 @@ async fn find_first2(
     Ok(find_params(sid_v, returned.len() as u16, end_of_search, last_off, data_buf))
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // TRANS2 param block offsets
 fn find_params(
     sid: u16,
     count: u16,
@@ -155,6 +157,7 @@ fn sid() -> u16 {
 }
 
 /// FIND_NEXT2 resumes from the SID table.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // TRANS2 FIND_NEXT2 wire layout
 async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, Vec<u8>), Status> {
     if t.params.len() < 4 {
         return Err(Status::INVALID_PARAMETER);
@@ -206,6 +209,7 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
 
 // ---------------- QUERY_FS / PATH / FILE ----------------
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // QUERY_FS_INFORMATION wire layout
 fn query_fs(
     io: &IoCtx<'_>,
     tid: u16,
@@ -252,6 +256,7 @@ fn query_fs(
 }
 
 /// QUERY_PATH_INFORMATION by name.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // QUERY_PATH_INFORMATION param offsets
 async fn query_path(
     io: &IoCtx<'_>,
     tid: u16,
@@ -277,6 +282,7 @@ async fn query_path(
 }
 
 /// QUERY_FILE_INFORMATION by FID.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // QUERY_FILE_INFORMATION param offsets
 pub(crate) async fn query_file(
     io: &IoCtx<'_>,
     tid: u16,
@@ -310,6 +316,7 @@ pub(crate) async fn query_file(
 // ---------------- SET_FILE / SET_PATH ----------------
 
 /// SET_FILE_INFORMATION by FID.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SET_FILE_INFORMATION param offsets
 async fn set_file(
     io: &mut IoCtx<'_>,
     t: &t2::Trans2Req,
@@ -329,6 +336,7 @@ async fn set_file(
 }
 
 /// SET_PATH_INFORMATION by name.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SET_PATH_INFORMATION param offsets
 async fn set_path(
     io: &mut IoCtx<'_>,
     tid: u16,
@@ -350,6 +358,7 @@ async fn set_path(
 }
 
 /// Translate wire set-levels onto neutral [`SetOp`] values.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // info-level SetInfo decode ([MS-FSCC])
 fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_vfs::SetOp, Status> {
     let r64 = |i: usize| -> u64 {
         data.get(i..i + 8)
@@ -401,6 +410,7 @@ fn vfs_err(e: smb_vfs::VfsError) -> Status {
 
 
 /// Convert storage metadata into the neutral query-payload snapshot.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // FileMeta.times index order
 pub(crate) fn qmeta_from(m: &smb_vfs::FileMeta) -> smb_proto_smb1::query::QueryMeta {
     smb_proto_smb1::query::QueryMeta {
         times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],

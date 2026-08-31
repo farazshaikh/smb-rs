@@ -24,6 +24,7 @@ pub struct AuthOutcome {
 ///
 /// `server.users` empty + `allow_guest` accepts any principal; otherwise only
 /// configured accounts (or explicit anonymous) succeed.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // NTLM response/proof field widths ([MS-NLMP])
 pub fn authenticate_ntlmssp(
     users: &HashMap<String, String>,
     allow_guest: bool,
@@ -112,6 +113,7 @@ pub fn authenticate_ntlmssp(
 ///   ExportedSessionKey = RC4(KeyExchangeKey, EncryptedRandomSessionKey)
 /// When the client did not perform NEGOTIATE_KEY_EXCH the exported key
 /// equals KeyExchangeKey.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // NTLM session-key math ([MS-NLMP])
 fn derive_session_key(
     nthash: &[u8; 16],
     identity_utf16le: &[u8],

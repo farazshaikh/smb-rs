@@ -588,6 +588,9 @@ pub struct LeaseBreakAck {
 }
 
 impl LeaseBreakAck {
+    /// Fixed StructureSize of a LEASE_BREAK_ACK request ([MS-SMB2] §2.2.24.2).
+    pub const STRUCTURE_SIZE: u16 = 36;
+
     /// Parse from the complete frame.
     pub fn parse(frame: &[u8]) -> Option<LeaseBreakAck> {
         if frame.len() < BODY + 36 || g16(frame, BODY) != 36 {

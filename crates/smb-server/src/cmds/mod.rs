@@ -70,7 +70,7 @@ pub async fn dispatch_one<'a>(
             io.conn.session = None;
             io.conn.auth_pending = false;
             *bodies =
-                vec![RespBody::new(consts::COM_LOGOFF_ANDX, vec![0xFF, 0, 0, 0], Vec::new())];
+                vec![RespBody::new(consts::COM_LOGOFF_ANDX, vec![consts::ANDX_NONE, 0, 0, 0], Vec::new())];
             Ok(Status::SUCCESS)
         }
         consts::COM_ECHO => session::echo(req, bodies),

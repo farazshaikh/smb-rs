@@ -49,6 +49,7 @@ pub fn negotiate(
 }
 
 /// SESSION_SETUP_ANDX extended security: NTLMSSP two-leg flow.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB1 SESSION_SETUP_ANDX wire layout
 pub fn setup(
     io: &mut IoContext,
     req: &ReqView,
@@ -137,6 +138,7 @@ pub fn setup(
 }
 
 /// TREE_CONNECT_ANDX: resolve share name to its VFS-backed entry.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB1 TREE_CONNECT_ANDX wire layout
 pub fn tree_connect(
     io: &mut IoContext,
     req: &ReqView,
@@ -183,6 +185,7 @@ fn unicode_tail_ok(_bytes: &[u8]) -> bool {
 }
 
 /// ECHO: reply `count` times with identical payloads.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB1 ECHO word/byte layout
 pub fn echo(req: &ReqView, bodies: &mut Vec<RespBody>) -> Result<Status, Status> {
     let count = if req.words.len() >= 2 {
         u16::from_le_bytes([req.words[0], req.words[1]]).max(1)
@@ -196,6 +199,7 @@ pub fn echo(req: &ReqView, bodies: &mut Vec<RespBody>) -> Result<Status, Status>
     Ok(Status::SUCCESS)
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB1 ECHO response params
 fn ss_echo_body(seq: u16, data: &[u8]) -> RespBody {
     let mut params = Vec::with_capacity(4);
     params.extend_from_slice(&seq.to_le_bytes());

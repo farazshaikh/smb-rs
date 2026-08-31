@@ -13,6 +13,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
+/// Durable-handle flag marking a persistent handle ([MS-SMB2] §2.2.14.2.12).
+const DHANDLE_FLAG_PERSISTENT: u32 = 0x0000_0002;
+/// Share type for a hidden IPC$ pipe share: STYPE_IPC | STYPE_SPECIAL
+/// ([MS-SRVS] §2.2.2.4).
+const STYPE_IPC_SPECIAL: u32 = 0x8000_0003;
+
 use smb_vfs::OpenFile;
 use smb_vfs::Vfs;
 
@@ -532,7 +538,7 @@ impl DurableEntry {
             share_access: 0,
             create_options: self.options,
             is_dir: self.is_dir,
-            flags: if self.persistent { 0x2 } else { 0 },
+            flags: if self.persistent { DHANDLE_FLAG_PERSISTENT } else { 0 },
             match_guid: if self.create_guid == [0u8; 16] { None } else { Some(self.create_guid) },
             owner_node: String::new(),
             lease_key: self.lease_key,
@@ -645,7 +651,7 @@ impl ServerShared {
             .values()
             .map(|s| crate::srvsvc::ShareInfo {
                 netname: s.name.clone(),
-                shi_type: if s.is_ipc { 0x8000_0003 } else { 0 },
+                shi_type: if s.is_ipc { STYPE_IPC_SPECIAL } else { 0 },
                 remark: String::new(),
             })
             .collect();
@@ -725,7 +731,7 @@ static SID: AtomicU16 = AtomicU16::new(1);
 fn next_id(counter: &AtomicU16) -> u16 {
     loop {
         let v = counter.fetch_add(1, Ordering::Relaxed);
-        if v != 0 && v != 0xFFFF {
+        if v != 0 && v != u16::MAX {
             return v;
         }
     }
@@ -742,7 +748,7 @@ pub fn next_tid() -> u16 {
 /// Allocate a fresh FID.
 pub fn next_fid() -> u16 {
     let v = FID.fetch_add(1, Ordering::Relaxed);
-    if v == 0xFFFF {
+    if v == u16::MAX {
         FID.fetch_add(1, Ordering::Relaxed)
     } else {
         v

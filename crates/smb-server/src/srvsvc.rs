@@ -52,6 +52,7 @@ impl Pipe {
 
     /// Feed inbound DCERPC bytes, dispatching any complete request PDUs
     /// (BIND, and NetShareEnumAll opnum 15) and queueing their responses.
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DCERPC/NDR wire layout
     pub fn on_write(&mut self, data: &[u8], shares: &[ShareInfo]) {
         self.inbound.extend_from_slice(data);
         loop {
@@ -82,6 +83,7 @@ impl Pipe {
     }
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DCERPC PDU header ([MS-RPCE])
 fn pdu_header(ptype: u8, call_id: u32, body: &[u8]) -> Vec<u8> {
     let mut p = Vec::with_capacity(16 + body.len());
     p.extend_from_slice(&[5, 0]);
@@ -95,6 +97,7 @@ fn pdu_header(ptype: u8, call_id: u32, body: &[u8]) -> Vec<u8> {
     p
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DCERPC response PDU
 fn response_pdu(call_id: u32, stub: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(8 + stub.len());
     body.extend_from_slice(&(stub.len() as u32).to_le_bytes());
@@ -104,6 +107,7 @@ fn response_pdu(call_id: u32, stub: &[u8]) -> Vec<u8> {
     pdu_header(2, call_id, &body)
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DCERPC fault PDU
 fn build_fault(call_id: u32) -> Vec<u8> {
     let mut body = vec![0u8; 4];
     body.extend_from_slice(&0u16.to_le_bytes());
@@ -112,6 +116,7 @@ fn build_fault(call_id: u32) -> Vec<u8> {
     pdu_header(3, call_id, &body)
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DCERPC bind_ack PDU
 fn build_bind_ack(call_id: u32) -> Vec<u8> {
     let sec_addr = b"\\pipe\\srvsvc\0";
     let mut b = Vec::new();

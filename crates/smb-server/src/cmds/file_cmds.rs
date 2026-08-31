@@ -42,10 +42,10 @@ pub async fn nt_create(
         return Err(Status::OBJECT_NAME_NOT_FOUND);
     }
     let creq =
-        create_codec::NtCreateReq::parse(req.words, req.data, req.unicode(), req.bc_off_abs + 2)
+        create_codec::NtCreateReq::parse(req.words, req.data, req.unicode(), req.bc_off_abs + smb_proto_smb1::consts::WORD_LEN)
             .map_err(|_| Status::INVALID_PARAMETER)?;
 
-    let base_rel = if creq.root_fid != 0 && creq.root_fid <= 0xFFFF {
+    let base_rel = if creq.root_fid != 0 && creq.root_fid <= u16::MAX as u32 {
         io.conn
             .handles
             .get(&(creq.root_fid as u16))
@@ -56,9 +56,9 @@ pub async fn nt_create(
     };
     let rel = join_rel(&base_rel, &creq.name);
 
-    let want_dir = creq.create_options & 0x1 != 0; // FILE_DIRECTORY_FILE
-    let no_dir = creq.create_options & 0x40 != 0; // FILE_NON_DIRECTORY_FILE
-    let delete_on_close = creq.create_options & 0x1000 != 0; // FILE_DELETE_ON_CLOSE
+    let want_dir = creq.create_options & smb_proto_smb1::consts::create_options::FILE_DIRECTORY_FILE != 0;
+    let no_dir = creq.create_options & smb_proto_smb1::consts::create_options::FILE_NON_DIRECTORY_FILE != 0;
+    let delete_on_close = creq.create_options & smb_proto_smb1::consts::create_options::FILE_DELETE_ON_CLOSE != 0;
 
     let vfs = share_vfs(io, req.hdr.tid);
     let (mut open, meta, action) = vfs
@@ -156,7 +156,7 @@ pub async fn close(
     };
     if cr.mtime != 0 && cr.mtime != u32::MAX {
         // Legacy UTIME field: seconds since 1970 in the low word.
-        let ft = smb_proto::types::FileTime((cr.mtime as u64 + 11_644_473_600) * 10_000_000);
+        let ft = smb_proto::types::FileTime::from_unix(cr.mtime as i64, 0);
         let _ = vfs
             .set_info_open(&mut h, &SetOp::Basic { access: None, write: Some(ft) })
             .await;
@@ -211,7 +211,7 @@ pub async fn locking(
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
     let cmd = req.hdr.command;
-    bodies.push(RespBody::new(cmd, vec![0xFF, 0, 0, 0], Vec::new()));
+    bodies.push(RespBody::new(cmd, vec![smb_proto_smb1::consts::ANDX_NONE, 0, 0, 0], Vec::new()));
     Ok(Status::SUCCESS)
 }
 

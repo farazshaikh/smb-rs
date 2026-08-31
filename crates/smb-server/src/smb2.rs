@@ -199,6 +199,7 @@ fn next_session_id() -> u64 {
 }
 
 /// Allocate a 16-byte SMB2 FileId (counter in the first quadword).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 fn next_file_id() -> [u8; 16] {
     static F: AtomicU64 = AtomicU64::new(0x2000);
     let mut fid = [0u8; 16];
@@ -207,6 +208,7 @@ fn next_file_id() -> [u8; 16] {
 }
 
 /// Allocate a fresh TreeId.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn next_tree_id() -> u32 {
     static T: AtomicU64 = AtomicU64::new(1);
     (T.fetch_add(1, Ordering::Relaxed) & 0x7fff_ffff) as u32
@@ -214,6 +216,7 @@ pub(crate) fn next_tree_id() -> u32 {
 
 /// Serve an SMB2 client connection until EOF/error (used when a connection
 /// starts life directly in SMB2 rather than upgrading through SMB1).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub async fn serve_client(
     server: Arc<ServerShared>,
     transport: Box<dyn Transport>,
@@ -253,6 +256,7 @@ pub async fn serve_client(
 
 /// Respond to an SMB1 multi-protocol NEGOTIATE that carries the `\xFESMB`
 /// dialect marker: builds the SMB2 negotiate response so the client upgrades.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub fn handle_multiprotocol_negotiate(buf: &[u8], guid: &[u8; 16]) -> Option<Vec<u8>> {
     let (hdr, _wc_off) = smb_proto_smb1::header::parse_header(buf)?;
     let _ = hdr;
@@ -292,6 +296,7 @@ pub fn handle_multiprotocol_negotiate(buf: &[u8], guid: &[u8; 16]) -> Option<Vec
 /// Execute one frame (possibly compound) and build its response (`None` to
 /// stay silent). Chained requests ([MS-SMB2] §3.3.5.2) are dispatched in
 /// order and their replies concatenated with 8-byte alignment.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn process_frame(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
@@ -403,6 +408,7 @@ pub(crate) async fn process_frame(
 /// Body-relative offset of the 16-byte FileId within a request that carries
 /// one, used to resolve the wildcard FileId in a related compound follow-up
 /// ([MS-SMB2] §3.3.5.2.7.2). `None` for commands with no FileId field.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 fn file_id_body_offset(command: u16) -> Option<usize> {
     use smb_proto_smb2::session_setup::cmd as c;
     match command {
@@ -638,6 +644,7 @@ async fn via_typestate(
 }
 
 /// Process exactly one SMB2 request starting at `buf` (its own header).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 async fn process_single(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
@@ -1408,6 +1415,7 @@ fn mask_to_action(mask: inotify::EventMask) -> u32 {
 /// Build the wildcard-dialect NEGOTIATE response used to answer the
 /// invalid-status probe ([MS-SMB2] §2.2.3.1.1): DialectRevision 0x02FF with
 /// all other fields zero.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 fn probe_negotiate_resp() -> Vec<u8> {
     let mut b = Vec::with_capacity(68);
     b.extend_from_slice(&65u16.to_le_bytes()); // StructureSize
@@ -1443,6 +1451,7 @@ pub(crate) enum NegotiateReply {
 /// response, pick a common dialect, validate 3.1.1 pre-auth contexts, and choose
 /// cipher/compression. The response is framed and pre-auth-hashed by the shared
 /// tail in `process_single`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn negotiate(
     conn: &mut Smb2Conn,
     server: &Arc<ServerShared>,
@@ -1616,6 +1625,7 @@ pub(crate) fn negotiate(
     )
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn session_setup(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
@@ -1749,6 +1759,7 @@ pub(crate) fn session_setup(
                 // (spnego_write_mech_types: ASN1_SEQUENCE(0) of OIDs).
                 // Walk: outer A0 (negTokenInit) -> its 30 SEQUENCE ->
                 // first inner A0 (mechTypes wrapper) -> that 30 SEQUENCE.
+                #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
                 fn der_len(b: &[u8], i: usize) -> Option<(usize, usize)> {
                     let n = *b.get(i + 1)?;
                     Some(match n {
@@ -1831,6 +1842,7 @@ pub(crate) fn session_setup(
 
 // ---------------- TREE_CONNECT ----------------
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn tree_connect(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
@@ -1862,6 +1874,7 @@ pub(crate) fn tree_connect(
 
 // ---------------- CREATE ----------------
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn create(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
@@ -2086,6 +2099,7 @@ fn durable_reconnect_ids(d: &Option<c::DurableReq>) -> Option<([u8; 16], Option<
 
 /// Reclaim a preserved durable handle and re-open the file under its persistent
 /// id (single-node durable model: the on-disk file, not a live fd, is durable).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 async fn durable_reconnect(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
@@ -2368,6 +2382,7 @@ fn network_interface_info() -> Vec<u8> {
 
 /// Encode NETWORK_INTERFACE_INFO entries (RSS/RDMA both disabled, 10 Gbps),
 /// chaining `Next` links; each entry is a fixed 152 bytes (8-byte aligned).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 fn build_interface_list(entries: &[(u32, std::net::IpAddr)]) -> Vec<u8> {
     const LINK_SPEED: u64 = 10_000_000_000;
     let mut out = Vec::new();
@@ -2477,6 +2492,7 @@ fn finalize_break(crypto: &crate::state::BreakCrypto, frame: Vec<u8>) -> Vec<u8>
 
 // ---------------- READ / WRITE / CLOSE / FLUSH ----------------
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn read(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
@@ -2577,6 +2593,7 @@ pub(crate) enum IoctlReply {
 
 /// IOCTL / FSCTL dispatch ([MS-SMB2] §3.3.5.15). Kept as a free function so the
 /// typestate handler and its private FSCTL helpers all live in this module.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn ioctl(
     conn: &mut Smb2Conn,
     server: &Arc<ServerShared>,
@@ -2811,6 +2828,7 @@ pub(crate) async fn ioctl(
     IoctlReply::Reply(status, body)
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn close(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
@@ -2858,6 +2876,7 @@ pub(crate) fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32
 const KNOWN_PIPES: &[&str] = &["srvsvc", "wkssvc", "lanman", "netlogon"];
 
 /// Open a virtual pipe; `Err(FILE_NOT_FOUND)` for unknown names.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
     let req = c::CreateReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let name = req.name.trim_start_matches(['\\', '/']).to_lowercase();
@@ -2934,6 +2953,7 @@ pub(crate) fn pipe_close(conn: &mut Smb2Conn, buf: &[u8]) -> bool {
 
 // ---------------- QUERY_DIRECTORY ----------------
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn query_directory(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
@@ -3158,6 +3178,7 @@ fn next_resume_nonce() -> u64 {
 }
 
 /// Read the TotalBytesWritten field out of a SRV_COPYCHUNK_RESPONSE body.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 fn copychunk_total(resp: &[u8]) -> u32 {
     resp.get(8..12)
         .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
@@ -3237,6 +3258,7 @@ pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
 /// 9 with no error data. Every failed command carries this so clients can
 /// parse the frame (a bare header breaks their compound parser). The body
 /// is padded to the structure's declared 8-byte footprint.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn error_resp() -> Vec<u8> {
     let mut b = Vec::with_capacity(8);
     b.extend_from_slice(&9u16.to_le_bytes()); // StructureSize
@@ -3248,6 +3270,7 @@ pub(crate) fn error_resp() -> Vec<u8> {
 
 /// Build a 64-byte SMB2 response header + body, echoing MessageId/TreeId
 /// and stamping the effective session id ([MS-SMB2] §3.3.4.1).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn response(
     req: &smb_proto_smb2::Header2,
     status: Status,

@@ -402,8 +402,12 @@ impl Command for OplockBreakCmd {
     type Request = OplockBreakReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: OplockBreakReq, res: &mut Resources<'_>) -> Outcome {
         let frame = res.frame;
-        let structure_size = u16::from_le_bytes([*frame.get(64).unwrap_or(&0), *frame.get(65).unwrap_or(&0)]);
-        if structure_size == 36 {
+        let hdr_len = smb_proto_smb2::consts::hdr::LEN;
+        let structure_size = u16::from_le_bytes([
+            *frame.get(hdr_len).unwrap_or(&0),
+            *frame.get(hdr_len + 1).unwrap_or(&0),
+        ]);
+        if structure_size == c::LeaseBreakAck::STRUCTURE_SIZE {
             return match c::LeaseBreakAck::parse(frame) {
                 Some(ack) => {
                     res.server.leases.set_state(ack.key, ack.state);

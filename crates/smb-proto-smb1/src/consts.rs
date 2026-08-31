@@ -66,6 +66,16 @@ pub const BYTE_COUNT_LEN: usize = 2;
 /// ([MS-CIFS] §2.2.3.3).
 pub const BUFFER_FORMAT_DATA: u8 = 0x04;
 
+/// CreateOptions bit flags ([MS-SMB2] §2.2.13 / [MS-CIFS] §2.2.4.64.1).
+pub mod create_options {
+    /// The file being opened or created is a directory.
+    pub const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+    /// The file being opened must not be a directory.
+    pub const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+    /// Delete the file when the last open handle is closed.
+    pub const FILE_DELETE_ON_CLOSE: u32 = 0x0000_1000;
+}
+
 /// AndX chaining block layout within the parameter words ([MS-CIFS] §2.2.3.4).
 pub mod andx {
     /// Minimum WordCount to carry the AndXCommand + AndXReserved.

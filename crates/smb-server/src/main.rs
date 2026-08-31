@@ -15,6 +15,13 @@ use std::sync::Arc;
 
 use clap::Parser as _;
 
+/// Default TCP listen port when `--port` is not supplied.
+const DEFAULT_PORT: u16 = 4450;
+/// Interval between durable-handle expiry sweeps.
+const DURABLE_SWEEP_INTERVAL_SECS: u64 = 30;
+/// Bytes drained from a stray HTTP probe before replying.
+const HTTP_PROBE_READ_LEN: usize = 1024;
+
 /// Command-line interface.
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -25,7 +32,7 @@ use clap::Parser as _;
 )]
 struct Args {
     /// TCP port to listen on (direct hosting on 445 by tradition).
-    #[arg(short = 'p', long = "port", default_value_t = 4450)]
+    #[arg(short = 'p', long = "port", default_value_t = DEFAULT_PORT)]
     port: u16,
 
     /// Publish a share: NAME=PATH (repeatable; defaults to public=$PWD).
@@ -131,7 +138,7 @@ fn main() {
             let durables = shared.durables.clone();
             tokio_uring::spawn(async move {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(DURABLE_SWEEP_INTERVAL_SECS)).await;
                     let _ = durables.sweep_expired(state::now_ms()).await;
                 }
             });
@@ -247,7 +254,7 @@ fn spawn_metrics_endpoint(addr: SocketAddr) {
                     let text = handle.render();
                     tokio_uring::spawn(async move {
                         // Drain the request line/headers before responding.
-                        let (_read, _scratch) = sock.read(vec![0u8; 1024]).await;
+                        let (_read, _scratch) = sock.read(vec![0u8; HTTP_PROBE_READ_LEN]).await;
                         let resp = format!(
                             "HTTP/1.0 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{}",
