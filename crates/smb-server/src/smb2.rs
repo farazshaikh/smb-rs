@@ -555,7 +555,7 @@ async fn via_typestate(
     conn: &mut Smb2Conn,
     server: &Arc<ServerShared>,
     buf: &[u8],
-) -> (Status, Vec<u8>) {
+) -> Option<(Status, Vec<u8>)> {
     let reply = crate::io::ReplyHeader {
         command: hdr.command,
         message_id: hdr.message_id,
@@ -569,11 +569,14 @@ async fn via_typestate(
             let ctx = crate::io::IoContext::accept(reply, req);
             let mut res = crate::io::Resources { conn, server, frame: buf };
             match crate::io::dispatch(ctx, &mut res).await {
-                crate::io::Outcome::Final(r) => (r.status, r.body),
-                _ => (Status::UNSUCCESSFUL, Vec::new()),
+                crate::io::Outcome::Final(r) => Some((r.status, r.body)),
+                // Silent: the handler asked for no reply (e.g. a connection
+                // termination), so the caller returns None to send nothing.
+                crate::io::Outcome::Silent => None,
+                crate::io::Outcome::Interim { .. } => Some((Status::UNSUCCESSFUL, Vec::new())),
             }
         }
-        Err(status) => (status, Vec::new()),
+        Err(status) => Some((status, Vec::new())),
     }
 }
 
@@ -833,8 +836,14 @@ async fn process_single(
             }
             Err(status) => (status, Vec::new()),
         },
-        ss::cmd::TREE_DISCONNECT => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::LOGOFF => via_typestate(&hdr, conn, server, buf).await,
+        ss::cmd::TREE_DISCONNECT => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
+        ss::cmd::LOGOFF => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
         ss::cmd::CREATE => {
             // Named-pipe open on IPC$: \srvsvc and friends are virtual
             // files backed by the RPC dispatcher, not the VFS.
@@ -861,204 +870,26 @@ async fn process_single(
                 }
             }
         }
-        ss::cmd::READ => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::WRITE => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::CLOSE => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::FLUSH => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::IOCTL => {
-            let Some(req) = c::IoctlReq::parse(buf) else {
-                tracing::debug!("ioctl parse failed");
-                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
-            };
-            tracing::debug!(ctl = format!("{:#010x}", req.ctl_code), "ioctl");
-            match req.ctl_code {
-                // Echo the negotiated parameters back ([MS-SMB2] §3.3.5.15):
-                // capabilities, server GUID, security mode and dialect.
-                // Validate against the original NEGOTIATE and terminate the
-                // connection on any mismatch — a downgrade attempt ([MS-SMB2]
-                // §3.3.5.15.12). The request is invalid on 3.1.1, where
-                // pre-auth integrity supersedes this exchange.
-                c::fsctl::VALIDATE_NEGOTIATE_INFO => {
-                    let input = &req.input;
-                    let terminate = 'v: {
-                        if conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
-                            break 'v true;
-                        }
-                        if input.len() < 24 || (req.max_output as usize) < 24 {
-                            break 'v true;
-                        }
-                        let req_caps = u32::from_le_bytes(input[0..4].try_into().unwrap());
-                        if req_caps != conn.client_capabilities {
-                            break 'v true;
-                        }
-                        if input[4..20] != conn.client_guid {
-                            break 'v true;
-                        }
-                        let req_secmode = u16::from_le_bytes(input[20..22].try_into().unwrap());
-                        if req_secmode != conn.client_security_mode {
-                            break 'v true;
-                        }
-                        let count = u16::from_le_bytes(input[22..24].try_into().unwrap()) as usize;
-                        let mut dialects = Vec::with_capacity(count);
-                        for i in 0..count {
-                            match input.get(24 + i * 2..26 + i * 2) {
-                                Some(s) => dialects.push(u16::from_le_bytes(s.try_into().unwrap())),
-                                None => break 'v true,
-                            }
-                        }
-                        const SUPPORTED: [u16; 5] = [0x0202, 0x0210, 0x0300, 0x0302, 0x0311];
-                        let gcd = dialects.iter().copied().filter(|d| SUPPORTED.contains(d)).max();
-                        gcd != conn.dialect
-                    };
-                    if terminate {
-                        conn.disconnect = true;
-                        return None;
-                    }
-                    let mut out = Vec::with_capacity(24);
-                    // Echo the exact values from our NEGOTIATE response —
-                    // the client fails the exchange on any mismatch
-                    // ([MS-SMB2] §3.3.5.15).
-                    out.extend_from_slice(&conn.advertised_caps.to_le_bytes());
-                    out.extend_from_slice(&server.guid);
-                    let sec_mode = smb_proto_smb2::negotiate::SIGNING_ENABLED
-                        | if server.require_signing {
-                            smb_proto_smb2::negotiate::SIGNING_REQUIRED
-                        } else {
-                            0
-                        };
-                    out.extend_from_slice(&sec_mode.to_le_bytes()); // SecurityMode
-                    out.extend_from_slice(
-                        &conn.dialect.unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
-                            .to_le_bytes(),
-                    );
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
-                }
-                // Resiliency handshake carries no output data. Preserve the
-                // handle like a durable open ([MS-SMB2] §3.3.5.15.9) so a later
-                // SMB2_CREATE_DURABLE_HANDLE_RECONNECT can reclaim it.
-                c::fsctl::LMR_REQUEST_RESILIENCY => {
-                    if let Some(open) = conn.handles.get(&req.file_id.0) {
-                        let timeout = req
-                            .input
-                            .get(0..4)
-                            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-                            .filter(|t| *t != 0)
-                            .unwrap_or(60_000);
-                        let access = if open.can_write { 0x001F_01FF } else { 0x0012_0089 };
-                        let options = if open.is_dir { 0x1 } else { 0x40 };
-                        let entry = crate::state::DurableEntry {
-                            persistent_id: req.file_id.0,
-                            create_guid: [0u8; 16],
-                            rel: open.rel.clone(),
-                            is_dir: open.is_dir,
-                            access,
-                            options,
-                            session_id: conn.session_id,
-                            client_guid: conn.client_guid,
-                            lease_key: None,
-                            persistent: false,
-                            timeout,
-                            deadline: std::time::Instant::now(),
-                        };
-                        conn.durable.insert(req.file_id.0, entry);
-                    }
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
-                }
-                // FSCTL_PIPE_TRANSACT (0x0011C017): the DCERPC PDU arrives
-                // in the input buffer and the reply leaves in the output
-                // buffer — this is how SMB2 clients speak RPC over named
-                // pipes.
-                c::fsctl::PIPE_TRANSACT => {
-                    let Some(pipe) = conn.pipes.get_mut(&req.file_id.0) else {
-                        tracing::debug!(pipes = conn.pipes.len(), "transact on non-pipe fid");
-                        return Some((response(&hdr, Status::NOT_IMPLEMENTED, Vec::new(), conn.session_id), true));
-                    };
-                    let shares = server.share_infos();
-                    let out = {
-                        pipe.on_write(&req.input, &shares);
-                        counter!("smb_pipe_writes_total").increment(1);
-                        pipe.take(req.max_output as usize)
-                    };
-                    counter!("smb_pipe_reads_total").increment(1);
-                    let out_hex = hex_str(&out);
-                    tracing::debug!(out_len = out.len(), %out_hex, "pipe transact");
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
-                }
-                // Server-side copy: hand the client a resume key naming this
-                // open so a later COPYCHUNK can use it as the source.
-                c::fsctl::SRV_REQUEST_RESUME_KEY => {
-                    if !conn.handles.contains_key(&req.file_id.0) {
-                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                    }
-                    let mut key = [0u8; 24];
-                    key[..16].copy_from_slice(&req.file_id.0);
-                    key[16..24].copy_from_slice(&next_resume_nonce().to_le_bytes());
-                    conn.resume_keys.insert(key, req.file_id.0);
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &c::build_resume_key_resp(&key)))
-                }
-                // Server-side copy: read from the source open (named by the
-                // resume key in the input) and write into this target handle.
-                c::fsctl::SRV_COPYCHUNK | c::fsctl::SRV_COPYCHUNK_WRITE => {
-                    let vfs = match share_vfs(server, conn, tid) {
-                        Some(v) => v,
-                        None => return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true)),
-                    };
-                    match do_copychunk(conn, vfs, &req).await {
-                        Ok(out) => {
-                            counter!("smb_copychunk_bytes_total").increment(copychunk_total(&out) as u64);
-                            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
-                        }
-                        Err((status, out)) => {
-                            let body = c::build_ioctl_resp(req.file_id, req.ctl_code, &out);
-                            return Some((response(&hdr, status, body, conn.session_id), true));
-                        }
-                    }
-                }
-                // Linux files are implicitly sparse; accept the hint.
-                c::fsctl::SET_SPARSE => {
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
-                }
-                // FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2): our named pipes are
-                // always instantiable, so the wait completes immediately.
-                c::fsctl::PIPE_WAIT => {
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
-                }
-                // DFS is not offered on this standalone server: a referral
-                // query for any path is answered STATUS_NOT_FOUND so the client
-                // treats the path as non-DFS ([MS-DFSC] §3.1.5.4.2).
-                c::fsctl::DFS_GET_REFERRALS => {
-                    return Some((response(&hdr, Status::NOT_FOUND, Vec::new(), conn.session_id), true));
-                }
-                // Multichannel interface discovery ([MS-SMB2] §3.3.5.15.4):
-                // report the server's network interfaces so the client may open
-                // additional channels for the session.
-                c::fsctl::QUERY_NETWORK_INTERFACE_INFO => {
-                    let out = network_interface_info();
-                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
-                }
-                // Zero a byte range in the target handle ([MS-FSCC] §2.3.79).
-                c::fsctl::SET_ZERO_DATA => {
-                    let vfs = match share_vfs(server, conn, tid) {
-                        Some(v) => v,
-                        None => return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true)),
-                    };
-                    let Some((start, end)) = c::parse_zero_data(&req.input).filter(|(s, e)| e >= s) else {
-                        return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
-                    };
-                    let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
-                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                    };
-                    match vfs.zero_range(h, start, end - start).await {
-                        Ok(()) => {
-                            counter!("smb_zeroed_bytes_total").increment(end - start);
-                            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
-                        }
-                        Err(e) => (vfs_err(e), Vec::new()),
-                    }
-                }
-                _ => (Status::NOT_IMPLEMENTED, Vec::new()),
-            }
-        }
+        ss::cmd::READ => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
+        ss::cmd::WRITE => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
+        ss::cmd::CLOSE => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
+        ss::cmd::FLUSH => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
+        ss::cmd::IOCTL => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
         ss::cmd::LOCK => {
             let Some(req) = c::LockReq::parse(buf) else {
                 return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
@@ -1178,9 +1009,18 @@ async fn process_single(
             }
             return Some((interim, true));
         }
-        ss::cmd::QUERY_DIRECTORY => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::QUERY_INFO => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::SET_INFO => via_typestate(&hdr, conn, server, buf).await,
+        ss::cmd::QUERY_DIRECTORY => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
+        ss::cmd::QUERY_INFO => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
+        ss::cmd::SET_INFO => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
         ss::cmd::CANCEL => {
             // CANCEL ([MS-SMB2] §3.3.5.14): find the pending op either by the
             // AsyncId in the header (async CANCEL) or by MessageId (sync
@@ -1201,7 +1041,10 @@ async fn process_single(
             }
             return None;
         }
-        ss::cmd::ECHO => via_typestate(&hdr, conn, server, buf).await,
+        ss::cmd::ECHO => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
         ss::cmd::OPLOCK_BREAK => {
             // Command 18 carries both oplock (StructureSize 24) and lease
             // (StructureSize 36) break acknowledgements; dispatch on the size.
@@ -2554,6 +2397,216 @@ pub(crate) async fn write(
         send_lease_break(&out, &crypto, k, old, new, ep);
     }
     Ok(c::build_write_resp(written as u32))
+}
+
+/// The outcome of an IOCTL: either a reply body to encode, or silence because
+/// the connection is being terminated ([MS-SMB2] §3.3.5.15.12).
+pub(crate) enum IoctlReply {
+    Reply(Status, Vec<u8>),
+    Silent,
+}
+
+/// IOCTL / FSCTL dispatch ([MS-SMB2] §3.3.5.15). Kept as a free function so the
+/// typestate handler and its private FSCTL helpers all live in this module.
+pub(crate) async fn ioctl(
+    conn: &mut Smb2Conn,
+    server: &Arc<ServerShared>,
+    tid: u32,
+    buf: &[u8],
+) -> IoctlReply {
+    let Some(req) = c::IoctlReq::parse(buf) else {
+        tracing::debug!("ioctl parse failed");
+        return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+    };
+    tracing::debug!(ctl = format!("{:#010x}", req.ctl_code), "ioctl");
+    let (status, body) = match req.ctl_code {
+        // Echo the negotiated parameters back ([MS-SMB2] §3.3.5.15):
+        // capabilities, server GUID, security mode and dialect.
+        // Validate against the original NEGOTIATE and terminate the
+        // connection on any mismatch — a downgrade attempt ([MS-SMB2]
+        // §3.3.5.15.12). The request is invalid on 3.1.1, where
+        // pre-auth integrity supersedes this exchange.
+        c::fsctl::VALIDATE_NEGOTIATE_INFO => {
+            let input = &req.input;
+            let terminate = 'v: {
+                if conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
+                    break 'v true;
+                }
+                if input.len() < 24 || (req.max_output as usize) < 24 {
+                    break 'v true;
+                }
+                let req_caps = u32::from_le_bytes(input[0..4].try_into().unwrap());
+                if req_caps != conn.client_capabilities {
+                    break 'v true;
+                }
+                if input[4..20] != conn.client_guid {
+                    break 'v true;
+                }
+                let req_secmode = u16::from_le_bytes(input[20..22].try_into().unwrap());
+                if req_secmode != conn.client_security_mode {
+                    break 'v true;
+                }
+                let count = u16::from_le_bytes(input[22..24].try_into().unwrap()) as usize;
+                let mut dialects = Vec::with_capacity(count);
+                for i in 0..count {
+                    match input.get(24 + i * 2..26 + i * 2) {
+                        Some(s) => dialects.push(u16::from_le_bytes(s.try_into().unwrap())),
+                        None => break 'v true,
+                    }
+                }
+                const SUPPORTED: [u16; 5] = [0x0202, 0x0210, 0x0300, 0x0302, 0x0311];
+                let gcd = dialects.iter().copied().filter(|d| SUPPORTED.contains(d)).max();
+                gcd != conn.dialect
+            };
+            if terminate {
+                conn.disconnect = true;
+                return IoctlReply::Silent;
+            }
+            let mut out = Vec::with_capacity(24);
+            // Echo the exact values from our NEGOTIATE response —
+            // the client fails the exchange on any mismatch
+            // ([MS-SMB2] §3.3.5.15).
+            out.extend_from_slice(&conn.advertised_caps.to_le_bytes());
+            out.extend_from_slice(&server.guid);
+            let sec_mode = smb_proto_smb2::negotiate::SIGNING_ENABLED
+                | if server.require_signing {
+                    smb_proto_smb2::negotiate::SIGNING_REQUIRED
+                } else {
+                    0
+                };
+            out.extend_from_slice(&sec_mode.to_le_bytes()); // SecurityMode
+            out.extend_from_slice(
+                &conn.dialect.unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
+                    .to_le_bytes(),
+            );
+            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+        }
+        // Resiliency handshake carries no output data. Preserve the
+        // handle like a durable open ([MS-SMB2] §3.3.5.15.9) so a later
+        // SMB2_CREATE_DURABLE_HANDLE_RECONNECT can reclaim it.
+        c::fsctl::LMR_REQUEST_RESILIENCY => {
+            if let Some(open) = conn.handles.get(&req.file_id.0) {
+                let timeout = req
+                    .input
+                    .get(0..4)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                    .filter(|t| *t != 0)
+                    .unwrap_or(60_000);
+                let access = if open.can_write { 0x001F_01FF } else { 0x0012_0089 };
+                let options = if open.is_dir { 0x1 } else { 0x40 };
+                let entry = crate::state::DurableEntry {
+                    persistent_id: req.file_id.0,
+                    create_guid: [0u8; 16],
+                    rel: open.rel.clone(),
+                    is_dir: open.is_dir,
+                    access,
+                    options,
+                    session_id: conn.session_id,
+                    client_guid: conn.client_guid,
+                    lease_key: None,
+                    persistent: false,
+                    timeout,
+                    deadline: std::time::Instant::now(),
+                };
+                conn.durable.insert(req.file_id.0, entry);
+            }
+            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+        }
+        // FSCTL_PIPE_TRANSACT (0x0011C017): the DCERPC PDU arrives
+        // in the input buffer and the reply leaves in the output
+        // buffer — this is how SMB2 clients speak RPC over named
+        // pipes.
+        c::fsctl::PIPE_TRANSACT => {
+            let Some(pipe) = conn.pipes.get_mut(&req.file_id.0) else {
+                tracing::debug!(pipes = conn.pipes.len(), "transact on non-pipe fid");
+                return IoctlReply::Reply(Status::NOT_IMPLEMENTED, Vec::new());
+            };
+            let shares = server.share_infos();
+            let out = {
+                pipe.on_write(&req.input, &shares);
+                counter!("smb_pipe_writes_total").increment(1);
+                pipe.take(req.max_output as usize)
+            };
+            counter!("smb_pipe_reads_total").increment(1);
+            let out_hex = hex_str(&out);
+            tracing::debug!(out_len = out.len(), %out_hex, "pipe transact");
+            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+        }
+        // Server-side copy: hand the client a resume key naming this
+        // open so a later COPYCHUNK can use it as the source.
+        c::fsctl::SRV_REQUEST_RESUME_KEY => {
+            if !conn.handles.contains_key(&req.file_id.0) {
+                return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
+            }
+            let mut key = [0u8; 24];
+            key[..16].copy_from_slice(&req.file_id.0);
+            key[16..24].copy_from_slice(&next_resume_nonce().to_le_bytes());
+            conn.resume_keys.insert(key, req.file_id.0);
+            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &c::build_resume_key_resp(&key)))
+        }
+        // Server-side copy: read from the source open (named by the
+        // resume key in the input) and write into this target handle.
+        c::fsctl::SRV_COPYCHUNK | c::fsctl::SRV_COPYCHUNK_WRITE => {
+            let vfs = match share_vfs(server, conn, tid) {
+                Some(v) => v,
+                None => return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new()),
+            };
+            match do_copychunk(conn, vfs, &req).await {
+                Ok(out) => {
+                    counter!("smb_copychunk_bytes_total").increment(copychunk_total(&out) as u64);
+                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+                }
+                Err((status, out)) => {
+                    let body = c::build_ioctl_resp(req.file_id, req.ctl_code, &out);
+                    return IoctlReply::Reply(status, body);
+                }
+            }
+        }
+        // Linux files are implicitly sparse; accept the hint.
+        c::fsctl::SET_SPARSE => {
+            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+        }
+        // FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2): our named pipes are
+        // always instantiable, so the wait completes immediately.
+        c::fsctl::PIPE_WAIT => {
+            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+        }
+        // DFS is not offered on this standalone server: a referral
+        // query for any path is answered STATUS_NOT_FOUND so the client
+        // treats the path as non-DFS ([MS-DFSC] §3.1.5.4.2).
+        c::fsctl::DFS_GET_REFERRALS => {
+            return IoctlReply::Reply(Status::NOT_FOUND, Vec::new());
+        }
+        // Multichannel interface discovery ([MS-SMB2] §3.3.5.15.4):
+        // report the server's network interfaces so the client may open
+        // additional channels for the session.
+        c::fsctl::QUERY_NETWORK_INTERFACE_INFO => {
+            let out = network_interface_info();
+            (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &out))
+        }
+        // Zero a byte range in the target handle ([MS-FSCC] §2.3.79).
+        c::fsctl::SET_ZERO_DATA => {
+            let vfs = match share_vfs(server, conn, tid) {
+                Some(v) => v,
+                None => return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new()),
+            };
+            let Some((start, end)) = c::parse_zero_data(&req.input).filter(|(s, e)| e >= s) else {
+                return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+            };
+            let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
+                return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
+            };
+            match vfs.zero_range(h, start, end - start).await {
+                Ok(()) => {
+                    counter!("smb_zeroed_bytes_total").increment(end - start);
+                    (Status::SUCCESS, c::build_ioctl_resp(req.file_id, req.ctl_code, &[]))
+                }
+                Err(e) => (vfs_err(e), Vec::new()),
+            }
+        }
+        _ => (Status::NOT_IMPLEMENTED, Vec::new()),
+    };
+    IoctlReply::Reply(status, body)
 }
 
 pub(crate) async fn close(

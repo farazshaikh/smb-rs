@@ -237,6 +237,21 @@ impl Command for SetInfoCmd {
     }
 }
 
+/// IOCTL handler ([MS-SMB2] §3.3.5.15): FSCTL dispatch (validate-negotiate,
+/// resiliency, pipe transact, server-side copy, zero-data, interface info, ...).
+/// A downgrade-detected VALIDATE_NEGOTIATE_INFO terminates the connection and
+/// yields no reply.
+pub struct IoctlCmd;
+impl Command for IoctlCmd {
+    type Request = IoctlReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: IoctlReq, res: &mut Resources<'_>) -> Outcome {
+        match crate::smb2::ioctl(res.conn, res.server, ctx.reply.tree_id, res.frame).await {
+            crate::smb2::IoctlReply::Reply(status, body) => Outcome::Final(ctx.respond(status, body)),
+            crate::smb2::IoctlReply::Silent => Outcome::Silent,
+        }
+    }
+}
+
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
@@ -267,6 +282,7 @@ smb_dispatch! {
     QueryDir       => QueryDirCmd;
     QueryInfo      => QueryInfoCmd;
     SetInfo        => SetInfoCmd;
+    Ioctl          => IoctlCmd;
 }
 
 #[cfg(test)]
