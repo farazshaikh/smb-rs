@@ -893,27 +893,7 @@ async fn process_single(
         ss::cmd::SET_INFO => route!(),
         ss::cmd::CANCEL => route!(),
         ss::cmd::ECHO => route!(),
-        ss::cmd::OPLOCK_BREAK => {
-            // Command 18 carries both oplock (StructureSize 24) and lease
-            // (StructureSize 36) break acknowledgements; dispatch on the size.
-            let ss = u16::from_le_bytes([*buf.get(64).unwrap_or(&0), *buf.get(65).unwrap_or(&0)]);
-            if ss == 36 {
-                match c::LeaseBreakAck::parse(buf) {
-                    Some(ack) => {
-                        server.leases.set_state(ack.key, ack.state);
-                        (Status::SUCCESS, c::build_lease_break_resp(ack.key, ack.state))
-                    }
-                    None => (Status::INVALID_PARAMETER, Vec::new()),
-                }
-            } else {
-                match c::OplockBreakAck::parse(buf) {
-                    // The holder acknowledges a break; we already downgraded on
-                    // our side, so echo the settled level ([MS-SMB2] §3.3.5.22.2).
-                    Some(ack) => (Status::SUCCESS, c::build_oplock_break_resp(ack.file_id, ack.level)),
-                    None => (Status::INVALID_PARAMETER, Vec::new()),
-                }
-            }
-        }
+        ss::cmd::OPLOCK_BREAK => route!(),
         _ => (Status::NOT_IMPLEMENTED, Vec::new()),
     };
 

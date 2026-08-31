@@ -56,6 +56,18 @@ impl Decode for CancelReq {
     }
 }
 
+/// SMB2 OPLOCK_BREAK acknowledgement ([MS-SMB2] §2.2.24): command 18 carries an
+/// oplock (StructureSize 24) or lease (StructureSize 36) ack, dispatched on the
+/// size in the handler, so the marker itself decodes nothing.
+#[derive(Debug)]
+pub struct OplockBreakReq;
+impl Decode for OplockBreakReq {
+    const COMMAND: u16 = cmd::OPLOCK_BREAK;
+    fn decode(_frame: &[u8]) -> Result<Self, Status> {
+        Ok(OplockBreakReq)
+    }
+}
+
 /// ECHO handler: a keep-alive, always answered SUCCESS ([MS-SMB2] §3.3.5.17).
 pub struct EchoCmd;
 impl Command for EchoCmd {
@@ -349,6 +361,33 @@ impl Command for CancelCmd {
     }
 }
 
+/// OPLOCK_BREAK handler ([MS-SMB2] §3.3.5.22): acknowledges an oplock or lease
+/// break. Command 18 dispatches on StructureSize — 36 is a lease-break ack
+/// (record the settled state), otherwise an oplock-break ack (echo the level).
+pub struct OplockBreakCmd;
+impl Command for OplockBreakCmd {
+    type Request = OplockBreakReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: OplockBreakReq, res: &mut Resources<'_>) -> Outcome {
+        let frame = res.frame;
+        let structure_size = u16::from_le_bytes([*frame.get(64).unwrap_or(&0), *frame.get(65).unwrap_or(&0)]);
+        if structure_size == 36 {
+            return match c::LeaseBreakAck::parse(frame) {
+                Some(ack) => {
+                    res.server.leases.set_state(ack.key, ack.state);
+                    Outcome::Final(ctx.respond(Status::SUCCESS, c::build_lease_break_resp(ack.key, ack.state)))
+                }
+                None => Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new())),
+            };
+        }
+        match c::OplockBreakAck::parse(frame) {
+            // The holder acknowledges a break; we already downgraded on our
+            // side, so echo the settled level ([MS-SMB2] §3.3.5.22.2).
+            Some(ack) => Outcome::Final(ctx.respond(Status::SUCCESS, c::build_oplock_break_resp(ack.file_id, ack.level))),
+            None => Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new())),
+        }
+    }
+}
+
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
@@ -367,6 +406,7 @@ smb_request_table! {
     QueryInfo      = cmd::QUERY_INFO      => QueryInfoReq;
     SetInfo        = cmd::SET_INFO        => SetInfoReq;
     Cancel         = cmd::CANCEL          => CancelReq;
+    OplockBreak    = cmd::OPLOCK_BREAK    => OplockBreakReq;
 }
 
 smb_dispatch! {
@@ -385,6 +425,7 @@ smb_dispatch! {
     Lock           => LockCmd;
     ChangeNotify   => ChangeNotifyCmd;
     Cancel         => CancelCmd;
+    OplockBreak    => OplockBreakCmd;
 }
 
 #[cfg(test)]
