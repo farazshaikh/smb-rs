@@ -60,6 +60,12 @@ struct Args {
     #[arg(long = "encrypt")]
     encrypt: bool,
 
+    /// Mark a share as requiring SMB3 encryption by NAME (repeatable). Its
+    /// TREE_CONNECT response sets SMB2_SHAREFLAG_ENCRYPT_DATA and all traffic
+    /// on the tree is sealed.
+    #[arg(long = "encrypt-share", value_name = "NAME")]
+    encrypt_shares: Vec<String>,
+
     /// Durable-handle store backend: `mem` (non-durable) or `redb` (survives
     /// a server restart, enabling persistent-handle reclaim).
     #[arg(long = "handle-store", default_value = "mem")]
@@ -182,12 +188,15 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
     }
 
     let mut map = HashMap::new();
+    let encrypt_set: std::collections::HashSet<String> =
+        args.encrypt_shares.iter().map(|s| s.to_lowercase()).collect();
     for (name, root) in shares {
         let lname = name.to_lowercase();
         let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(root.clone()));
+        let encrypt = encrypt_set.contains(&lname);
         map.insert(
             lname.clone(),
-            state::Share { name, root: root.into(), vfs, is_ipc: false },
+            state::Share { name, root: root.into(), vfs, is_ipc: false, encrypt },
         );
     }
     // Virtual IPC$ share for named-pipe traffic.
@@ -198,6 +207,7 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
             root: "/".into(),
             vfs: Arc::new(smb_backend_posix::PosixVfs::new("/")),
             is_ipc: true,
+            encrypt: false,
         },
     );
     map

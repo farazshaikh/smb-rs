@@ -43,6 +43,10 @@ pub struct Share {
     pub vfs: Arc<dyn Vfs>,
     /// True for the virtual `IPC$` pipe share.
     pub is_ipc: bool,
+    /// True when the share requires SMB3 encryption (SMB2_SHAREFLAG_ENCRYPT_DATA):
+    /// its TREE_CONNECT response advertises the flag and every message on the
+    /// tree is sealed ([MS-SMB2] §3.3.5.7).
+    pub encrypt: bool,
 }
 
 /// Global (per-process) server configuration and user database.

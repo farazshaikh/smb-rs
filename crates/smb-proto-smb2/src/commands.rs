@@ -1104,13 +1104,16 @@ pub fn build_set_info_resp() -> Vec<u8> {
 
 // ---------------- TREE_CONNECT / DISCONNECT / LOGOFF ----------------
 
+/// ShareFlags bit requiring SMB3 encryption on the tree ([MS-SMB2] §2.2.10).
+pub const SHAREFLAG_ENCRYPT_DATA: u32 = 0x0000_8000;
+
 /// TREE_CONNECT response body (§2.2.10.2): 16-byte fixed part, no buffer.
-pub fn build_tree_connect_resp(share_type: u8) -> Vec<u8> {
+pub fn build_tree_connect_resp(share_type: u8, share_flags: u32) -> Vec<u8> {
     let mut b = Vec::with_capacity(16);
     b.extend_from_slice(&16u16.to_le_bytes()); // StructureSize
     b.push(share_type); // ShareType: 0x01 disk
     b.push(0); // Reserved
-    b.extend_from_slice(&0u32.to_le_bytes()); // ShareFlags
+    b.extend_from_slice(&share_flags.to_le_bytes()); // ShareFlags
     b.extend_from_slice(&0u32.to_le_bytes()); // Capabilities
     b.extend_from_slice(&0x001F_01FFu32.to_le_bytes()); // MaximalAccess
     debug_assert_eq!(b.len(), 16);

@@ -132,6 +132,10 @@ pub struct Smb2Conn {
     /// ([MS-SMB2] §3.3.5.7), set by the handler and consumed once when the
     /// reply is framed.
     pub resp_tree_id: Option<u32>,
+    /// Force-seal the response to the current frame regardless of session
+    /// encryption — set when TREE_CONNECT resolves to an encrypted share so the
+    /// tree-connect reply itself is sealed ([MS-SMB2] §3.3.5.7). Reset per frame.
+    pub seal_current: bool,
 }
 
 impl Smb2Conn {
@@ -177,6 +181,7 @@ impl Smb2Conn {
             chain_fid: None,
             symlink_error: None,
             resp_tree_id: None,
+            seal_current: false,
         }
     }
 
@@ -314,6 +319,7 @@ pub(crate) async fn process_frame(
         request_encrypted = true;
         conn.peer_encrypts = true;
     }
+    conn.seal_current = false;
 
     let mut parts: Vec<(Vec<u8>, bool)> = Vec::new(); // (resp, may_wrap)
     let mut related_flags: Vec<bool> = Vec::new(); // request carried FLAGS_RELATED_OPERATIONS
@@ -398,7 +404,16 @@ pub(crate) async fn process_frame(
     // request itself arrived encrypted ([MS-SMB2] §3.3.5.16 — a sealed request
     // is answered with a sealed response even if the server does not force it).
     // The enabling SESSION_SETUP response itself always travels in the clear.
-    if (conn.encrypt_data || request_encrypted) && parts.iter().all(|(_, w)| *w) {
+    let first_tid = if work.len() >= hdr::LEN { g32(&work, hdr::TREE_ID) } else { 0 };
+    let tree_requires_seal = conn.seal_current
+        || conn
+            .trees
+            .get(&first_tid)
+            .and_then(|n| server.shares.get(n))
+            .is_some_and(|s| s.encrypt);
+    if (conn.encrypt_data || request_encrypted || tree_requires_seal)
+        && parts.iter().all(|(_, w)| *w)
+    {
         let sealed = encrypt_response(conn, &out)?;
         return Some(sealed);
     }
@@ -1847,7 +1862,7 @@ pub(crate) fn tree_connect(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
     buf: &[u8],
-) -> Result<(String, u8), Status> {
+) -> Result<(String, u8, bool), Status> {
     let path_len = g16(buf, c::tcon_off::PATH_LENGTH) as usize;
     let path_off = g16(buf, c::tcon_off::PATH_OFFSET) as usize;
     let raw = buf.get(path_off..path_off + path_len).unwrap_or(&[]);
@@ -1869,7 +1884,7 @@ pub(crate) fn tree_connect(
     } else {
         c::share_type::DISK
     };
-    Ok((name, share_type))
+    Ok((name, share_type, share.encrypt))
 }
 
 // ---------------- CREATE ----------------
@@ -3598,6 +3613,7 @@ mod oplock_tests {
                 root: dir.to_path_buf(),
                 vfs,
                 is_ipc: false,
+                encrypt: false,
             },
         );
         Arc::new(ServerShared {
@@ -3711,6 +3727,7 @@ mod lease_tests {
                 root: dir.to_path_buf(),
                 vfs,
                 is_ipc: false,
+                encrypt: false,
             },
         );
         Arc::new(ServerShared {
@@ -4080,6 +4097,7 @@ mod durable_tests {
                 root: dir.to_path_buf(),
                 vfs,
                 is_ipc: false,
+                encrypt: false,
             },
         );
         Arc::new(ServerShared {
