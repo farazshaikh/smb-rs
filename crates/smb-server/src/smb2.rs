@@ -550,12 +550,21 @@ fn tf_off_end(original_len: usize) -> usize {
 /// Route a request through the typestate pipeline (io::dispatch) and return the
 /// `(status, body)` the legacy framing still wraps. Used by commands migrated
 /// onto `io::Command` (typestate_plan.md Phases 2–3).
+/// How a typestate dispatch resolves for `process_single`: a body that still
+/// flows the common signing/sealing tail, a pre-framed async PDU to send
+/// verbatim (the STATUS_PENDING interim), or nothing at all.
+enum Routed {
+    Framed(Status, Vec<u8>),
+    Raw(Vec<u8>),
+    Silent,
+}
+
 async fn via_typestate(
     hdr: &smb_proto_smb2::Header2,
     conn: &mut Smb2Conn,
     server: &Arc<ServerShared>,
     buf: &[u8],
-) -> Option<(Status, Vec<u8>)> {
+) -> Routed {
     let reply = crate::io::ReplyHeader {
         command: hdr.command,
         message_id: hdr.message_id,
@@ -564,19 +573,39 @@ async fn via_typestate(
         credits: 0,
         seal: crate::io::SealIntent::default(),
     };
-    match crate::io::SmbRequest::parse(hdr.command, buf) {
-        Ok(req) => {
-            let ctx = crate::io::IoContext::accept(reply, req);
-            let mut res = crate::io::Resources { conn, server, frame: buf };
-            match crate::io::dispatch(ctx, &mut res).await {
-                crate::io::Outcome::Final(r) => Some((r.status, r.body)),
-                // Silent: the handler asked for no reply (e.g. a connection
-                // termination), so the caller returns None to send nothing.
-                crate::io::Outcome::Silent => None,
-                crate::io::Outcome::Interim { .. } => Some((Status::UNSUCCESSFUL, Vec::new())),
+    let req = match crate::io::SmbRequest::parse(hdr.command, buf) {
+        Ok(req) => req,
+        Err(status) => return Routed::Framed(status, Vec::new()),
+    };
+    let ctx = crate::io::IoContext::accept(reply, req);
+    let outcome = {
+        let mut res = crate::io::Resources { conn, server, frame: buf };
+        crate::io::dispatch(ctx, &mut res).await
+    };
+    match outcome {
+        crate::io::Outcome::Final(r) => Routed::Framed(r.status, r.body),
+        // Silent: the handler asked for no reply (e.g. a CANCEL, or a
+        // connection termination), so nothing is sent.
+        crate::io::Outcome::Silent => Routed::Silent,
+        // Interim: frame the STATUS_PENDING async reply now ([MS-SMB2]
+        // §3.3.4.2); the parked async worker sends the final reply later on
+        // the outbound queue.
+        crate::io::Outcome::Interim { parked, interim } => {
+            let mut frame = build_async_frame(
+                interim.reply.session_id,
+                interim.reply.message_id,
+                parked.async_id(),
+                interim.reply.command,
+                interim.status,
+                &interim.body,
+            );
+            if hdr.is_signed() {
+                if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
+                    sign_pdu(&mut frame, &key, conn.dialect);
+                }
             }
+            Routed::Raw(frame)
         }
-        Err(status) => Some((status, Vec::new())),
     }
 }
 
@@ -667,6 +696,19 @@ async fn process_single(
 
     // TREE_CONNECT overrides the response TreeId with the fresh value.
     let mut resp_tid: Option<u32> = None;
+
+    // Route a command through the typestate pipeline: a framed body flows the
+    // common signing/sealing tail below, a pre-framed async interim is sent
+    // verbatim, and a silent outcome sends nothing.
+    macro_rules! route {
+        () => {
+            match via_typestate(&hdr, conn, server, buf).await {
+                Routed::Framed(s, b) => (s, b),
+                Routed::Raw(frame) => return Some((frame, true)),
+                Routed::Silent => return None,
+            }
+        };
+    }
 
     let (status, mut body): (Status, Vec<u8>) = match hdr.command {
         ss::cmd::NEGOTIATE => {
@@ -836,193 +878,21 @@ async fn process_single(
             }
             Err(status) => (status, Vec::new()),
         },
-        ss::cmd::TREE_DISCONNECT => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::LOGOFF => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::CREATE => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::READ => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::WRITE => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::CLOSE => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::FLUSH => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::IOCTL => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::LOCK => {
-            let Some(req) = c::LockReq::parse(buf) else {
-                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
-            };
-            let Some(h) = conn.handles.get(&req.file_id.0) else {
-                return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-            };
-            let path = h.path.clone();
-            let owner = (conn.session_id, req.file_id.0);
-
-            // Unlocks first, then acquisitions ([MS-SMB2] §3.3.5.14).
-            for l in req.locks.iter().filter(|l| l.unlock) {
-                server.locks.release(&path, &[(l.offset, l.length)], owner);
-            }
-            let acquires: Vec<(u64, u64, bool)> = req
-                .locks
-                .iter()
-                .filter(|l| !l.unlock)
-                .map(|l| (l.offset, l.length, l.exclusive))
-                .collect();
-
-            if acquires.is_empty() || server.locks.try_acquire(&path, &acquires, owner) {
-                (Status::SUCCESS, c::build_lock_resp())
-            } else if req.locks.iter().any(|l| l.fail_immediately) {
-                (Status::LOCK_NOT_GRANTED, Vec::new())
-            } else {
-                // Blocking lock ([MS-SMB2] §3.3.5.14): interim STATUS_PENDING,
-                // then retry as conflicting locks are released.
-                let async_id = conn.alloc_async_id();
-                let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
-                let (cancel_tx, cancel_rx) = oneshot::channel();
-                conn.async_cancels.insert(async_id, cancel_tx);
-                conn.async_msgids.insert(hdr.message_id, async_id);
-                gauge!("smb_async_pending").increment(1.0);
-                tokio_uring::spawn(run_lock_wait(
-                    server.locks.clone(),
-                    path,
-                    acquires,
-                    owner,
-                    crypto,
-                    hdr.message_id,
-                    async_id,
-                    conn.outbound.clone(),
-                    cancel_rx,
-                ));
-                let mut interim = build_async_frame(
-                    conn.session_id,
-                    hdr.message_id,
-                    async_id,
-                    ss::cmd::LOCK,
-                    Status::PENDING,
-                    &error_resp(),
-                );
-                if hdr.is_signed() {
-                    if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
-                        sign_pdu(&mut interim, &key, conn.dialect);
-                    }
-                }
-                return Some((interim, true));
-            }
-        }
-        ss::cmd::CHANGE_NOTIFY => {
-            let Some(req) = c::ChangeNotifyReq::parse(buf) else {
-                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
-            };
-            let Some(open) = conn.handles.get(&req.file_id.0) else {
-                return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-            };
-            // Validate before registering the watch ([MS-SMB2] §3.3.5.19).
-            if !open.is_dir {
-                // CHANGE_NOTIFY is only valid on a directory open.
-                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
-            }
-            if !open.can_read {
-                // The open's granted access lacks FILE_LIST_DIRECTORY.
-                return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id), true));
-            }
-            if req.output_len > MAX_TRANSACT_SIZE {
-                // OutputBufferLength exceeds the negotiated MaxTransactSize.
-                return Some((response(&hdr, Status::INVALID_PARAMETER, Vec::new(), conn.session_id), true));
-            }
-            let dir_path = open.path.clone();
-
-            // Register the async operation and hand it to a background watcher;
-            // reply immediately with an interim STATUS_PENDING ([MS-SMB2]
-            // §3.3.4.2). The final response fires from run_change_notify.
-            let async_id = conn.alloc_async_id();
-            let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            conn.async_cancels.insert(async_id, cancel_tx);
-            conn.async_msgids.insert(hdr.message_id, async_id);
-            conn.async_by_file.entry(req.file_id.0).or_default().push(async_id);
-            gauge!("smb_async_pending").increment(1.0);
-            tokio_uring::spawn(run_change_notify(
-                dir_path,
-                req.watch_tree,
-                req.filter,
-                crypto,
-                hdr.message_id,
-                async_id,
-                conn.outbound.clone(),
-                cancel_rx,
-            ));
-
-            let mut interim = build_async_frame(
-                conn.session_id,
-                hdr.message_id,
-                async_id,
-                ss::cmd::CHANGE_NOTIFY,
-                Status::PENDING,
-                &error_resp(),
-            );
-            if hdr.is_signed() {
-                if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
-                    sign_pdu(&mut interim, &key, conn.dialect);
-                }
-            }
-            return Some((interim, true));
-        }
-        ss::cmd::QUERY_DIRECTORY => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::QUERY_INFO => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::SET_INFO => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
-        ss::cmd::CANCEL => {
-            // CANCEL ([MS-SMB2] §3.3.5.14): find the pending op either by the
-            // AsyncId in the header (async CANCEL) or by MessageId (sync
-            // CANCEL) and signal its task to complete with STATUS_CANCELLED.
-            // CANCEL itself carries no response.
-            counter!("smb_cancels_total").increment(1);
-            let async_id = if hdr.is_async() && buf.len() >= 40 {
-                Some(u64::from_le_bytes(buf[32..40].try_into().unwrap()))
-            } else {
-                conn.async_msgids.get(&hdr.message_id).copied()
-            };
-            if let Some(aid) = async_id {
-                conn.async_msgids.retain(|_, v| *v != aid);
-                conn.async_by_file.values_mut().for_each(|v| v.retain(|x| *x != aid));
-                if let Some(tx) = conn.async_cancels.remove(&aid) {
-                    let _ = tx.send(Status::CANCELLED);
-                }
-            }
-            return None;
-        }
-        ss::cmd::ECHO => match via_typestate(&hdr, conn, server, buf).await {
-            Some(sb) => sb,
-            None => return None,
-        },
+        ss::cmd::TREE_DISCONNECT => route!(),
+        ss::cmd::LOGOFF => route!(),
+        ss::cmd::CREATE => route!(),
+        ss::cmd::READ => route!(),
+        ss::cmd::WRITE => route!(),
+        ss::cmd::CLOSE => route!(),
+        ss::cmd::FLUSH => route!(),
+        ss::cmd::IOCTL => route!(),
+        ss::cmd::LOCK => route!(),
+        ss::cmd::CHANGE_NOTIFY => route!(),
+        ss::cmd::QUERY_DIRECTORY => route!(),
+        ss::cmd::QUERY_INFO => route!(),
+        ss::cmd::SET_INFO => route!(),
+        ss::cmd::CANCEL => route!(),
+        ss::cmd::ECHO => route!(),
         ss::cmd::OPLOCK_BREAK => {
             // Command 18 carries both oplock (StructureSize 24) and lease
             // (StructureSize 36) break acknowledgements; dispatch on the size.
@@ -1319,6 +1189,134 @@ fn finalize_async(crypto: &AsyncCrypto, mut frame: Vec<u8>) -> Vec<u8> {
 /// ranges can be acquired, then emit the final LOCK response ([MS-SMB2]
 /// §3.3.5.14). Cancellation yields STATUS_CANCELLED.
 #[allow(clippy::too_many_arguments)]
+/// How an async-capable command (LOCK / CHANGE_NOTIFY) starts: either an
+/// immediate reply, or a deferral parked under an async id whose final reply a
+/// background worker sends later ([MS-SMB2] §3.3.4.2).
+pub(crate) enum AsyncStart {
+    Reply(Status, Vec<u8>),
+    Pending(u64),
+}
+
+/// Begin a LOCK ([MS-SMB2] §3.3.5.14): apply unlocks, try acquisitions, and
+/// either answer immediately or (for a blocking lock) spawn a waiter and defer.
+pub(crate) fn begin_lock(
+    conn: &mut Smb2Conn,
+    server: &Arc<ServerShared>,
+    hdr: &smb_proto_smb2::Header2,
+    buf: &[u8],
+) -> AsyncStart {
+    let Some(req) = c::LockReq::parse(buf) else {
+        return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
+    };
+    let Some(h) = conn.handles.get(&req.file_id.0) else {
+        return AsyncStart::Reply(Status::INVALID_HANDLE, Vec::new());
+    };
+    let path = h.path.clone();
+    let owner = (conn.session_id, req.file_id.0);
+
+    // Unlocks first, then acquisitions ([MS-SMB2] §3.3.5.14).
+    for l in req.locks.iter().filter(|l| l.unlock) {
+        server.locks.release(&path, &[(l.offset, l.length)], owner);
+    }
+    let acquires: Vec<(u64, u64, bool)> = req
+        .locks
+        .iter()
+        .filter(|l| !l.unlock)
+        .map(|l| (l.offset, l.length, l.exclusive))
+        .collect();
+
+    if acquires.is_empty() || server.locks.try_acquire(&path, &acquires, owner) {
+        return AsyncStart::Reply(Status::SUCCESS, c::build_lock_resp());
+    }
+    if req.locks.iter().any(|l| l.fail_immediately) {
+        return AsyncStart::Reply(Status::LOCK_NOT_GRANTED, Vec::new());
+    }
+    // Blocking lock: interim STATUS_PENDING, then retry as conflicting locks
+    // are released.
+    let async_id = conn.alloc_async_id();
+    let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    conn.async_cancels.insert(async_id, cancel_tx);
+    conn.async_msgids.insert(hdr.message_id, async_id);
+    gauge!("smb_async_pending").increment(1.0);
+    tokio_uring::spawn(run_lock_wait(
+        server.locks.clone(),
+        path,
+        acquires,
+        owner,
+        crypto,
+        hdr.message_id,
+        async_id,
+        conn.outbound.clone(),
+        cancel_rx,
+    ));
+    AsyncStart::Pending(async_id)
+}
+
+/// Begin a CHANGE_NOTIFY ([MS-SMB2] §3.3.5.19): validate the directory open,
+/// register the watch, and defer with an interim STATUS_PENDING.
+pub(crate) fn begin_change_notify(
+    conn: &mut Smb2Conn,
+    hdr: &smb_proto_smb2::Header2,
+    buf: &[u8],
+) -> AsyncStart {
+    let Some(req) = c::ChangeNotifyReq::parse(buf) else {
+        return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
+    };
+    let Some(open) = conn.handles.get(&req.file_id.0) else {
+        return AsyncStart::Reply(Status::INVALID_HANDLE, Vec::new());
+    };
+    // Validate before registering the watch ([MS-SMB2] §3.3.5.19).
+    if !open.is_dir {
+        return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
+    }
+    if !open.can_read {
+        return AsyncStart::Reply(Status::ACCESS_DENIED, Vec::new());
+    }
+    if req.output_len > MAX_TRANSACT_SIZE {
+        return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
+    }
+    let dir_path = open.path.clone();
+
+    let async_id = conn.alloc_async_id();
+    let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    conn.async_cancels.insert(async_id, cancel_tx);
+    conn.async_msgids.insert(hdr.message_id, async_id);
+    conn.async_by_file.entry(req.file_id.0).or_default().push(async_id);
+    gauge!("smb_async_pending").increment(1.0);
+    tokio_uring::spawn(run_change_notify(
+        dir_path,
+        req.watch_tree,
+        req.filter,
+        crypto,
+        hdr.message_id,
+        async_id,
+        conn.outbound.clone(),
+        cancel_rx,
+    ));
+    AsyncStart::Pending(async_id)
+}
+
+/// Handle a CANCEL ([MS-SMB2] §3.3.5.16): find the pending op by AsyncId (async
+/// CANCEL) or MessageId (sync CANCEL) and signal it to complete with
+/// STATUS_CANCELLED. CANCEL itself carries no response.
+pub(crate) fn cancel(conn: &mut Smb2Conn, hdr: &smb_proto_smb2::Header2, buf: &[u8]) {
+    counter!("smb_cancels_total").increment(1);
+    let async_id = if hdr.is_async() && buf.len() >= 40 {
+        Some(u64::from_le_bytes(buf[32..40].try_into().unwrap()))
+    } else {
+        conn.async_msgids.get(&hdr.message_id).copied()
+    };
+    if let Some(aid) = async_id {
+        conn.async_msgids.retain(|_, v| *v != aid);
+        conn.async_by_file.values_mut().for_each(|v| v.retain(|x| *x != aid));
+        if let Some(tx) = conn.async_cancels.remove(&aid) {
+            let _ = tx.send(Status::CANCELLED);
+        }
+    }
+}
+
 async fn run_lock_wait(
     locks: Arc<crate::state::LockManager>,
     path: String,

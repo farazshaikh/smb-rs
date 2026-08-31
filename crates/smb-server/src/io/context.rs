@@ -84,6 +84,13 @@ impl IoContext<Pending, Bare> {
         self.state.async_id
     }
 
+    /// Build the immediate interim reply for this deferred op without consuming
+    /// the parked context ([MS-SMB2] §3.3.4.2). The worker still owns `self` and
+    /// completes it later.
+    pub fn interim(&self, status: Status, body: Vec<u8>) -> SmbResponse {
+        SmbResponse { status, reply: self.reply.clone(), body }
+    }
+
     /// Complete a deferred op with its final reply, consuming the parked context.
     /// Only callable in the `Pending` state, so a request cannot be completed
     /// unless it was actually deferred.

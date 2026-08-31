@@ -45,6 +45,17 @@ impl Decode for LogoffReq {
     }
 }
 
+/// SMB2 CANCEL request ([MS-SMB2] §2.2.30): correlated by MessageId/AsyncId from
+/// the header, so the body carries nothing we decode.
+#[derive(Debug)]
+pub struct CancelReq;
+impl Decode for CancelReq {
+    const COMMAND: u16 = cmd::CANCEL;
+    fn decode(_frame: &[u8]) -> Result<Self, Status> {
+        Ok(CancelReq)
+    }
+}
+
 /// ECHO handler: a keep-alive, always answered SUCCESS ([MS-SMB2] §3.3.5.17).
 pub struct EchoCmd;
 impl Command for EchoCmd {
@@ -283,6 +294,61 @@ impl Command for IoctlCmd {
     }
 }
 
+/// LOCK handler ([MS-SMB2] §3.3.5.14): a byte-range lock/unlock. A conflicting
+/// blocking lock defers as [`Outcome::Interim`]; the parked waiter completes it
+/// on the outbound queue when the range frees.
+pub struct LockCmd;
+impl Command for LockCmd {
+    type Request = LockReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: LockReq, res: &mut Resources<'_>) -> Outcome {
+        let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new()));
+        };
+        match crate::smb2::begin_lock(res.conn, res.server, &hdr, res.frame) {
+            crate::smb2::AsyncStart::Reply(status, body) => Outcome::Final(ctx.respond(status, body)),
+            crate::smb2::AsyncStart::Pending(async_id) => {
+                let parked = ctx.defer(async_id);
+                let interim = parked.interim(Status::PENDING, crate::smb2::error_resp());
+                Outcome::Interim { parked, interim }
+            }
+        }
+    }
+}
+
+/// CHANGE_NOTIFY handler ([MS-SMB2] §3.3.5.19): registers a directory watch and
+/// defers as [`Outcome::Interim`]; the background watcher completes it when the
+/// first change (or cancellation) arrives.
+pub struct ChangeNotifyCmd;
+impl Command for ChangeNotifyCmd {
+    type Request = ChangeNotifyReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: ChangeNotifyReq, res: &mut Resources<'_>) -> Outcome {
+        let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new()));
+        };
+        match crate::smb2::begin_change_notify(res.conn, &hdr, res.frame) {
+            crate::smb2::AsyncStart::Reply(status, body) => Outcome::Final(ctx.respond(status, body)),
+            crate::smb2::AsyncStart::Pending(async_id) => {
+                let parked = ctx.defer(async_id);
+                let interim = parked.interim(Status::PENDING, crate::smb2::error_resp());
+                Outcome::Interim { parked, interim }
+            }
+        }
+    }
+}
+
+/// CANCEL handler ([MS-SMB2] §3.3.5.16): signals the targeted pending op to
+/// complete with STATUS_CANCELLED. CANCEL itself yields no reply.
+pub struct CancelCmd;
+impl Command for CancelCmd {
+    type Request = CancelReq;
+    async fn serve(_ctx: IoContext<Accepted, Bare>, _req: CancelReq, res: &mut Resources<'_>) -> Outcome {
+        if let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) {
+            crate::smb2::cancel(res.conn, &hdr, res.frame);
+        }
+        Outcome::Silent
+    }
+}
+
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
@@ -300,6 +366,7 @@ smb_request_table! {
     ChangeNotify   = cmd::CHANGE_NOTIFY   => ChangeNotifyReq;
     QueryInfo      = cmd::QUERY_INFO      => QueryInfoReq;
     SetInfo        = cmd::SET_INFO        => SetInfoReq;
+    Cancel         = cmd::CANCEL          => CancelReq;
 }
 
 smb_dispatch! {
@@ -315,6 +382,9 @@ smb_dispatch! {
     SetInfo        => SetInfoCmd;
     Ioctl          => IoctlCmd;
     Create         => CreateCmd;
+    Lock           => LockCmd;
+    ChangeNotify   => ChangeNotifyCmd;
+    Cancel         => CancelCmd;
 }
 
 #[cfg(test)]
