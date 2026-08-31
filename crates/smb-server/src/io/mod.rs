@@ -1,15 +1,16 @@
 //! Typestate request/response pipeline (see `typestate_plan.md`).
 //!
-//! Phase 0 scaffolding: the lifecycle/origin marker traits, the `IoContext`
-//! typestate, the `Decode`/`Encode`/`Command` traits, and the `smb_commands!`
-//! table macro that generates the request sum type and its static dispatch.
-//! Nothing here is wired into the live dispatcher yet; later phases migrate
-//! commands onto it one cluster at a time while the regression gate stays green.
+//! This is the live dispatch path: every SMB2 command the server answers is
+//! decoded into a typed request ([`SmbRequest`]), moved into its owning
+//! [`Command`] handler, and resolved to an [`Outcome`]. `smb2::process_single`
+//! routes each command code here through `via_typestate` and then applies the
+//! shared framing/crypto stage (pre-auth hash, signing, sealing) common to all
+//! commands.
 //!
 //! Dispatch is static (a concrete `match` + monomorphic calls); the only dynamic
 //! seam in the server is the transport, deliberately (see the plan's §12/§13).
 
-#![allow(dead_code)] // scaffolding: most items are wired in later phases
+#![allow(dead_code)] // some server-event scaffolding (Unsolicited origin) is unused pending Phase 5
 
 /// Generate the data-less lifecycle state markers: a zero-sized struct plus its
 /// sealed `IoState` impls. States that carry data (e.g. `Pending`) are written
@@ -52,9 +53,9 @@ macro_rules! smb_request_table {
 }
 
 /// Static, monomorphic dispatch to command handlers. Generated separately from
-/// the request table so handlers migrate onto the typestate one at a time; a
-/// command that is decodable but not yet handled falls through to the legacy
-/// dispatcher (this `dispatch` is not the live entry point until Phase 6).
+/// the request table so the two concerns stay decoupled; the `_` arm is
+/// unreachable now that every decodable command has a handler, but is kept so a
+/// future table-only addition still compiles.
 macro_rules! smb_dispatch {
     ( $( $variant:ident => $handler:ty ; )* ) => {
         /// Serve a request by moving it into its owning handler (generated).
