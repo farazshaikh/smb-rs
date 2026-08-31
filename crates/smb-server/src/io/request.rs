@@ -142,6 +142,54 @@ impl Command for WriteCmd {
     }
 }
 
+/// CLOSE handler ([MS-SMB2] §3.3.5.10): closes a pipe handle, else a file handle
+/// and tears down that open's notifies, byte-range locks, share mode, oplock,
+/// lease, and durable-handle state.
+pub struct CloseCmd;
+impl Command for CloseCmd {
+    type Request = CloseReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: CloseReq, res: &mut Resources<'_>) -> Outcome {
+        if crate::smb2::pipe_close(res.conn, res.frame) {
+            let body = c::build_close_resp([0u64; 4], 0, 0, 0);
+            return Outcome::Final(ctx.respond(Status::SUCCESS, body));
+        }
+        let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
+        };
+        let close_path = CloseReq::parse(res.frame)
+            .and_then(|r| res.conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone())));
+        match crate::smb2::close(res.conn, vfs, res.frame).await {
+            Ok(body) => {
+                if let Some((fid, path)) = close_path {
+                    complete_pending_notifies(res.conn, fid);
+                    res.server.locks.release_owner((res.conn.session_id, fid));
+                    res.server.share_modes.close(&path, (res.conn.session_id, fid));
+                    res.server.oplocks.release(&path, (res.conn.session_id, fid));
+                    res.server.leases.release(&path, (res.conn.session_id, fid));
+                    res.conn.durable.remove(&fid);
+                    let _ = res.server.durables.remove(&fid).await;
+                }
+                Outcome::Final(ctx.respond(Status::SUCCESS, body))
+            }
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
+/// Complete any pending CHANGE_NOTIFY on this handle with STATUS_NOTIFY_CLEANUP
+/// ([MS-SMB2] §3.3.5.10) when its open is closed.
+fn complete_pending_notifies(conn: &mut crate::smb2::Smb2Conn, fid: [u8; 16]) {
+    let Some(ids) = conn.async_by_file.remove(&fid) else {
+        return;
+    };
+    for aid in ids {
+        conn.async_msgids.retain(|_, v| *v != aid);
+        if let Some(tx) = conn.async_cancels.remove(&aid) {
+            let _ = tx.send(Status::NOTIFY_CLEANUP);
+        }
+    }
+}
+
 // The command table (single source of truth). A row makes a command decodable;
 // a row in `smb_dispatch!` (plus a Command impl) makes it handled.
 smb_request_table! {
@@ -168,6 +216,7 @@ smb_dispatch! {
     Logoff         => LogoffCmd;
     Read           => ReadCmd;
     Write          => WriteCmd;
+    Close          => CloseCmd;
 }
 
 #[cfg(test)]

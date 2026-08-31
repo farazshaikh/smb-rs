@@ -863,47 +863,7 @@ async fn process_single(
         }
         ss::cmd::READ => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::WRITE => via_typestate(&hdr, conn, server, buf).await,
-        ss::cmd::CLOSE => {
-            // Close a pipe handle first; fall through to file handles.
-            if pipe_close(conn, buf) {
-                (Status::SUCCESS, c::build_close_resp([0u64;4], 0, 0, 0))
-            } else {
-                let vfs = match share_vfs(server, conn, tid) {
-                    Some(v) => v,
-                    None => {
-                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                    }
-                };
-                let close_path = c::CloseReq::parse(buf)
-                    .and_then(|r| conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone())));
-                match close(conn, vfs, buf).await {
-                    Ok(body) => {
-                        // Drop this open's byte-range locks and share-mode entry.
-                        if let Some((fid, path)) = close_path {
-                            // Complete any pending CHANGE_NOTIFY on this handle
-                            // with STATUS_NOTIFY_CLEANUP ([MS-SMB2] §3.3.5.10).
-                            if let Some(ids) = conn.async_by_file.remove(&fid) {
-                                for aid in ids {
-                                    conn.async_msgids.retain(|_, v| *v != aid);
-                                    if let Some(tx) = conn.async_cancels.remove(&aid) {
-                                        let _ = tx.send(Status::NOTIFY_CLEANUP);
-                                    }
-                                }
-                            }
-                            server.locks.release_owner((conn.session_id, fid));
-                            server.share_modes.close(&path, (conn.session_id, fid));
-                            server.oplocks.release(&path, (conn.session_id, fid));
-                            server.leases.release(&path, (conn.session_id, fid));
-                            // An explicit close ends any durable-handle lease.
-                            conn.durable.remove(&fid);
-                            let _ = server.durables.remove(&fid).await;
-                        }
-                        (Status::SUCCESS, body)
-                    }
-                    Err(status) => (status, Vec::new()),
-                }
-            }
-        }
+        ss::cmd::CLOSE => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::FLUSH => via_typestate(&hdr, conn, server, buf).await,
         ss::cmd::IOCTL => {
             let Some(req) = c::IoctlReq::parse(buf) else {
@@ -2631,7 +2591,7 @@ pub(crate) async fn write(
     Ok(c::build_write_resp(written as u32))
 }
 
-async fn close(
+pub(crate) async fn close(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     buf: &[u8],
@@ -2736,7 +2696,7 @@ pub(crate) fn pipe_write(server: &Arc<ServerShared>, conn: &mut Smb2Conn, buf: &
 }
 
 /// Remove a pipe handle; `true` when it was one.
-fn pipe_close(conn: &mut Smb2Conn, buf: &[u8]) -> bool {
+pub(crate) fn pipe_close(conn: &mut Smb2Conn, buf: &[u8]) -> bool {
     c::CloseReq::parse(buf)
         .map(|r| conn.pipes.remove(&r.file_id.0).is_some())
         .unwrap_or(false)
