@@ -237,6 +237,37 @@ impl Command for SetInfoCmd {
     }
 }
 
+/// CREATE handler ([MS-SMB2] §3.3.5.9): opens a named pipe on IPC$, else a file
+/// or directory. A symlink in the path yields a Symbolic Link Error Response
+/// ([MS-SMB2] §2.2.2.2.1); the heavy share-mode/oplock/lease/durable logic lives
+/// in the existing create().
+pub struct CreateCmd;
+impl Command for CreateCmd {
+    type Request = CreateReq;
+    async fn serve(ctx: IoContext<Accepted, Bare>, _req: CreateReq, res: &mut Resources<'_>) -> Outcome {
+        if crate::smb2::share_is_ipc(res.server, res.conn, ctx.reply.tree_id) {
+            return match crate::smb2::pipe_create(res.conn, res.frame) {
+                Ok(body) => Outcome::Final(ctx.respond(Status::SUCCESS, body)),
+                Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+            };
+        }
+        let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
+            return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
+        };
+        let signed = smb_proto_smb2::Header2::parse(res.frame)
+            .map(|h| h.is_signed())
+            .unwrap_or(false);
+        match crate::smb2::create(res.conn, vfs, res.server, signed, res.frame).await {
+            Ok(body) => Outcome::Final(ctx.respond(Status::SUCCESS, body)),
+            Err(status) if status == Status::STOPPED_ON_SYMLINK => {
+                let body = res.conn.symlink_error.take().unwrap_or_else(crate::smb2::error_resp);
+                Outcome::Final(ctx.respond(status, body))
+            }
+            Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
+        }
+    }
+}
+
 /// IOCTL handler ([MS-SMB2] §3.3.5.15): FSCTL dispatch (validate-negotiate,
 /// resiliency, pipe transact, server-side copy, zero-data, interface info, ...).
 /// A downgrade-detected VALIDATE_NEGOTIATE_INFO terminates the connection and
@@ -283,6 +314,7 @@ smb_dispatch! {
     QueryInfo      => QueryInfoCmd;
     SetInfo        => SetInfoCmd;
     Ioctl          => IoctlCmd;
+    Create         => CreateCmd;
 }
 
 #[cfg(test)]

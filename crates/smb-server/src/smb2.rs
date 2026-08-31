@@ -844,32 +844,10 @@ async fn process_single(
             Some(sb) => sb,
             None => return None,
         },
-        ss::cmd::CREATE => {
-            // Named-pipe open on IPC$: \srvsvc and friends are virtual
-            // files backed by the RPC dispatcher, not the VFS.
-            if share_is_ipc(server, conn, tid) {
-                match pipe_create(conn, buf) {
-                    Ok(body) => (Status::SUCCESS, body),
-                    Err(status) => (status, Vec::new()),
-                }
-            } else {
-                let vfs = match share_vfs(server, conn, tid) {
-                    Some(v) => v,
-                    None => {
-                        return Some((response(&hdr, Status::INVALID_HANDLE, Vec::new(), conn.session_id), true));
-                    }
-                };
-                match create(conn, vfs, server, hdr.is_signed(), buf).await {
-                    Ok(body) => (Status::SUCCESS, body),
-                    // A symlink in the path carries a Symbolic Link Error
-                    // Response the client parses ([MS-SMB2] §2.2.2.2.1).
-                    Err(status) if status == Status::STOPPED_ON_SYMLINK => {
-                        (status, conn.symlink_error.take().unwrap_or_else(error_resp))
-                    }
-                    Err(status) => (status, Vec::new()),
-                }
-            }
-        }
+        ss::cmd::CREATE => match via_typestate(&hdr, conn, server, buf).await {
+            Some(sb) => sb,
+            None => return None,
+        },
         ss::cmd::READ => match via_typestate(&hdr, conn, server, buf).await {
             Some(sb) => sb,
             None => return None,
@@ -1796,7 +1774,7 @@ fn tree_connect(
 
 // ---------------- CREATE ----------------
 
-async fn create(
+pub(crate) async fn create(
     conn: &mut Smb2Conn,
     vfs: Arc<dyn smb_vfs::Vfs>,
     server: &Arc<ServerShared>,
@@ -2639,7 +2617,7 @@ pub(crate) fn close_all_handles(conn: &mut Smb2Conn) {
 // ---------------- Named pipes (IPC$) ----------------
 
 /// True when the tree behind `tid` is the virtual IPC$ share.
-fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32) -> bool {
+pub(crate) fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32) -> bool {
     conn.trees
         .get(&tid)
         .and_then(|n| server.shares.get(n))
@@ -2651,7 +2629,7 @@ fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32) -> bool {
 const KNOWN_PIPES: &[&str] = &["srvsvc", "wkssvc", "lanman", "netlogon"];
 
 /// Open a virtual pipe; `Err(FILE_NOT_FOUND)` for unknown names.
-fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
+pub(crate) fn pipe_create(conn: &mut Smb2Conn, buf: &[u8]) -> Result<Vec<u8>, Status> {
     let req = c::CreateReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let name = req.name.trim_start_matches(['\\', '/']).to_lowercase();
     if !KNOWN_PIPES.contains(&name.as_str()) {
@@ -3004,7 +2982,7 @@ pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
 /// 9 with no error data. Every failed command carries this so clients can
 /// parse the frame (a bare header breaks their compound parser). The body
 /// is padded to the structure's declared 8-byte footprint.
-fn error_resp() -> Vec<u8> {
+pub(crate) fn error_resp() -> Vec<u8> {
     let mut b = Vec::with_capacity(8);
     b.extend_from_slice(&9u16.to_le_bytes()); // StructureSize
     b.push(0); // Reserved
