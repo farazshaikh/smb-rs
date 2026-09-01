@@ -136,10 +136,10 @@ protocol,DirectoryLeasing_BreakReadCachingByChildRenamed,LeasingExtendedTest,pas
 protocol,DirectoryLeasing_RWGrantedAsR,LeasingExtendedTest,pass,54,2026-09-01T03:38:56.636792-07:00,c7a1147,
 protocol,DirectoryLeasing_RWHGrantedAsRH,LeasingExtendedTest,pass,53,2026-09-01T03:38:56.636792-07:00,c7a1147,
 protocol,BVT_DuplicateExtentsToFile,MS_FSA_Clarification,pass,206,2026-09-01T00:37:17.753870-07:00,0e8daba,
-protocol,BVT_FileLevelTrim,MS_FSA_Clarification,skip,52,2026-08-30T13:33:39.7844988-07:00,,
-protocol,BVT_OffloadReadWrite,MS_FSA_Clarification,skip,51,2026-08-30T13:33:39.6563811-07:00,,
+protocol,BVT_FileLevelTrim,MS_FSA_Clarification,pass,52,2026-09-01T09:04:25.327801-07:00,acb3a54,
+protocol,BVT_OffloadReadWrite,MS_FSA_Clarification,skip,51,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs FSCTL_OFFLOAD_READ/WRITE (ODX) — not implemented
 protocol,BVT_SetZeroData,MS_FSA_Clarification,pass,195,2026-09-01T00:37:17.753870-07:00,0e8daba,
-protocol,FileLevelTrim_Negative_NonZeroKeyInRequest,MS_FSA_Clarification,skip,50,2026-08-30T13:33:39.8367200-07:00,,
+protocol,FileLevelTrim_Negative_NonZeroKeyInRequest,MS_FSA_Clarification,pass,50,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,BVT_PersistentHandles,MS_SMB2_Clarification,skip,51,2026-08-30T13:33:40.0355195-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
 protocol,BVT_Resiliency,MS_SMB2_Clarification,skip,64,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_SMBDialect,MS_SMB2_Clarification,pass,53,2026-09-01T00:37:17.753870-07:00,0e8daba,
@@ -197,33 +197,33 @@ protocol,NetworkInterfaceInfo_ChangeConnection_BindCurrentSession,NetworkInterfa
 protocol,NetworkInterfaceInfo_Query_ReturnsErrorStatus,NetworkInterfaceInfo,pass,122,2026-08-31T23:14:02.8187246-07:00,e7757fb,
 protocol,NetworkInterfaceInfo_Query_ReturnsIPv4IPv6,NetworkInterfaceInfo,pass,123,2026-08-31T23:14:02.9491717-07:00,e7757fb,
 protocol,BVT_OpLockBreak,OpLock,pass,175,2026-08-30T13:33:49.8578375-07:00,b6e8e04,
-protocol,BVT_OpLockBreak_Lease,OpLock,skip,131,2026-08-30T13:33:50.0339245-07:00,,
+protocol,BVT_OpLockBreak_Lease,OpLock,pass,131,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,BVT_Replay_ReplayCreate,Replay,fail,173,2026-08-30T13:33:48.4504733-07:00,,
 protocol,BVT_Replay_WriteWithInvalidChannelSequence,Replay,fail,174,2026-08-30T13:33:48.2759374-07:00,,
-protocol,Replay_NonPersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:49.8067203-07:00,,
+protocol,Replay_NonPersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,Replay_NonPersistentHandle_Flush_ReplayEligibleCleared,ReplayIsReplayEligible,pass,94,2026-08-30T13:33:49.2798886-07:00,b6e8e04,
 protocol,Replay_NonPersistentHandle_IoCtl_ReplayEligibleCleared,ReplayIsReplayEligible,pass,93,2026-08-30T13:33:49.3748979-07:00,b6e8e04,
 protocol,Replay_NonPersistentHandle_Lock_ReplayEligibleCleared,ReplayIsReplayEligible,pass,94,2026-08-30T13:33:49.5647897-07:00,747060e,
-protocol,Replay_NonPersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:49.6589943-07:00,,
+protocol,Replay_NonPersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,96,2026-08-30T13:33:49.7101430-07:00,b6e8e04,
 protocol,Replay_NonPersistentHandle_Read_ReplayEligibleCleared,ReplayIsReplayEligible,pass,95,2026-08-30T13:33:49.1841210-07:00,b6e8e04,
 protocol,Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,96,2026-08-30T13:33:49.4683216-07:00,b6e8e04,
 protocol,Replay_NonPersistentHandle_Write_ReplayEligibleCleared,ReplayIsReplayEligible,pass,97,2026-08-30T13:33:49.0868849-07:00,b6e8e04,
-protocol,Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:49.0356614-07:00,,
-protocol,Replay_PersistentHandle_Flush_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.7283484-07:00,,
-protocol,Replay_PersistentHandle_IoCtl_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.7800476-07:00,,
-protocol,Replay_PersistentHandle_Lock_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.8829247-07:00,,
-protocol,Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.9338131-07:00,,
-protocol,Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.9847001-07:00,,
-protocol,Replay_PersistentHandle_Read_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.6766657-07:00,,
-protocol,Replay_PersistentHandle_SetInfo_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.8314734-07:00,,
-protocol,Replay_PersistentHandle_Write_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.6246389-07:00,,
+protocol,Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:49.0356614-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_Flush_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.7283484-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_IoCtl_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.7800476-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_Lock_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.8829247-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.9338131-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.9847001-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_Read_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.6766657-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_SetInfo_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.8314734-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_PersistentHandle_Write_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.6246389-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
 protocol,BVT_ResilientHandle_LockSequence,ResilientHandle,pass,175,2026-08-30T13:33:47.7569217-07:00,747060e,
 protocol,BVT_ResilientHandle_LockSequence_Lease,ResilientHandle,pass,173,2026-08-30T13:33:48.1020191-07:00,747060e,
 protocol,BVT_ResilientHandle_Reconnect,ResilientHandle,pass,170,2026-08-30T13:33:47.5858743-07:00,b6e8e04,
 protocol,BVT_ResilientHandle_Reconnect_Lease,ResilientHandle,pass,168,2026-08-30T13:33:47.9332718-07:00,b6e8e04,
-protocol,ResilientOpenScavengerTimer_ReconnectAfterTimeout,ResilientOpenScavengerTimer,unknown,0,2026-08-30T19:12:51+00:00,,
-protocol,ResilientOpenScavengerTimer_ReconnectBeforeTimeout,ResilientOpenScavengerTimer,unknown,0,2026-08-30T19:12:51+00:00,,
+protocol,ResilientOpenScavengerTimer_ReconnectAfterTimeout,ResilientOpenScavengerTimer,skip,0,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs resilient-handle reconnect + scavenger timer (test hangs)
+protocol,ResilientOpenScavengerTimer_ReconnectBeforeTimeout,ResilientOpenScavengerTimer,skip,0,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs resilient-handle reconnect + scavenger timer (test hangs)
 protocol,BVT_SMB2Basic_CancelRegisteredChangeNotify,SMB2Basic,pass,273,2026-08-30T13:32:54.9393614-07:00,b6e8e04,
 protocol,BVT_SMB2Basic_ChangeNotify_ChangeAttributes,SMB2Basic,pass,381,2026-08-30T13:32:57.6840047-07:00,b6e8e04,
 protocol,BVT_SMB2Basic_ChangeNotify_ChangeCreation,SMB2Basic,pass,375,2026-08-30T13:32:59.2063318-07:00,b6e8e04,
@@ -259,8 +259,8 @@ protocol,InvalidCreateRequestStructureSize,SMB2Basic,pass,193,2026-08-30T13:32:5
 protocol,BVT_SessionMgmt_NewSession,SessionMgmt,pass,115,2026-09-01T01:48:36.635170-07:00,283223a,
 protocol,BVT_SessionMgmt_Reauthentication,SessionMgmt,unknown,0,2026-08-30T19:12:51+00:00,,SMB 3.1.1 reauthentication not yet supported: client GSS re-handshake does not converge
 protocol,BVT_SessionMgmt_ReconnectSessionSetup,SessionMgmt,pass,178,2026-09-01T01:48:36.635170-07:00,283223a,
-protocol,SessionMgmt_ReconnectWithDifferentDialect,SessionMgmt,unknown,0,2026-08-30T19:12:51+00:00,,
-protocol,SessionMgmt_SupportsNotificationsMismatch,SessionMgmt,unknown,0,2026-08-30T19:12:51+00:00,,
+protocol,SessionMgmt_ReconnectWithDifferentDialect,SessionMgmt,pass,1,2026-09-01T09:04:25.327801-07:00,acb3a54,
+protocol,SessionMgmt_SupportsNotificationsMismatch,SessionMgmt,skip,0,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs GLOBAL_CAP_NOTIFICATIONS (server-to-client notifications) + session binding
 protocol,BVT_SetGetIntegrityInfo,SetGetIntegrityInformation,fail,88,2026-08-30T13:33:40.5918232-07:00,,
 protocol,BVT_Signing,Signing,pass,90,2026-08-31T19:01:48.0622424-07:00,0c5d8c9,
 protocol,Signing_VerifyAesGmacSigning,Signing,pass,91,2026-08-31T19:01:56.2825541-07:00,0c5d8c9,
