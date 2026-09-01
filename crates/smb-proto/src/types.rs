@@ -55,6 +55,10 @@ impl Status {
     pub const BAD_NETWORK_NAME: Status = Status(0xC000_00CC);
     /// The tree connect referenced by TreeId no longer exists on the server.
     pub const NETWORK_NAME_DELETED: Status = Status(0xC000_00C9);
+    /// A prior open was force-closed by an application-instance failover.
+    pub const FILE_FORCED_CLOSED: Status = Status(0xC000_00B6);
+    /// The handle was closed out from under this open (app-instance failover).
+    pub const FILE_CLOSED: Status = Status(0xC000_0128);
     /// The request was cancelled by the client.
     pub const CANCELLED: Status = Status(0xC000_0120);
     /// A pending CHANGE_NOTIFY was completed because its handle was closed

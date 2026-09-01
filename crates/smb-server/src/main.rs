@@ -111,6 +111,7 @@ fn main() {
         leases: Arc::new(state::LeaseTable::new()),
         durables: build_handle_store(&args),
         sessions: Arc::new(state::SessionTable::new()),
+        app_instances: Arc::new(state::AppInstanceTable::new()),
     });
 
     // Single-threaded io_uring runtime: all networking and file I/O run on

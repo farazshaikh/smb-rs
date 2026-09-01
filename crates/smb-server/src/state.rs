@@ -9,9 +9,10 @@
 #![deny(missing_docs)]
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 /// Durable-handle flag marking a persistent handle ([MS-SMB2] §2.2.14.2.12).
 const DHANDLE_FLAG_PERSISTENT: u32 = 0x0000_0002;
@@ -87,6 +88,8 @@ pub struct ServerShared {
     pub durables: Arc<dyn HandleStore>,
     /// Established sessions, shared so channels can bind ([MS-SMB2] §3.3.5.5.3).
     pub sessions: Arc<SessionTable>,
+    /// Application-instance opens for client failover ([MS-SMB2] §3.3.5.9.13).
+    pub app_instances: Arc<AppInstanceTable>,
 }
 
 /// Identifies the open that owns a byte-range lock: `(session_id, file_id)`.
@@ -281,6 +284,119 @@ impl ShareModeTable {
     /// Number of opens currently recorded for `path`.
     pub fn open_count(&self, path: &str) -> usize {
         self.opens.lock().unwrap().get(path).map_or(0, |l| l.len())
+    }
+}
+
+/// A recorded application-instance open ([MS-SMB2] §3.3.5.9.13).
+struct AppOpen {
+    app_instance_id: [u8; 16],
+    path: String,
+    client_guid: [u8; 16],
+    owner: LockOwner,
+    version: Option<(u64, u64)>,
+}
+
+/// Outcome of matching a CREATE's AppInstanceId against existing opens.
+pub enum AppInstanceMatch {
+    /// No matching prior open; proceed normally.
+    None,
+    /// A prior open was force-closed; drop its share-mode entry for `owner`.
+    ForceClose {
+        /// On-disk path of the force-closed open.
+        path: String,
+        /// Owner (session id, file id) of the force-closed open.
+        owner: LockOwner,
+    },
+    /// The prior open is newer or equal; the new CREATE must be rejected.
+    Reject,
+}
+
+/// Server-wide registry of application-instance opens: a later CREATE with the
+/// same AppInstanceId from a different client force-closes the prior open,
+/// enabling client failover ([MS-SMB2] §3.3.5.9.13).
+#[derive(Default)]
+pub struct AppInstanceTable {
+    opens: std::sync::Mutex<Vec<AppOpen>>,
+    forced: std::sync::Mutex<HashSet<LockOwner>>,
+}
+
+impl AppInstanceTable {
+    /// Create an empty table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve a CREATE carrying `id` against existing opens. A match from a
+    /// different client force-closes the prior open unless the 3.1.1 version
+    /// rules say the existing open is newer/equal (then Reject).
+    pub fn resolve(
+        &self,
+        id: [u8; 16],
+        path: &str,
+        client_guid: [u8; 16],
+        is_311: bool,
+        req_version: Option<(u64, u64)>,
+    ) -> AppInstanceMatch {
+        let mut opens = self.opens.lock().unwrap();
+        let Some(pos) = opens
+            .iter()
+            .position(|o| o.app_instance_id == id && o.path == path && o.client_guid != client_guid)
+        else {
+            return AppInstanceMatch::None;
+        };
+        if let Some((eh, el)) = opens[pos].version {
+            match req_version {
+                // Version-comparison rule: applies only when the reopening
+                // connection negotiated 3.1.1. The prior open wins on an equal
+                // or higher version.
+                Some((rh, rl)) if is_311 && (eh > rh || (eh == rh && el >= rl)) => {
+                    return AppInstanceMatch::Reject;
+                }
+                // No-version rule: the server implements 3.1.1, so a request
+                // that omits a version against a versioned open is rejected
+                // regardless of the reopening connection's dialect.
+                None => return AppInstanceMatch::Reject,
+                _ => {}
+            }
+        }
+        let victim = opens.remove(pos);
+        self.forced.lock().unwrap().insert(victim.owner);
+        AppInstanceMatch::ForceClose { path: victim.path, owner: victim.owner }
+    }
+
+    /// Record a new application-instance open.
+    pub fn register(
+        &self,
+        id: [u8; 16],
+        path: String,
+        client_guid: [u8; 16],
+        owner: LockOwner,
+        version: Option<(u64, u64)>,
+    ) {
+        self.opens.lock().unwrap().push(AppOpen {
+            app_instance_id: id,
+            path,
+            client_guid,
+            owner,
+            version,
+        });
+    }
+
+    /// Consume and report the force-closed flag for `owner`.
+    pub fn take_forced(&self, owner: LockOwner) -> bool {
+        self.forced.lock().unwrap().remove(&owner)
+    }
+
+    /// Drop the registry entry for a closed open.
+    pub fn close(&self, owner: LockOwner) {
+        self.opens.lock().unwrap().retain(|o| o.owner != owner);
+        self.forced.lock().unwrap().remove(&owner);
+    }
+
+    /// Drop every entry belonging to `session_id` (logoff/disconnect).
+    pub fn close_session(&self, session_id: u64) {
+        self.opens.lock().unwrap().retain(|o| o.owner.0 != session_id);
+        self.forced.lock().unwrap().retain(|o| o.0 != session_id);
     }
 }
 

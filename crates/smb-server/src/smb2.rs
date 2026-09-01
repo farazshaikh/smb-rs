@@ -730,6 +730,24 @@ async fn process_single(
         ));
     }
 
+    // A handle force-closed by an application-instance failover ([MS-SMB2]
+    // §3.3.5.9.13): the owner's next operation on it fails STATUS_FILE_CLOSED.
+    if let Some(foff) = file_id_body_offset(hdr.command) {
+        let abs = hdr::LEN + foff;
+        if let Some(fid) = buf
+            .get(abs..abs + 16)
+            .and_then(|s| <[u8; 16]>::try_from(s).ok())
+        {
+            if server.app_instances.take_forced((conn.session_id, fid)) {
+                conn.handles.remove(&fid);
+                return Some((
+                    response(&hdr, Status::FILE_CLOSED, Vec::new(), conn.session_id),
+                    true,
+                ));
+            }
+        }
+    }
+
     // Credit accounting ([MS-SMB2] §3.3.1.1): every request spends its
     // CreditCharge from the balance we have granted; the response's own
     // Credits field tops the balance back up (done by the caller reading
@@ -2004,6 +2022,27 @@ pub(crate) async fn create(
     let fid_bytes = next_file_id();
     let path = open.path.clone();
     let is_dir = open.is_dir;
+    // Application-instance failover ([MS-SMB2] §3.3.5.9.13): a CREATE carrying
+    // the same AppInstanceId from a different client force-closes the prior
+    // open (or is rejected when the existing open's version is newer/equal).
+    // Durable reconnect is handled earlier and skips this path.
+    if let Some(app_id) = req.app_instance_id {
+        let is_311 = conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311);
+        match server
+            .app_instances
+            .resolve(app_id, &path, conn.client_guid, is_311, req.app_instance_version)
+        {
+            crate::state::AppInstanceMatch::Reject => {
+                let _ = vfs.close(open).await;
+                return Err(Status::FILE_FORCED_CLOSED);
+            }
+            crate::state::AppInstanceMatch::ForceClose { path: vpath, owner } => {
+                server.share_modes.close(&vpath, owner);
+                server.oplocks.take(&vpath);
+            }
+            crate::state::AppInstanceMatch::None => {}
+        }
+    }
     // Sharing-violation check ([MS-FSA] §2.1.5.1): reject an open whose access
     // or share flags conflict with an existing open on the same file. Undo the
     // just-opened handle on rejection. Directories are not share-checked.
@@ -2026,6 +2065,15 @@ pub(crate) async fn create(
     // Record this handle so a related follow-up in the compound chain that
     // carries the wildcard FileId resolves to it ([MS-SMB2] §3.3.5.2.7.2).
     conn.chain_fid = Some(fid_bytes);
+    if let Some(app_id) = req.app_instance_id {
+        server.app_instances.register(
+            app_id,
+            path.clone(),
+            conn.client_guid,
+            (conn.session_id, fid_bytes),
+            req.app_instance_version,
+        );
+    }
 
     // A non-lease open conflicting with another holder's lease breaks its
     // write caching (RWH -> RH) ([MS-SMB2] §3.3.4.7); lease-context opens are
@@ -3663,6 +3711,7 @@ mod oplock_tests {
             leases: Arc::new(LeaseTable::new()),
             durables: Arc::new(smb_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
+            app_instances: Arc::new(AppInstanceTable::new()),
         })
     }
 
@@ -3777,6 +3826,7 @@ mod lease_tests {
             leases: Arc::new(LeaseTable::new()),
             durables: Arc::new(smb_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
+            app_instances: Arc::new(AppInstanceTable::new()),
         })
     }
 
@@ -4147,6 +4197,7 @@ mod durable_tests {
             leases: Arc::new(LeaseTable::new()),
             durables: Arc::new(smb_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
+            app_instances: Arc::new(AppInstanceTable::new()),
         })
     }
 

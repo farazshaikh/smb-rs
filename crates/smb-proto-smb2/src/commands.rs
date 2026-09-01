@@ -100,6 +100,11 @@ pub struct CreateReq {
     /// Bitmask of durable create-context tags present ([`durable::tag`]);
     /// used to reject conflicting durable-context combinations on reconnect.
     pub durable_ctx_tags: u8,
+    /// SMB2_CREATE_APP_INSTANCE_ID ([MS-SMB2] §2.2.13.2.13), if present.
+    pub app_instance_id: Option<[u8; 16]>,
+    /// SMB2_CREATE_APP_INSTANCE_VERSION (high, low) ([MS-SMB2] §2.2.13.2.15),
+    /// 3.1.1 only, if present.
+    pub app_instance_version: Option<(u64, u64)>,
 }
 
 /// Durable-handle intent parsed from a CREATE's create-context chain
@@ -241,6 +246,47 @@ fn durable_context_tags(frame: &[u8], ctx_off: usize, ctx_len: usize) -> u8 {
     tags
 }
 
+/// AppInstance create-context name GUIDs ([MS-SMB2] §2.2.13.2.13/§2.2.13.2.15),
+/// on the wire as the raw 16-byte GUID.
+pub mod app_instance {
+    /// SMB2_CREATE_APP_INSTANCE_ID (0x45BCA66AEFA7F74A9008FA462E144D74).
+    pub const ID_NAME: [u8; 16] = [
+        0x45, 0xBC, 0xA6, 0x6A, 0xEF, 0xA7, 0xF7, 0x4A, 0x90, 0x08, 0xFA, 0x46, 0x2E, 0x14, 0x4D,
+        0x74,
+    ];
+    /// SMB2_CREATE_APP_INSTANCE_VERSION (0xB982D0B73B56074FA07B524A8116A010).
+    pub const VERSION_NAME: [u8; 16] = [
+        0xB9, 0x82, 0xD0, 0xB7, 0x3B, 0x56, 0x07, 0x4F, 0xA0, 0x7B, 0x52, 0x4A, 0x81, 0x16, 0xA0,
+        0x10,
+    ];
+}
+
+/// Parse the 16-byte AppInstanceId from a CREATE's create-context chain
+/// ([MS-SMB2] §2.2.13.2.13): data is StructureSize(2)+Reserved(2)+Id(16).
+fn parse_app_instance_id(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option<[u8; 16]> {
+    let mut found = None;
+    walk_create_contexts(frame, ctx_off, ctx_len, |name, data| {
+        if found.is_none() && name == app_instance::ID_NAME && data.len() >= 20 {
+            found = Some(data[4..20].try_into().unwrap());
+        }
+    });
+    found
+}
+
+/// Parse AppInstanceVersion (high, low) from the create-context chain
+/// ([MS-SMB2] §2.2.13.2.15): data is StructSize(2)+Reserved(2)+Pad(4)+High(8)+Low(8).
+fn parse_app_instance_version(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option<(u64, u64)> {
+    let mut found = None;
+    walk_create_contexts(frame, ctx_off, ctx_len, |name, data| {
+        if found.is_none() && name == app_instance::VERSION_NAME && data.len() >= 24 {
+            let high = u64::from_le_bytes(data[8..16].try_into().unwrap());
+            let low = u64::from_le_bytes(data[16..24].try_into().unwrap());
+            found = Some((high, low));
+        }
+    });
+    found
+}
+
 /// Encode the `DH2Q` v2 durable-handle response data ([MS-SMB2] §2.2.14.2.11).
 pub fn durable_v2_resp_data(timeout: u32, flags: u32) -> Vec<u8> {
     let mut d = Vec::with_capacity(8);
@@ -360,6 +406,8 @@ impl CreateReq {
             lease: parse_lease_context(frame, ctx_off, ctx_len),
             durable: parse_durable_context(frame, ctx_off, ctx_len),
             durable_ctx_tags: durable_context_tags(frame, ctx_off, ctx_len),
+            app_instance_id: parse_app_instance_id(frame, ctx_off, ctx_len),
+            app_instance_version: parse_app_instance_version(frame, ctx_off, ctx_len),
         })
     }
 }

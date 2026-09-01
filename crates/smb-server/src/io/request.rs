@@ -150,6 +150,7 @@ impl Command for LogoffCmd {
         res.server.share_modes.close_session(sid);
         res.server.oplocks.release_session(sid);
         res.server.leases.release_session(sid);
+        res.server.app_instances.close_session(sid);
         res.server.sessions.remove(sid);
         res.conn.trees.clear();
         res.conn.searches.clear();
@@ -222,6 +223,7 @@ impl Command for CloseCmd {
                     res.server.share_modes.close(&path, (res.conn.session_id, fid));
                     res.server.oplocks.release(&path, (res.conn.session_id, fid));
                     res.server.leases.release(&path, (res.conn.session_id, fid));
+                    res.server.app_instances.close((res.conn.session_id, fid));
                     res.conn.durable.remove(&fid);
                     let _ = res.server.durables.remove(&fid).await;
                 }
