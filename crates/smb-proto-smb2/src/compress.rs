@@ -88,23 +88,62 @@ pub fn decompress_message(frame: &[u8]) -> Option<Vec<u8>> {
 /// Wrap `msg` in an unchained LZNT1 COMPRESSION_TRANSFORM. Returns `None` when
 /// the algorithm is unsupported or compression does not shrink the message (the
 /// caller then sends it uncompressed).
+///
+/// For a READ response only the file data is compressed, leaving the SMB2 header
+/// and READ response structure uncompressed via the transform Offset field. This
+/// mirrors Windows and, per [MS-SMB2] §3.1.4.4 step 5/6, avoids emitting a
+/// transform when compression would not shrink the payload (e.g. a tiny or
+/// incompressible read).
 pub fn compress_message(msg: &[u8], algorithm: u16) -> Option<Vec<u8>> {
+    let offset = read_response_data_offset(msg).unwrap_or(0);
+    compress_message_at(msg, algorithm, offset)
+}
+
+/// Compress the portion of `msg` at or after `offset`, leaving the leading
+/// `offset` bytes uncompressed ([MS-SMB2] §3.1.4.4 step 2).
+fn compress_message_at(msg: &[u8], algorithm: u16, offset: usize) -> Option<Vec<u8>> {
     if algorithm != algo::LZNT1 {
         return None;
     }
+    let prefix = msg.get(..offset)?;
+    let body = msg.get(offset..)?;
     let mut payload = Vec::new();
-    lznt1::compress(msg, &mut payload);
-    if payload.len() >= msg.len() {
+    lznt1::compress(body, &mut payload);
+    // §3.1.4.4 step 6: send uncompressed when compression does not shrink the
+    // compressed portion.
+    if payload.len() >= body.len() {
         return None;
     }
-    let mut f = Vec::with_capacity(16 + payload.len());
+    let mut f = Vec::with_capacity(16 + prefix.len() + payload.len());
     f.extend_from_slice(&PROTOCOL_ID);
-    f.extend_from_slice(&(msg.len() as u32).to_le_bytes()); // OriginalCompressedSegmentSize
+    f.extend_from_slice(&(body.len() as u32).to_le_bytes()); // OriginalCompressedSegmentSize
     f.extend_from_slice(&algo::LZNT1.to_le_bytes()); // CompressionAlgorithm
     f.extend_from_slice(&0u16.to_le_bytes()); // Flags
-    f.extend_from_slice(&0u32.to_le_bytes()); // Offset (whole payload compressed)
+    f.extend_from_slice(&(offset as u32).to_le_bytes()); // Offset of the compressed portion
+    f.extend_from_slice(prefix);
     f.extend_from_slice(&payload);
     Some(f)
+}
+
+/// If `msg` is a single, non-compounded SMB2 READ response, return the offset of
+/// the file data within it so only the payload (not the header) is compressed.
+fn read_response_data_offset(msg: &[u8]) -> Option<usize> {
+    const SMB2_HEADER_LEN: usize = 64;
+    const CMD_READ: u16 = 0x0008;
+    const FLAG_SERVER_TO_REDIR: u32 = 0x0000_0001;
+    if msg.len() < SMB2_HEADER_LEN + 16 || msg[0..4] != crate::SMB2_MAGIC {
+        return None;
+    }
+    let command = u16::from_le_bytes([msg[12], msg[13]]);
+    let flags = u32::from_le_bytes([msg[16], msg[17], msg[18], msg[19]]);
+    let next = u32::from_le_bytes([msg[20], msg[21], msg[22], msg[23]]);
+    if command != CMD_READ || next != 0 || flags & FLAG_SERVER_TO_REDIR == 0 {
+        return None;
+    }
+    // READ Response ([MS-SMB2] §2.2.20): StructureSize(2) then DataOffset(1),
+    // measured from the start of the SMB2 header.
+    let data_offset = msg[SMB2_HEADER_LEN + 2] as usize;
+    (data_offset < msg.len()).then_some(data_offset)
 }
 
 /// Expand an `SMB2_COMPRESSION_PATTERN_PAYLOAD_V1` (§2.2.42.1): a byte repeated

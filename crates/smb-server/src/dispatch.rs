@@ -145,15 +145,19 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                     smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge(), out_tx.clone()));
                 }
                 let c2 = smb2_conn.as_mut().unwrap();
-                // Decompress an SMB3 compressed transform before dispatch.
+                // Decompress an SMB3 compressed transform before dispatch. A
+                // frame that fails to decompress (bad length or unsupported
+                // algorithm) or whose decompressed payload is not a valid SMB2
+                // message is fatal: the server MUST disconnect the connection
+                // ([MS-SMB2] §3.3.5.2.13).
                 let decompressed;
                 let msg: &[u8] = if frame.0[0] == PROTO_ID_COMPRESSED {
                     match smb_proto_smb2::compress::decompress_message(&frame.0) {
-                        Some(d) => {
+                        Some(d) if d.first() == Some(&PROTO_ID_SMB2) => {
                             decompressed = d;
                             &decompressed
                         }
-                        None => continue,
+                        _ => break,
                     }
                 } else {
                     &frame.0
