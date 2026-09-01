@@ -1,7 +1,8 @@
 //! CSV storage for test results. The schema is a header line followed by rows:
-//! `suite,name,category,status,duration_ms,timestamp,commit`. `suite` is one of
-//! `protocol`/`unit`/`system`; `status` is `pass`/`fail`/`skip`/`unknown`;
-//! `commit` is the changeset the test last passed at (empty when not passing).
+//! `suite,name,category,status,duration_ms,timestamp,commit,note`. `suite` is one
+//! of `protocol`/`unit`/`system`; `status` is `pass`/`fail`/`skip`/`unknown`;
+//! `commit` is the changeset the test last passed at (empty when not passing);
+//! `note` explains a skip/fail reason (empty otherwise).
 
 use std::path::Path;
 
@@ -14,6 +15,7 @@ pub struct TestRow {
     pub duration_ms: u64,
     pub timestamp: String,
     pub commit: String,
+    pub note: String,
 }
 
 /// Aggregate counts over a set of rows.
@@ -52,6 +54,7 @@ fn parse_row(line: &str) -> Option<TestRow> {
         duration_ms: fields.get(4).and_then(|f| f.parse().ok()).unwrap_or(0),
         timestamp: fields.get(5).cloned().unwrap_or_default(),
         commit: fields.get(6).cloned().unwrap_or_default(),
+        note: fields.get(7).cloned().unwrap_or_default(),
     })
 }
 
