@@ -325,7 +325,13 @@ pub(crate) async fn process_frame(
     let mut request_encrypted = false;
     if buf.len() >= 4 && buf[..4] == smb_proto_smb2::commands::TF_MAGIC {
         let pt = decrypt_transform(conn, buf)?;
-        plaintext = pt;
+        // A decrypted payload may itself be a compression transform
+        // ([MS-SMB2] §3.1.4.4: the client compresses, then encrypts); expand it.
+        plaintext = if pt.len() >= 4 && pt[..4] == smb_proto_smb2::compress::PROTOCOL_ID {
+            smb_proto_smb2::compress::decompress_message(&pt)?
+        } else {
+            pt
+        };
         buf = &plaintext;
         request_encrypted = true;
         conn.peer_encrypts = true;
@@ -426,7 +432,17 @@ pub(crate) async fn process_frame(
     if (conn.encrypt_data || request_encrypted || tree_requires_seal)
         && parts.iter().all(|(_, w)| *w)
     {
-        let sealed = encrypt_response(conn, &out)?;
+        // Compress before sealing when the peer negotiated compression and the
+        // READ asked for it ([MS-SMB2] §3.1.4.4: compress, then encrypt).
+        let mut payload = out;
+        if let Some(algo) = conn.compress_algo {
+            if conn.compress_response {
+                if let Some(packed) = smb_proto_smb2::compress::compress_message(&payload, algo) {
+                    payload = packed;
+                }
+            }
+        }
+        let sealed = encrypt_response(conn, &payload)?;
         return Some(sealed);
     }
     Some(out)
