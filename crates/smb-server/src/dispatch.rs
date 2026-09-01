@@ -131,6 +131,16 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                 || frame.0[0] == PROTO_ID_COMPRESSED
                 || conn.upgraded_smb2
             {
+                // Once a dialect has been negotiated, a stray SMB1 frame (a
+                // second multi-protocol NEGOTIATE) is invalid: the server MUST
+                // disconnect and not reply ([MS-SMB2] §3.3.5.4).
+                if conn.upgraded_smb2
+                    && frame.0[0] != PROTO_ID_SMB2
+                    && frame.0[0] != PROTO_ID_ENCRYPTED
+                    && frame.0[0] != PROTO_ID_COMPRESSED
+                {
+                    break;
+                }
                 if smb2_conn.is_none() {
                     smb2_conn = Some(crate::smb2::Smb2Conn::new(rand_challenge(), out_tx.clone()));
                 }
