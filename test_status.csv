@@ -3,12 +3,12 @@ protocol,AppInstanceId_Negative_DifferentAppInstanceIdInReopen,AppInstanceIdBasi
 protocol,AppInstanceId_Smb302,AppInstanceIdBasic,pass,251,2026-08-31T23:42:32.387397-07:00,8118bfe,
 protocol,AppInstanceId_Smb311,AppInstanceIdBasic,pass,262,2026-08-31T23:42:32.387397-07:00,8118bfe,
 protocol,BVT_AppInstanceId,AppInstanceIdBasic,pass,397,2026-08-31T23:42:32.387397-07:00,8118bfe,
-protocol,AppInstanceId_DirectoryLeasing_NoLeaseInReOpen,AppInstanceIdExtendedTest,skip,116,2026-09-01T03:38:56.636792-07:00,c7a1147,Needs persistent handles (GLOBAL_CAP_PERSISTENT_HANDLES / CA share)
-protocol,AppInstanceId_Encryption,AppInstanceIdExtendedTest,skip,126,2026-08-31T23:42:32.387397-07:00,8118bfe,
-protocol,AppInstanceId_FileLeasing_NoLeaseInReOpen,AppInstanceIdExtendedTest,skip,116,2026-08-31T23:42:32.387397-07:00,8118bfe,
-protocol,AppInstanceId_Lock_ExpectNoLockInReOpen,AppInstanceIdExtendedTest,skip,122,2026-08-31T23:42:32.387397-07:00,8118bfe,
-protocol,AppInstanceId_Negative_EncryptionInInitialOpen_NoEncryptionInReOpen,AppInstanceIdExtendedTest,skip,116,2026-08-31T23:42:32.387397-07:00,8118bfe,
-protocol,AppInstanceId_Negative_NoEncryptionInInitialOpen_EncryptionInReOpen,AppInstanceIdExtendedTest,skip,116,2026-08-31T23:42:32.387397-07:00,8118bfe,
+protocol,AppInstanceId_DirectoryLeasing_NoLeaseInReOpen,AppInstanceIdExtendedTest,pass,116,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,AppInstanceId_Encryption,AppInstanceIdExtendedTest,pass,126,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,AppInstanceId_FileLeasing_NoLeaseInReOpen,AppInstanceIdExtendedTest,pass,116,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,AppInstanceId_Lock_ExpectNoLockInReOpen,AppInstanceIdExtendedTest,pass,122,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,AppInstanceId_Negative_EncryptionInInitialOpen_NoEncryptionInReOpen,AppInstanceIdExtendedTest,pass,116,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,AppInstanceId_Negative_NoEncryptionInInitialOpen_EncryptionInReOpen,AppInstanceIdExtendedTest,pass,116,2026-09-01T09:43:00.347295-07:00,c2ac36d,
 protocol,AppInstanceVersion_SMB302_SMB311,AppInstanceIdExtendedTest,pass,288,2026-08-31T23:42:32.387397-07:00,8118bfe,
 protocol,AppInstanceVersion_SMB311_SMB302,AppInstanceIdExtendedTest,pass,290,2026-08-31T23:42:32.387397-07:00,8118bfe,
 protocol,BVT_AppInstanceVersion_SMB311_GreaterVersion,AppInstanceIdExtendedTest,pass,264,2026-08-31T23:42:32.387397-07:00,8118bfe,
@@ -94,7 +94,7 @@ protocol,DurableHandleV1_Reconnect_WithoutRequestLease,DurableHandle,pass,230,20
 protocol,DurableHandleV1_WithLeaseV1_WithoutHandleCaching,DurableHandle,pass,127,2026-08-30T13:34:15.4141026-07:00,b6e8e04,
 protocol,BVT_DurableHandleV2_Reconnect_WithBatchOplock,DurableHandleV2,pass,173,2026-08-30T13:33:05.7195661-07:00,b6e8e04,
 protocol,BVT_DurableHandleV2_Reconnect_WithLeaseV1,DurableHandleV2,pass,176,2026-08-30T13:33:05.8934571-07:00,b6e8e04,
-protocol,BVT_PersistentHandle_Reconnect,DurableHandleV2,skip,51,2026-08-30T13:33:06.4207492-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,BVT_PersistentHandle_Reconnect,DurableHandleV2,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
 protocol,DurableHandleV2_NoPersistenceGrantedOnNonCAShare,DurableHandleV2,pass,82,2026-08-30T13:33:04.9419792-07:00,b6e8e04,
 protocol,DurableHandleV2_Reconnect_IncludeDurableHandleReconnect,DurableHandleV2,pass,175,2026-08-30T13:33:05.3673381-07:00,b6e8e04,
 protocol,DurableHandleV2_Reconnect_IncludeDurableHandleRequest,DurableHandleV2,pass,176,2026-08-30T13:33:05.1905117-07:00,b6e8e04,
@@ -104,15 +104,15 @@ protocol,DurableHandleV2_Reconnect_WithLeaseV1_WithDifferentFileName,DurableHand
 protocol,DurableHandleV2_Reconnect_WithoutPersistence,DurableHandleV2,pass,191,2026-08-30T13:33:04.7504597-07:00,b6e8e04,
 protocol,DurableHandleV2_WithLeaseV1AndV2_WithDifferentLeaseKey,DurableHandleV2,pass,171,2026-08-30T13:33:06.9359476-07:00,b6e8e04,
 protocol,DurableHandleV2_WithLeaseV2_WithoutHandleCaching,DurableHandleV2,pass,132,2026-08-30T13:33:06.2877711-07:00,b6e8e04,
-protocol,PersistentHandle_ReOpenFromDiffClient,DurableHandleV2,skip,51,2026-08-30T13:33:06.8847582-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid,DurableHandleV2,skip,52,2026-08-30T13:33:06.4725384-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_CreateGuidNotFound,DurableHandleV2,skip,51,2026-08-30T13:33:06.5250859-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_SessionNotNull,DurableHandleV2,skip,51,2026-08-30T13:33:06.6283599-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentDurableOwner,DurableHandleV2,skip,50,2026-08-30T13:33:06.6805729-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV1,DurableHandleV2,skip,50,2026-08-30T13:33:06.7316162-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV2,DurableHandleV2,skip,50,2026-08-30T13:33:06.7831011-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutPersistentFlag,DurableHandleV2,skip,51,2026-08-30T13:33:06.5765191-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutReconnectLeaseContext,DurableHandleV2,skip,50,2026-08-30T13:33:06.8339160-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_ReOpenFromDiffClient,DurableHandleV2,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid,DurableHandleV2,pass,52,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_CreateGuidNotFound,DurableHandleV2,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_SessionNotNull,DurableHandleV2,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentDurableOwner,DurableHandleV2,pass,50,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV1,DurableHandleV2,pass,50,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV2,DurableHandleV2,pass,50,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutPersistentFlag,DurableHandleV2,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutReconnectLeaseContext,DurableHandleV2,pass,50,2026-09-01T09:43:00.347295-07:00,c2ac36d,
 protocol,BVT_Encryption_GlobalEncryptionEnabled,Encryption,pass,237,2026-08-31T19:01:22.2163772-07:00,0c5d8c9,
 protocol,BVT_Encryption_PerShareEncryptionEnabled,Encryption,pass,8198,2026-08-31T19:01:14.0172703-07:00,0c5d8c9,
 protocol,BVT_Encryption_SMB311,Encryption,pass,8223,2026-08-31T19:01:22.4539944-07:00,0c5d8c9,
@@ -140,7 +140,7 @@ protocol,BVT_FileLevelTrim,MS_FSA_Clarification,pass,52,2026-09-01T09:04:25.3278
 protocol,BVT_OffloadReadWrite,MS_FSA_Clarification,skip,51,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs FSCTL_OFFLOAD_READ/WRITE (ODX) — not implemented
 protocol,BVT_SetZeroData,MS_FSA_Clarification,pass,195,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,FileLevelTrim_Negative_NonZeroKeyInRequest,MS_FSA_Clarification,pass,50,2026-09-01T09:04:25.327801-07:00,acb3a54,
-protocol,BVT_PersistentHandles,MS_SMB2_Clarification,skip,51,2026-08-30T13:33:40.0355195-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,BVT_PersistentHandles,MS_SMB2_Clarification,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
 protocol,BVT_Resiliency,MS_SMB2_Clarification,skip,64,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_SMBDialect,MS_SMB2_Clarification,pass,53,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_MultiCredit_OneRequestWithMultiCredit,MultiCredit,pass,319,2026-08-30T13:32:54.6195877-07:00,b6e8e04,
@@ -200,24 +200,24 @@ protocol,BVT_OpLockBreak,OpLock,pass,175,2026-08-30T13:33:49.8578375-07:00,b6e8e
 protocol,BVT_OpLockBreak_Lease,OpLock,pass,131,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,BVT_Replay_ReplayCreate,Replay,fail,173,2026-08-30T13:33:48.4504733-07:00,,
 protocol,BVT_Replay_WriteWithInvalidChannelSequence,Replay,fail,174,2026-08-30T13:33:48.2759374-07:00,,
-protocol,Replay_NonPersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:04:25.327801-07:00,acb3a54,
-protocol,Replay_NonPersistentHandle_Flush_ReplayEligibleCleared,ReplayIsReplayEligible,pass,94,2026-08-30T13:33:49.2798886-07:00,b6e8e04,
-protocol,Replay_NonPersistentHandle_IoCtl_ReplayEligibleCleared,ReplayIsReplayEligible,pass,93,2026-08-30T13:33:49.3748979-07:00,b6e8e04,
-protocol,Replay_NonPersistentHandle_Lock_ReplayEligibleCleared,ReplayIsReplayEligible,pass,94,2026-08-30T13:33:49.5647897-07:00,747060e,
-protocol,Replay_NonPersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:04:25.327801-07:00,acb3a54,
-protocol,Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,96,2026-08-30T13:33:49.7101430-07:00,b6e8e04,
-protocol,Replay_NonPersistentHandle_Read_ReplayEligibleCleared,ReplayIsReplayEligible,pass,95,2026-08-30T13:33:49.1841210-07:00,b6e8e04,
-protocol,Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,96,2026-08-30T13:33:49.4683216-07:00,b6e8e04,
-protocol,Replay_NonPersistentHandle_Write_ReplayEligibleCleared,ReplayIsReplayEligible,pass,97,2026-08-30T13:33:49.0868849-07:00,b6e8e04,
-protocol,Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:49.0356614-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_Flush_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.7283484-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_IoCtl_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.7800476-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_Lock_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.8829247-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.9338131-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared,ReplayIsReplayEligible,skip,50,2026-08-30T13:33:48.9847001-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_Read_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.6766657-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_SetInfo_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.8314734-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
-protocol,Replay_PersistentHandle_Write_ReplayEligibleCleared,ReplayIsReplayEligible,skip,51,2026-08-30T13:33:48.6246389-07:00,acb3a54,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,Replay_NonPersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_Flush_ReplayEligibleCleared,ReplayIsReplayEligible,pass,94,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_IoCtl_ReplayEligibleCleared,ReplayIsReplayEligible,pass,93,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_Lock_ReplayEligibleCleared,ReplayIsReplayEligible,pass,94,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,96,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_Read_ReplayEligibleCleared,ReplayIsReplayEligible,pass,95,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,96,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_NonPersistentHandle_Write_ReplayEligibleCleared,ReplayIsReplayEligible,pass,97,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_Flush_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_IoCtl_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_Lock_ReplayEligibleCleared,ReplayIsReplayEligible,pass,50,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared,ReplayIsReplayEligible,pass,50,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,50,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_Read_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_SetInfo_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
+protocol,Replay_PersistentHandle_Write_ReplayEligibleCleared,ReplayIsReplayEligible,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
 protocol,BVT_ResilientHandle_LockSequence,ResilientHandle,pass,175,2026-08-30T13:33:47.7569217-07:00,747060e,
 protocol,BVT_ResilientHandle_LockSequence_Lease,ResilientHandle,pass,173,2026-08-30T13:33:48.1020191-07:00,747060e,
 protocol,BVT_ResilientHandle_Reconnect,ResilientHandle,pass,170,2026-08-30T13:33:47.5858743-07:00,b6e8e04,
