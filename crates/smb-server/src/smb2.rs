@@ -703,6 +703,33 @@ async fn process_single(
         return Some((response(&hdr, Status::ACCESS_DENIED, Vec::new(), 0), false));
     }
 
+    // A tree-scoped command must carry a TreeId that names a live tree connect
+    // ([MS-SMB2] §3.3.5.2.11); a stale/unknown one is STATUS_NETWORK_NAME_DELETED.
+    // Related compound follow-ups inherit the chain's tree, so exempt them.
+    let needs_tree = matches!(
+        hdr.command,
+        ss::cmd::CREATE
+            | ss::cmd::CLOSE
+            | ss::cmd::FLUSH
+            | ss::cmd::READ
+            | ss::cmd::WRITE
+            | ss::cmd::LOCK
+            | ss::cmd::IOCTL
+            | ss::cmd::QUERY_DIRECTORY
+            | ss::cmd::CHANGE_NOTIFY
+            | ss::cmd::QUERY_INFO
+            | ss::cmd::SET_INFO
+    );
+    if needs_tree
+        && hdr.flags & hdr_flags::RELATED_OPERATIONS == 0
+        && !conn.trees.contains_key(&hdr.tree_id)
+    {
+        return Some((
+            response(&hdr, Status::NETWORK_NAME_DELETED, Vec::new(), conn.session_id),
+            true,
+        ));
+    }
+
     // Credit accounting ([MS-SMB2] §3.3.1.1): every request spends its
     // CreditCharge from the balance we have granted; the response's own
     // Credits field tops the balance back up (done by the caller reading

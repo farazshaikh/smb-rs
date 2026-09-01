@@ -53,6 +53,8 @@ impl Status {
     pub const FILE_IS_A_DIRECTORY: Status = Status(0xC000_00BA);
     /// The share name is unknown to the server.
     pub const BAD_NETWORK_NAME: Status = Status(0xC000_00CC);
+    /// The tree connect referenced by TreeId no longer exists on the server.
+    pub const NETWORK_NAME_DELETED: Status = Status(0xC000_00C9);
     /// The request was cancelled by the client.
     pub const CANCELLED: Status = Status(0xC000_0120);
     /// A pending CHANGE_NOTIFY was completed because its handle was closed
