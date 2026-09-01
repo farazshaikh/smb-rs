@@ -51,6 +51,11 @@ pub struct Share {
     /// True when the share advertises SMB2_SHAREFLAG_COMPRESS_DATA in its
     /// TREE_CONNECT response ([MS-SMB2] §2.2.10).
     pub compress: bool,
+    /// True for a continuously-available share ([MS-SMB2] §2.2.10): its
+    /// TREE_CONNECT response advertises SMB2_SHAREFLAG_CONTINUOUSLY_AVAILABLE
+    /// and SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY, and it may grant persistent
+    /// handles ([MS-SMB2] §3.3.5.9.11).
+    pub ca: bool,
 }
 
 /// Global (per-process) server configuration and user database.

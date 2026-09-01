@@ -71,6 +71,12 @@ struct Args {
     #[arg(long = "compress-share", value_name = "NAME")]
     compress_shares: Vec<String>,
 
+    /// Mark a share as continuously available by NAME (repeatable): its
+    /// TREE_CONNECT response advertises SMB2_SHAREFLAG_CONTINUOUSLY_AVAILABLE
+    /// and it may grant persistent handles ([MS-SMB2] §3.3.5.9.11).
+    #[arg(long = "ca-share", value_name = "NAME")]
+    ca_shares: Vec<String>,
+
     /// Durable-handle store backend: `mem` (non-durable) or `redb` (survives
     /// a server restart, enabling persistent-handle reclaim).
     #[arg(long = "handle-store", default_value = "mem")]
@@ -198,14 +204,17 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
         args.encrypt_shares.iter().map(|s| s.to_lowercase()).collect();
     let compress_set: std::collections::HashSet<String> =
         args.compress_shares.iter().map(|s| s.to_lowercase()).collect();
+    let ca_set: std::collections::HashSet<String> =
+        args.ca_shares.iter().map(|s| s.to_lowercase()).collect();
     for (name, root) in shares {
         let lname = name.to_lowercase();
         let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(root.clone()));
         let encrypt = encrypt_set.contains(&lname);
         let compress = compress_set.contains(&lname);
+        let ca = ca_set.contains(&lname);
         map.insert(
             lname.clone(),
-            state::Share { name, root: root.into(), vfs, is_ipc: false, encrypt, compress },
+            state::Share { name, root: root.into(), vfs, is_ipc: false, encrypt, compress, ca },
         );
     }
     // Virtual IPC$ share for named-pipe traffic.
@@ -218,6 +227,7 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
             is_ipc: true,
             encrypt: false,
             compress: false,
+            ca: false,
         },
     );
     map

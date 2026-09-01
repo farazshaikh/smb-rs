@@ -352,7 +352,8 @@ impl Command for CreateCmd {
         let signed = smb_proto_smb2::Header2::parse(res.frame)
             .map(|h| h.is_signed())
             .unwrap_or(false);
-        match crate::smb2::create(res.conn, vfs, res.server, signed, res.frame).await {
+        let is_ca = crate::smb2::share_is_ca(res.server, res.conn, ctx.reply.tree_id);
+        match crate::smb2::create(res.conn, vfs, res.server, signed, is_ca, res.frame).await {
             Ok(body) => Outcome::Final(ctx.respond(Status::SUCCESS, body)),
             Err(status) if status == Status::STOPPED_ON_SYMLINK => {
                 let body = res.conn.symlink_error.take().unwrap_or_else(crate::smb2::error_resp);
@@ -519,11 +520,12 @@ impl Command for TreeConnectCmd {
     type Request = TreeConnectReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: TreeConnectReq, res: &mut Resources<'_>) -> Outcome {
         match crate::smb2::tree_connect(res.server, res.conn, res.frame) {
-            Ok((name, share_type, encrypt, compress)) => {
+            Ok((name, share_type, encrypt, compress, ca)) => {
                 let new_tid = crate::smb2::next_tree_id();
                 res.conn.trees.insert(new_tid, name);
                 res.conn.resp_tree_id = Some(new_tid);
                 let mut share_flags = 0;
+                let mut capabilities = 0;
                 if encrypt {
                     res.conn.seal_current = true;
                     share_flags |= c::SHAREFLAG_ENCRYPT_DATA;
@@ -531,9 +533,13 @@ impl Command for TreeConnectCmd {
                 if compress {
                     share_flags |= c::SHAREFLAG_COMPRESS_DATA;
                 }
+                if ca {
+                    share_flags |= c::SHAREFLAG_CONTINUOUSLY_AVAILABLE;
+                    capabilities |= c::SHARE_CAP_CONTINUOUS_AVAILABILITY;
+                }
                 counter!("smb_tcons_total").increment(1);
                 gauge!("smb_trees_active").increment(1.0);
-                Outcome::Final(ctx.respond(Status::SUCCESS, c::build_tree_connect_resp(share_type, share_flags)))
+                Outcome::Final(ctx.respond(Status::SUCCESS, c::build_tree_connect_resp(share_type, share_flags, capabilities)))
             }
             Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
         }

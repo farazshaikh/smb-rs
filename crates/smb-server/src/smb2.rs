@@ -856,6 +856,26 @@ async fn process_single(
         }
     }
 
+    // Encrypted-share enforcement ([MS-SMB2] §3.3.5.2.9): once a tree that
+    // requires encryption is connected, every request on it (other than the
+    // negotiate/session/tree-connect handshake) MUST be encrypted.
+    if !conn.req_encrypted
+        && hdr.command != ss::cmd::NEGOTIATE
+        && hdr.command != ss::cmd::SESSION_SETUP
+        && hdr.command != ss::cmd::TREE_CONNECT
+        && conn
+            .trees
+            .get(&hdr.tree_id)
+            .and_then(|n| server.shares.get(n))
+            .map(|s| s.encrypt)
+            .unwrap_or(false)
+    {
+        return Some((
+            response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id),
+            true,
+        ));
+    }
+
     // TREE_CONNECT installs a fresh TreeId into its reply via conn.resp_tree_id.
 
     // Route a command through the typestate pipeline: a framed body flows the
@@ -2009,7 +2029,7 @@ pub(crate) fn tree_connect(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
     buf: &[u8],
-) -> Result<(String, u8, bool, bool), Status> {
+) -> Result<(String, u8, bool, bool, bool), Status> {
     let path_len = g16(buf, c::tcon_off::PATH_LENGTH) as usize;
     let path_off = g16(buf, c::tcon_off::PATH_OFFSET) as usize;
     let raw = buf.get(path_off..path_off + path_len).unwrap_or(&[]);
@@ -2031,7 +2051,7 @@ pub(crate) fn tree_connect(
     } else {
         c::share_type::DISK
     };
-    Ok((name, share_type, share.encrypt, share.compress))
+    Ok((name, share_type, share.encrypt, share.compress, share.ca))
 }
 
 // ---------------- CREATE ----------------
@@ -2042,6 +2062,7 @@ pub(crate) async fn create(
     vfs: Arc<dyn smb_vfs::Vfs>,
     server: &Arc<ServerShared>,
     req_signed: bool,
+    is_ca: bool,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::CreateReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
@@ -2136,6 +2157,8 @@ pub(crate) async fn create(
             crate::state::AppInstanceMatch::ForceClose { path: vpath, owner } => {
                 server.share_modes.close(&vpath, owner);
                 server.oplocks.take(&vpath);
+                server.locks.release_owner(owner);
+                server.leases.release(&vpath, owner);
             }
             crate::state::AppInstanceMatch::None => {}
         }
@@ -2253,9 +2276,9 @@ pub(crate) async fn create(
     );
     counter!("smb_creates_total").increment(1);
 
-    // Grant a durable handle when the client requested one.
-    // rustsmb serves no continuous-availability shares, so persistence is
-    // never granted; a lease present must include handle caching for durable.
+    // Grant a durable handle when the client requested one. Persistence is
+    // granted only on a continuously-available share ([MS-SMB2] §3.3.5.9.11);
+    // a lease present must include handle caching for durable.
     let durable_grant = grant_durable(
         conn,
         &req,
@@ -2263,7 +2286,7 @@ pub(crate) async fn create(
         &rel,
         is_dir,
         lease_grant.as_ref().map(|l| l.state),
-        false,
+        is_ca,
     );
 
     // Assemble create-context responses (lease grant, durable-handle grant).
@@ -2461,11 +2484,16 @@ fn grant_durable(
     is_ca: bool,
 ) -> Option<(&'static [u8], Vec<u8>)> {
     // A durable open requires a batch oplock or a handle-caching lease
-    // ([MS-SMB2] §3.3.5.9.6/§3.3.5.9.10).
-    match lease_state {
-        Some(state) if state & c::lease::HANDLE_CACHING != 0 => {}
-        None if req.oplock_level == c::oplock::BATCH => {}
-        _ => return None,
+    // ([MS-SMB2] §3.3.5.9.6/§3.3.5.9.10), except a persistent handle on a
+    // continuous-availability share, which is granted regardless.
+    let persistent_eligible = is_ca
+        && matches!(req.durable, Some(c::DurableReq::RequestV2 { flags, .. }) if flags & c::durable::FLAG_PERSISTENT != 0);
+    if !persistent_eligible {
+        match lease_state {
+            Some(state) if state & c::lease::HANDLE_CACHING != 0 => {}
+            None if req.oplock_level == c::oplock::BATCH => {}
+            _ => return None,
+        }
     }
     /// Fallback handle timeout when the client requests 0 (60 s).
     const DEFAULT_TIMEOUT_MS: u32 = 60_000;
@@ -3156,6 +3184,16 @@ pub(crate) fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32
         .get(&tid)
         .and_then(|n| server.shares.get(n))
         .map(|s| s.is_ipc)
+        .unwrap_or(false)
+}
+
+/// True when the tree behind `tid` is a continuously-available share, which may
+/// grant persistent handles ([MS-SMB2] §3.3.5.9.11).
+pub(crate) fn share_is_ca(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32) -> bool {
+    conn.trees
+        .get(&tid)
+        .and_then(|n| server.shares.get(n))
+        .map(|s| s.ca)
         .unwrap_or(false)
 }
 
@@ -3893,6 +3931,7 @@ mod oplock_tests {
                 is_ipc: false,
                 encrypt: false,
                 compress: false,
+                ca: false,
             },
         );
         Arc::new(ServerShared {
@@ -3954,6 +3993,7 @@ mod oplock_tests {
                 vfs.clone(),
                 &server,
                 false,
+                false,
                 &create_request("shared.bin", c::oplock::BATCH, access, share),
             )
             .await
@@ -3971,6 +4011,7 @@ mod oplock_tests {
                 &mut conn_b,
                 vfs.clone(),
                 &server,
+                false,
                 false,
                 &create_request("shared.bin", c::oplock::NONE, access, share),
             )
@@ -4009,6 +4050,7 @@ mod lease_tests {
                 is_ipc: false,
                 encrypt: false,
                 compress: false,
+                ca: false,
             },
         );
         Arc::new(ServerShared {
@@ -4109,6 +4151,7 @@ mod lease_tests {
                 vfs.clone(),
                 &server,
                 false,
+                false,
                 &create_request_lease("leased.bin", k1, c::lease::RWH, access, share),
             )
             .await
@@ -4127,6 +4170,7 @@ mod lease_tests {
                 &mut conn_b,
                 vfs.clone(),
                 &server,
+                false,
                 false,
                 &create_request_lease("leased.bin", k2, c::lease::RWH, access, share),
             )
@@ -4187,6 +4231,7 @@ mod lease_tests {
                 vfs.clone(),
                 &server,
                 false,
+                false,
                 &create_request_lease("f.bin", key, c::lease::RWH, access, share),
             )
             .await
@@ -4199,6 +4244,7 @@ mod lease_tests {
                 &mut conn_b,
                 vfs.clone(),
                 &server,
+                false,
                 false,
                 &create_request_lease("f.bin", key, c::lease::RWH, access, share),
             )
@@ -4381,6 +4427,7 @@ mod durable_tests {
                 is_ipc: false,
                 encrypt: false,
                 compress: false,
+                ca: false,
             },
         );
         Arc::new(ServerShared {
@@ -4473,7 +4520,7 @@ mod durable_tests {
             conn.session_id = 1;
             let mut frame = frame;
             frame[67] = c::oplock::BATCH; // durable requires a batch oplock
-            let resp = create(&mut conn, vfs.clone(), &server, false, &frame)
+            let resp = create(&mut conn, vfs.clone(), &server, false, false, &frame)
                 .await
                 .unwrap();
             assert_ne!(
@@ -4501,7 +4548,7 @@ mod durable_tests {
             let (tx2, _rx2) = mpsc::channel(8);
             let mut conn2 = Smb2Conn::new([0u8; 8], tx2);
             conn2.session_id = 2;
-            let resp2 = create(&mut conn2, vfs.clone(), &server, false, &rframe)
+            let resp2 = create(&mut conn2, vfs.clone(), &server, false, false, &rframe)
                 .await
                 .expect("reconnect");
             let rid: [u8; 16] = resp2[64..80].try_into().unwrap();
@@ -4531,7 +4578,7 @@ mod durable_tests {
             let rframe = create_req_ctx("x.bin", 0x8000_0000, 1, c::durable::RECONNECT_V2, &dc);
             let (tx, _rx) = mpsc::channel(8);
             let mut conn = Smb2Conn::new([0u8; 8], tx);
-            let err = create(&mut conn, vfs.clone(), &server, false, &rframe)
+            let err = create(&mut conn, vfs.clone(), &server, false, false, &rframe)
                 .await
                 .unwrap_err();
             assert_eq!(err, Status::OBJECT_NAME_NOT_FOUND);

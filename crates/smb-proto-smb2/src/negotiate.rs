@@ -189,7 +189,7 @@ pub fn build_response_full(
     }
     b.extend_from_slice(guid); // ServerGuid
     let caps = if dialect >= DIALECT_300 {
-        caps::LARGE_MTU | caps::MULTI_CHANNEL | caps::LEASING | caps::DIRECTORY_LEASING
+        caps::LARGE_MTU | caps::MULTI_CHANNEL | caps::LEASING | caps::DIRECTORY_LEASING | caps::PERSISTENT_HANDLES
     } else if dialect >= DIALECT_210 {
         caps::LARGE_MTU | caps::LEASING
     } else {
