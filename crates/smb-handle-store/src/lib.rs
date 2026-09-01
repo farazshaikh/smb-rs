@@ -58,6 +58,9 @@ pub struct HandleRecord {
     pub owner_node: String,
     /// Lease key bound to the handle when it was opened with a lease.
     pub lease_key: Option<Guid>,
+    /// Granted lease state, recreated in the CREATE response on a persistent
+    /// resume ([MS-SMB2] §3.3.5.9.12).
+    pub lease_state: u32,
     /// Client GUID that opened the handle; validated on a lease reconnect
     /// ([MS-SMB2] §3.3.5.9.7).
     pub client_guid: Guid,
@@ -241,6 +244,7 @@ pub(crate) fn sample(guid_byte: u8, timeout_ms: u64) -> HandleRecord {
         match_guid: None,
         owner_node: String::new(),
         lease_key: None,
+        lease_state: 0,
         client_guid: [0u8; 16],
         timeout_ms,
         deadline_ms: if timeout_ms == 0 { 0 } else { timeout_ms },

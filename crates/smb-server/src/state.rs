@@ -726,6 +726,8 @@ pub struct DurableEntry {
     pub client_guid: [u8; 16],
     /// Lease key associated with the open, if it held a lease.
     pub lease_key: Option<[u8; 16]>,
+    /// Granted lease state, recreated on a persistent resume ([MS-SMB2] §3.3.5.9.12).
+    pub lease_state: u32,
     /// Persistent (survives server restart intent) vs. plain durable.
     pub persistent: bool,
     /// Requested handle timeout in milliseconds (0 = server default).
@@ -752,6 +754,7 @@ impl DurableEntry {
             match_guid: if self.create_guid == [0u8; 16] { None } else { Some(self.create_guid) },
             owner_node: String::new(),
             lease_key: self.lease_key,
+            lease_state: self.lease_state,
             client_guid: self.client_guid,
             timeout_ms: self.timeout as u64,
             deadline_ms: if self.persistent { 0 } else { now_ms + self.timeout as u64 },

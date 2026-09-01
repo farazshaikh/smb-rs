@@ -2100,6 +2100,17 @@ pub(crate) async fn create(
 
     let rel = req.name.trim_start_matches(['\\', '/']).to_string();
     let want_dir = req.options & OPT_DIRECTORY_FILE != 0;
+    // A fresh open of a file that still has a surviving persistent handle is
+    // rejected while that handle is held ([MS-SMB2] §3.3.5.9: Open.IsPersistent
+    // is TRUE and the oplock is not batch).
+    if let Ok(list) = server.durables.list().await {
+        if list
+            .iter()
+            .any(|r| r.path == rel && r.flags & c::durable::FLAG_PERSISTENT != 0)
+        {
+            return Err(Status::FILE_NOT_AVAILABLE);
+        }
+    }
 
     let (mut open, meta, action) = match vfs
         .create(
@@ -2467,6 +2478,7 @@ async fn durable_reconnect(
             owner_user: record.owner_user.clone(),
             client_guid: record.client_guid,
             lease_key: record.lease_key,
+            lease_state: record.lease_state,
             persistent,
             timeout,
             deadline: std::time::Instant::now(),
@@ -2484,7 +2496,20 @@ async fn durable_reconnect(
     } else {
         (c::durable::REQ_V1, c::durable_v1_resp_data())
     };
-    let contexts = c::encode_create_contexts(&[(name, data)]);
+    let mut ctx_list: Vec<(&[u8], Vec<u8>)> = vec![(name, data)];
+    // A persistent handle that held a lease recreates it on resume, returning
+    // the lease create-context ([MS-SMB2] §3.3.5.9.12).
+    if let Some(lease_key) = record.lease_key {
+        let grant = c::LeaseResp {
+            key: lease_key,
+            state: record.lease_state,
+            flags: 0,
+            epoch: 0,
+            v2: false,
+        };
+        ctx_list.push((c::lease::CONTEXT_NAME, c::lease_context_data(&grant)));
+    }
+    let contexts = c::encode_create_contexts(&ctx_list);
     Ok(c::build_create_resp(
         c::FileId(id),
         1, // FILE_OPENED
@@ -2542,6 +2567,7 @@ fn grant_durable(
         owner_user: conn.user.clone(),
         client_guid: conn.client_guid,
         lease_key: req.lease.as_ref().map(|l| l.key),
+        lease_state: lease_state.unwrap_or(0),
         persistent,
         timeout,
         deadline: std::time::Instant::now(),
@@ -3038,6 +3064,7 @@ pub(crate) async fn ioctl(
                     owner_user: conn.user.clone(),
                     client_guid: conn.client_guid,
                     lease_key: None,
+                    lease_state: 0,
                     persistent: false,
                     timeout,
                     deadline: std::time::Instant::now(),
