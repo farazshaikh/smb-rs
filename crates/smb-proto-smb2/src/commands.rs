@@ -133,6 +133,8 @@ pub enum DurableReq {
         file_id: [u8; 16],
         /// Client create-guid that must match the preserved handle.
         create_guid: [u8; 16],
+        /// Reconnect flags (`SMB2_DHANDLE_FLAG_PERSISTENT`).
+        flags: u32,
     },
 }
 
@@ -217,6 +219,10 @@ fn parse_durable_context(frame: &[u8], ctx_off: usize, ctx_len: usize) -> Option
             Some(DurableReq::ReconnectV2 {
                 file_id: data[0..16].try_into().unwrap(),
                 create_guid: data[16..32].try_into().unwrap(),
+                flags: data
+                    .get(32..36)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                    .unwrap_or(0),
             })
         } else if name == durable::RECONNECT_V1 && data.len() >= 16 {
             Some(DurableReq::ReconnectV1 {

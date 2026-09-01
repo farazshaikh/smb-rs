@@ -2323,6 +2323,7 @@ fn durable_reconnect_ids(d: &Option<c::DurableReq>) -> Option<([u8; 16], Option<
         Some(c::DurableReq::ReconnectV2 {
             file_id,
             create_guid,
+            ..
         }) => Some((*file_id, Some(*create_guid))),
         Some(c::DurableReq::ReconnectV1 { file_id }) => Some((*file_id, None)),
         _ => None,
@@ -2356,11 +2357,33 @@ async fn durable_reconnect(
         return Err(Status::OBJECT_NAME_NOT_FOUND);
     }
 
+    // Resolve the preserved handle: by its persistent FileId first, then — for
+    // a v2 reconnect that requests persistence — by CreateGuid ([MS-SMB2]
+    // §3.3.5.9.12 step 3).
+    let reconnect_persistent = matches!(
+        req.durable,
+        Some(c::DurableReq::ReconnectV2 { flags, .. }) if flags & c::durable::FLAG_PERSISTENT != 0
+    );
+    let mut key = id;
+    let mut via_create_guid = false;
+    if server.durables.get(&key).await.ok().flatten().is_none() {
+        if reconnect_persistent {
+            if let Some(g) = guid {
+                if let Ok(list) = server.durables.list().await {
+                    if let Some(rec) = list.into_iter().find(|r| r.match_guid == Some(g)) {
+                        key = rec.create_guid;
+                        via_create_guid = true;
+                    }
+                }
+            }
+        }
+    }
+
     // Peek the preserved record to validate the reconnect against the original
     // open's lease and client before consuming it.
     let peeked = server
         .durables
-        .get(&id)
+        .get(&key)
         .await
         .ok()
         .flatten()
@@ -2368,25 +2391,36 @@ async fn durable_reconnect(
     if guid.is_some() && peeked.match_guid != guid {
         return Err(Status::OBJECT_NAME_NOT_FOUND);
     }
-    // Lease-bound reconnect validation ([MS-SMB2] §3.3.5.9.7): when the original
-    // open held a lease, the reconnect must target the same file name, come from
-    // the same client, present a lease context, and use the same lease key.
-    if let Some(orig_key) = peeked.lease_key {
-        if req.name.trim_start_matches(['\\', '/']) != peeked.path {
-            // Name mismatch: v1 -> INVALID_PARAMETER, v2 -> OBJECT_NAME_NOT_FOUND.
-            return Err(if guid.is_some() {
-                Status::OBJECT_NAME_NOT_FOUND
-            } else {
-                Status::INVALID_PARAMETER
-            });
-        }
-        if peeked.client_guid != conn.client_guid {
+    // When resolved by FileId (§3.3.5.9.12 step 2), a persistent open reconnected
+    // without the persistent flag is rejected, and the reconnect must present a
+    // lease context when the original held a lease. The CreateGuid path (step 3)
+    // skips that null-lease check per the section's note (the lease is recreated
+    // on resume). A lease *key* mismatch is rejected on both paths.
+    if !via_create_guid {
+        if peeked.flags & c::durable::FLAG_PERSISTENT != 0 && !reconnect_persistent {
             return Err(Status::OBJECT_NAME_NOT_FOUND);
         }
-        match &req.lease {
-            None => return Err(Status::OBJECT_NAME_NOT_FOUND),
-            Some(l) if l.key != orig_key => return Err(Status::OBJECT_NAME_NOT_FOUND),
-            Some(_) => {}
+        if let Some(orig_key) = peeked.lease_key {
+            if req.name.trim_start_matches(['\\', '/']) != peeked.path {
+                return Err(if guid.is_some() {
+                    Status::OBJECT_NAME_NOT_FOUND
+                } else {
+                    Status::INVALID_PARAMETER
+                });
+            }
+            if peeked.client_guid != conn.client_guid {
+                return Err(Status::OBJECT_NAME_NOT_FOUND);
+            }
+            if req.lease.is_none() {
+                return Err(Status::OBJECT_NAME_NOT_FOUND);
+            }
+        }
+    }
+    // A reconnect lease context, when present, must carry the original lease key
+    // ([MS-SMB2] §3.3.5.9.12 rules 10/11 and 3.2.4/3.2.5).
+    if let (Some(l), Some(orig_key)) = (&req.lease, peeked.lease_key) {
+        if l.key != orig_key {
+            return Err(Status::OBJECT_NAME_NOT_FOUND);
         }
     }
 
@@ -2399,7 +2433,7 @@ async fn durable_reconnect(
 
     let record = server
         .durables
-        .take(&id, guid, crate::state::now_ms())
+        .take(&key, guid, crate::state::now_ms())
         .await
         .ok()
         .flatten()
