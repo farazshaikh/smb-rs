@@ -2168,6 +2168,14 @@ pub(crate) async fn create(
         }
     }
 
+    // Adding a new file or directory revokes READ caching on a directory lease
+    // held on the parent ([MS-SMB2] §3.3.1.4). A directory lease supports only
+    // {None, Read, Read+Handle}, so losing READ also drops HANDLE (to NONE).
+    const FILE_ACTION_CREATED: u32 = 2;
+    if action == FILE_ACTION_CREATED {
+        break_dir_lease(server, conn, parent_dir(&path), fid_bytes, c::lease::RH);
+    }
+
     // Oplock arbitration ([MS-SMB2] §2.2.23): grant an exclusive oplock only
     // to the sole opener of a file. A contending open first breaks the current
     // holder to NONE, then gets no oplock itself.
@@ -2178,18 +2186,21 @@ pub(crate) async fn create(
     // A lease request (RequestedOplockLevel = LEASE + an RqLs context) uses the
     // lease path; leases and oplocks are arbitrated independently.
     let mut lease_grant: Option<c::LeaseResp> = None;
-    let granted = if is_dir {
-        c::oplock::NONE
-    } else if req.oplock_level == c::oplock::LEASE {
+    // Directory leasing ([MS-SMB2] §3.3.1.4) is an SMB 3.x feature; a directory
+    // lease supports only READ + HANDLE caching.
+    let dir_leasing = is_dir && conn.dialect.map(|d| d >= smb_proto_smb2::negotiate::DIALECT_300).unwrap_or(false);
+    let granted = if req.oplock_level == c::oplock::LEASE && (!is_dir || dir_leasing) {
         if let Some(lr) = req.lease {
             lease_grant = Some(arbitrate_lease(
-                server, conn, &path, fid_bytes, &lr, req_signed,
+                server, conn, &path, fid_bytes, &lr, req_signed, is_dir,
             ));
             conn.lease_keys.insert(fid_bytes, lr.key);
             c::oplock::LEASE
         } else {
             c::oplock::NONE
         }
+    } else if is_dir {
+        c::oplock::NONE
     } else if server.share_modes.open_count(&path) > 1 {
         if let Some(holder) = server.oplocks.take(&path) {
             send_oplock_break(&holder, c::oplock::NONE);
@@ -2499,8 +2510,12 @@ fn arbitrate_lease(
     fid: [u8; 16],
     lr: &c::LeaseReq,
     signed: bool,
+    is_dir: bool,
 ) -> c::LeaseResp {
-    let requested = lr.state & c::lease::RWH;
+    // A directory lease supports only READ + HANDLE caching; a file lease also
+    // supports WRITE caching ([MS-SMB2] §3.3.1.4).
+    let allowed = if is_dir { c::lease::RH } else { c::lease::RWH };
+    let requested = lr.state & allowed;
     if let Some((key, state, epoch, v2)) = server.leases.peek(path) {
         if key == lr.key {
             return c::LeaseResp {
@@ -2539,6 +2554,9 @@ fn arbitrate_lease(
         file_id: fid,
         outbound: conn.outbound.clone(),
         crypto: break_crypto(conn, signed),
+        client_guid: conn.client_guid,
+        breaking: false,
+        break_to: requested,
     };
     server.leases.grant(path, holder);
     counter!("smb_leases_granted_total").increment(1);
@@ -2611,6 +2629,27 @@ fn send_lease_break(
     if outbound.try_send(frame).is_ok() {
         counter!("smb_lease_breaks_total").increment(1);
     }
+}
+
+/// Revoke caching bits (`clear`) on a directory lease held on `dir` when its
+/// contents or state change, unless the change originates from the lease holder
+/// itself ([MS-SMB2] §3.3.1.4). `owner` is the file id of the open performing
+/// the change, used to suppress a self-break.
+pub(crate) fn break_dir_lease(server: &Arc<ServerShared>, conn: &Smb2Conn, dir: &str, owner: [u8; 16], clear: u32) {
+    let req_key = conn.lease_keys.get(&owner).copied();
+    if let Some((key, old, new, epoch, outbound, crypto)) =
+        server
+            .leases
+            .break_conflict(dir, (conn.session_id, owner), req_key, clear)
+    {
+        send_lease_break(&outbound, &crypto, key, old, new, epoch);
+    }
+}
+
+/// The parent directory portion of a normalized share-relative path, or the
+/// share root (`""`) when the path has no parent component.
+pub(crate) fn parent_dir(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map(|(p, _)| p).unwrap_or("")
 }
 
 /// Snapshot the crypto material needed to protect an oplock break sent later
@@ -2764,6 +2803,9 @@ pub(crate) async fn write(
     ) {
         send_lease_break(&out, &crypto, k, old, new, ep);
     }
+    // Modifying a child updates directory metadata: revoke READ caching on any
+    // directory lease held on the parent ([MS-SMB2] §3.3.1.4).
+    break_dir_lease(server, conn, parent_dir(&path), req.file_id.0, c::lease::RH);
     Ok(c::build_write_resp(written as u32))
 }
 

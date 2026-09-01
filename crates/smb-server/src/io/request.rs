@@ -214,10 +214,10 @@ impl Command for CloseCmd {
             return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
         };
         let close_path = CloseReq::parse(res.frame)
-            .and_then(|r| res.conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone())));
+            .and_then(|r| res.conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone(), h.delete_on_close)));
         match crate::smb2::close(res.conn, vfs, res.frame).await {
             Ok(body) => {
-                if let Some((fid, path)) = close_path {
+                if let Some((fid, path, deleted)) = close_path {
                     complete_pending_notifies(res.conn, fid);
                     res.server.locks.release_owner((res.conn.session_id, fid));
                     res.server.share_modes.close(&path, (res.conn.session_id, fid));
@@ -226,6 +226,17 @@ impl Command for CloseCmd {
                     res.server.app_instances.close((res.conn.session_id, fid));
                     res.conn.durable.remove(&fid);
                     let _ = res.server.durables.remove(&fid).await;
+                    // Deleting a child revokes READ caching on a directory lease
+                    // held on the parent ([MS-SMB2] §3.3.1.4).
+                    if deleted {
+                        crate::smb2::break_dir_lease(
+                            res.server,
+                            res.conn,
+                            crate::smb2::parent_dir(&path),
+                            fid,
+                            c::lease::RH,
+                        );
+                    }
                 }
                 Outcome::Final(ctx.respond(Status::SUCCESS, body))
             }
@@ -288,8 +299,34 @@ impl Command for SetInfoCmd {
         let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
             return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
         };
+        // A rename of a child changes directory contents: capture the pre-rename
+        // path so the parent directory lease's READ caching can be revoked
+        // ([MS-SMB2] §3.3.1.4).
+        let rename_old = SetInfoReq::parse(res.frame)
+            .filter(|r| r.info_type == c::info_type::FILE && r.class == smb_proto_smb2::info::file_class::RENAME)
+            .and_then(|r| res.conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone())));
         match crate::smb2::set_info(res.conn, vfs, res.frame).await {
-            Ok(()) => Outcome::Final(ctx.respond(Status::SUCCESS, c::build_set_info_resp())),
+            Ok(()) => {
+                if let Some((fid, old_path)) = rename_old {
+                    crate::smb2::break_dir_lease(
+                        res.server,
+                        res.conn,
+                        crate::smb2::parent_dir(&old_path),
+                        fid,
+                        c::lease::RH,
+                    );
+                    if let Some(new_path) = res.conn.handles.get(&fid).map(|h| h.path.clone()) {
+                        crate::smb2::break_dir_lease(
+                            res.server,
+                            res.conn,
+                            crate::smb2::parent_dir(&new_path),
+                            fid,
+                            c::lease::RH,
+                        );
+                    }
+                }
+                Outcome::Final(ctx.respond(Status::SUCCESS, c::build_set_info_resp()))
+            }
             Err(status) => Outcome::Final(ctx.respond(status, Vec::new())),
         }
     }
@@ -412,8 +449,21 @@ impl Command for OplockBreakCmd {
         if structure_size == c::LeaseBreakAck::STRUCTURE_SIZE {
             return match c::LeaseBreakAck::parse(frame) {
                 Some(ack) => {
-                    res.server.leases.set_state(ack.key, ack.state);
-                    Outcome::Final(ctx.respond(Status::SUCCESS, c::build_lease_break_resp(ack.key, ack.state)))
+                    use crate::state::LeaseAckError;
+                    match res.server.leases.acknowledge(res.conn.client_guid, ack.key, ack.state) {
+                        Ok(state) => Outcome::Final(
+                            ctx.respond(Status::SUCCESS, c::build_lease_break_resp(ack.key, state)),
+                        ),
+                        Err(LeaseAckError::NotFound) => {
+                            Outcome::Final(ctx.respond(Status::OBJECT_NAME_NOT_FOUND, Vec::new()))
+                        }
+                        Err(LeaseAckError::NotBreaking) => {
+                            Outcome::Final(ctx.respond(Status::UNSUCCESSFUL, Vec::new()))
+                        }
+                        Err(LeaseAckError::StateNotAccepted) => {
+                            Outcome::Final(ctx.respond(Status::REQUEST_NOT_ACCEPTED, Vec::new()))
+                        }
+                    }
                 }
                 None => Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new())),
             };

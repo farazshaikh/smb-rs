@@ -496,6 +496,22 @@ pub struct LeaseHolder {
     pub outbound: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// Crypto material to protect the break notification.
     pub crypto: BreakCrypto,
+    /// Client GUID that owns the lease, to validate a break acknowledgment.
+    pub client_guid: [u8; 16],
+    /// True while a break is outstanding and awaiting acknowledgment.
+    pub breaking: bool,
+    /// The lease state the holder is being broken to (ack must be a subset).
+    pub break_to: u32,
+}
+
+/// Why a lease-break acknowledgment was rejected ([MS-SMB2] §3.3.5.22.1).
+pub enum LeaseAckError {
+    /// No lease matches the key/client GUID.
+    NotFound,
+    /// The lease is not currently breaking.
+    NotBreaking,
+    /// The acknowledged state is not a subset of the break-to state.
+    StateNotAccepted,
 }
 
 /// Server-wide lease table: at most one primary lease holder per file path.
@@ -556,6 +572,8 @@ impl LeaseTable {
         let old = h.state;
         h.state = new_state;
         h.epoch = h.epoch.wrapping_add(1);
+        h.breaking = true;
+        h.break_to = new_state;
         Some((h.key, old, h.epoch, h.outbound.clone(), h.crypto.clone()))
     }
 
@@ -590,7 +608,16 @@ impl LeaseTable {
         let old = h.state;
         h.state = new_state;
         h.epoch = h.epoch.wrapping_add(1);
-        Some((h.key, old, new_state, h.epoch, h.outbound.clone(), h.crypto.clone()))
+        h.breaking = true;
+        h.break_to = new_state;
+        Some((
+            h.key,
+            old,
+            new_state,
+            h.epoch,
+            h.outbound.clone(),
+            h.crypto.clone(),
+        ))
     }
 
     /// Record the state a holder settled on after acknowledging a break.
@@ -599,6 +626,31 @@ impl LeaseTable {
         if let Some(h) = held.values_mut().find(|h| h.key == key) {
             h.state = state;
         }
+    }
+
+    /// Validate and apply a client lease-break acknowledgment ([MS-SMB2]
+    /// §3.3.5.22.1): the lease must exist under this client GUID, be breaking,
+    /// and `acked` must be a subset of the break-to state.
+    pub fn acknowledge(
+        &self,
+        client_guid: [u8; 16],
+        key: [u8; 16],
+        acked: u32,
+    ) -> Result<u32, LeaseAckError> {
+        let mut held = self.held.lock().unwrap();
+        let h = held
+            .values_mut()
+            .find(|h| h.key == key && h.client_guid == client_guid)
+            .ok_or(LeaseAckError::NotFound)?;
+        if !h.breaking {
+            return Err(LeaseAckError::NotBreaking);
+        }
+        if acked & !h.break_to != 0 {
+            return Err(LeaseAckError::StateNotAccepted);
+        }
+        h.state = acked;
+        h.breaking = false;
+        Ok(acked)
     }
 
     /// Drop the lease held by `owner` on `path` (on close), returning it.
