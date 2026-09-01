@@ -3196,7 +3196,13 @@ pub(crate) async fn query_info(
                 return Ok(Some(info::encode_stream_info(&streams)));
             }
             let qm = info::QueryMeta::from_vfs(&m);
-            let name = h.rel.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+            let name = if req.class == info::file_class::NORMALIZED_NAME {
+                // Normalized name is the full share-relative path ([MS-FSCC]
+                // §2.4.NormalizedName): no leading separator, backslash-joined.
+                h.rel.trim_start_matches(['\\', '/']).replace('/', "\\")
+            } else {
+                h.rel.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+            };
             info::encode_file_info(req.class, &qm, &name)
                 .map(Some)
                 .ok_or(Status::NOT_IMPLEMENTED)

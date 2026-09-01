@@ -47,6 +47,8 @@ pub mod file_class {
     pub const NETWORK_OPEN: u8 = 0x22;
     /// FileAttributeTagInformation.
     pub const ATTRIBUTE_TAG: u8 = 0x23;
+    /// FileNormalizedNameInformation ([MS-FSCC] §2.4.NormalizedName).
+    pub const NORMALIZED_NAME: u8 = 0x30;
 }
 
 /// FsInformationClass values ([MS-FSCC] §2.5).
@@ -151,6 +153,7 @@ pub fn encode_file_info(class: u8, m: &QueryMeta, name: &str) -> Option<Vec<u8>>
             d.raw(&GENERIC_RW_ACCESS.to_le_bytes());
         }
         file_class::NAME => push_utf16_len(&mut d, name),
+        file_class::NORMALIZED_NAME => push_utf16_len(&mut d, name),
         file_class::MODE => {
             d.raw(&0u32.to_le_bytes());
         }
