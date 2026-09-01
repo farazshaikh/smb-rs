@@ -39,6 +39,9 @@ pub struct HandleRecord {
     pub share: String,
     /// Session that owns the open, validated on reclaim.
     pub session_id: u64,
+    /// User (SecurityContext) that owns the durable handle; a reconnect by a
+    /// different user is rejected with STATUS_ACCESS_DENIED ([MS-SMB2] §3.3.5.9.7).
+    pub owner_user: String,
     /// Granted access mask re-applied when the handle is re-opened.
     pub access: u32,
     /// Share access (`FILE_SHARE_*`) the open was granted.
@@ -229,6 +232,7 @@ pub(crate) fn sample(guid_byte: u8, timeout_ms: u64) -> HandleRecord {
         path: "dir/file.bin".into(),
         share: "public".into(),
         session_id: 0x1234,
+        owner_user: "admin".into(),
         access: 0x0012_019f,
         share_access: 0x7,
         create_options: 0x40,

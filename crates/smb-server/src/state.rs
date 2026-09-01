@@ -633,6 +633,9 @@ pub struct DurableEntry {
     pub options: u32,
     /// Session that owned the handle.
     pub session_id: u64,
+    /// User (SecurityContext) that owns the handle; a reconnect by a different
+    /// user is rejected with STATUS_ACCESS_DENIED ([MS-SMB2] §3.3.5.9.7).
+    pub owner_user: String,
     /// Client GUID that opened the handle (validated on a lease reconnect).
     pub client_guid: [u8; 16],
     /// Lease key associated with the open, if it held a lease.
@@ -654,6 +657,7 @@ impl DurableEntry {
             path: self.rel,
             share: String::new(),
             session_id: self.session_id,
+            owner_user: self.owner_user,
             access: self.access,
             share_access: 0,
             create_options: self.options,

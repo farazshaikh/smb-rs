@@ -1809,10 +1809,11 @@ pub(crate) fn session_setup(
                 && req.blob[MIC_OFFSET..MIC_OFFSET + MIC_SIZE]
                     .iter()
                     .any(|&b| b != 0);
-            let wrapped = if client_mic_nonzero {
-                let Some(key) = conn.session_key else {
-                    return Err(Status::INVALID_PARAMETER);
-                };
+            // A guest/anonymous session has no session key, so it cannot echo a
+            // mechListMIC; it completes with a plain accept-complete instead of
+            // failing ([MS-SMB2] §3.3.5.5: anonymous/guest sessions are unsigned).
+            let wrapped = if client_mic_nonzero && conn.session_key.is_some() {
+                let key = conn.session_key.unwrap();
                 let init = conn
                     .ntlm_blobs
                     .as_ref()
@@ -2253,6 +2254,13 @@ async fn durable_reconnect(
         }
     }
 
+    // Durable-owner check ([MS-SMB2] §3.3.5.9.7 rule 17): a reconnect by a user
+    // other than the one that created the handle fails with STATUS_ACCESS_DENIED
+    // and leaves the preserved handle intact for its real owner.
+    if !peeked.owner_user.eq_ignore_ascii_case(&conn.user) {
+        return Err(Status::ACCESS_DENIED);
+    }
+
     let record = server
         .durables
         .take(&id, guid, crate::state::now_ms())
@@ -2286,6 +2294,7 @@ async fn durable_reconnect(
             access: record.access,
             options: record.create_options,
             session_id: conn.session_id,
+            owner_user: record.owner_user.clone(),
             client_guid: record.client_guid,
             lease_key: record.lease_key,
             persistent,
@@ -2355,6 +2364,7 @@ fn grant_durable(
         access: req.desired_access,
         options: req.options,
         session_id: conn.session_id,
+        owner_user: conn.user.clone(),
         client_guid: conn.client_guid,
         lease_key: req.lease.as_ref().map(|l| l.key),
         persistent,
@@ -2796,6 +2806,7 @@ pub(crate) async fn ioctl(
                     access,
                     options,
                     session_id: conn.session_id,
+                    owner_user: conn.user.clone(),
                     client_guid: conn.client_guid,
                     lease_key: None,
                     persistent: false,
