@@ -136,6 +136,10 @@ pub struct Smb2Conn {
     /// encryption — set when TREE_CONNECT resolves to an encrypted share so the
     /// tree-connect reply itself is sealed ([MS-SMB2] §3.3.5.7). Reset per frame.
     pub seal_current: bool,
+    /// True when the current request arrived inside a transform (encrypted).
+    /// Its AEAD tag is the integrity check, so the inner SMB2 signature is not
+    /// verified ([MS-SMB2] §3.3.5.2.4). Reset per frame.
+    pub req_encrypted: bool,
 }
 
 impl Smb2Conn {
@@ -182,6 +186,7 @@ impl Smb2Conn {
             symlink_error: None,
             resp_tree_id: None,
             seal_current: false,
+            req_encrypted: false,
         }
     }
 
@@ -320,6 +325,7 @@ pub(crate) async fn process_frame(
         conn.peer_encrypts = true;
     }
     conn.seal_current = false;
+    conn.req_encrypted = request_encrypted;
 
     let mut parts: Vec<(Vec<u8>, bool)> = Vec::new(); // (resp, may_wrap)
     let mut related_flags: Vec<bool> = Vec::new(); // request carried FLAGS_RELATED_OPERATIONS
@@ -717,12 +723,11 @@ async fn process_single(
     // Signing policy ([MS-SMB2] §3.3.5.2.3). Two independent rules:
     //  1. A request that carries a signature MUST verify against the
     //     session's signing key, regardless of the server signing policy —
-    //     a bad signature is a tamper/forgery attempt. We only enforce this
-    //     for dialects whose signing key we derive identically to the client
-    //     (2.x / 3.0 / 3.0.2, where the key is the session key or a
-    //     preauth-independent KDF). For 3.1.1 the signing key mixes in the
-    //     pre-auth integrity hash, which we do not yet reproduce bit-for-bit,
-    //     so we skip verification there to avoid rejecting honest traffic.
+    //     a bad signature is a tamper/forgery attempt. This holds for every
+    //     dialect: the 3.1.1 signing key binds to the pre-auth integrity hash,
+    //     which we now reproduce bit-for-bit (canonical negotiate-context
+    //     framing), so honest 3.1.1 traffic verifies and a forged signature
+    //     is rejected.
     //  2. Unsigned traffic from real accounts is rejected only when
     //     --require-signing is set. Sealed (encrypted) sessions carry their
     //     own AEAD integrity guarantee, so signatures are not required there.
@@ -730,12 +735,12 @@ async fn process_single(
         && hdr.command != ss::cmd::SESSION_SETUP
         && !conn.guest
         && !conn.encrypt_data
+        && !conn.req_encrypted
         && conn.signing_key.is_some()
     {
         let key = conn.signing_key.unwrap();
-        let is_311 = conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311);
         if hdr.is_signed() {
-            if !is_311 && !verify_pdu_signature(buf, &key, conn.dialect) {
+            if !verify_pdu_signature(buf, &key, conn.dialect) {
                 counter!("smb_reject_bad_signature_total").increment(1);
                 return Some((
                     response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id),
