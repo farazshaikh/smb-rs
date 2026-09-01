@@ -169,6 +169,7 @@ pub fn build_response_full(
     encryption: Option<u16>,
     offer_signing: bool,
     compression: &[u16],
+    compression_chained: bool,
     require_signing: bool,
 ) -> Vec<u8> {
     let mut b = Vec::with_capacity(128);
@@ -247,8 +248,10 @@ pub fn build_response_full(
         }
 
         // COMPRESSION_CAPABILITIES: advertise the negotiated algorithm set.
+        // Echo the CHAINED flag only when the client requested it ([MS-SMB2]
+        // §3.3.5.4).
         if !compression.is_empty() {
-            let comp = crate::compress::build_compression_caps(compression);
+            let comp = crate::compress::build_compression_caps(compression, compression_chained);
             push_ctx(&mut ctx, ctx_type::COMPRESSION, &comp);
         }
 
@@ -270,5 +273,5 @@ const BODY_START_FIXED: usize = 64 + 64;
 /// pre-3.1.1 dialects (where the spec marks it Reserved); every real-world
 /// parser expects the field's presence.
 pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
-    build_response_full(dialect, guid, now, &[0u8; 32], None, false, &[], false)
+    build_response_full(dialect, guid, now, &[0u8; 32], None, false, &[], false, false)
 }

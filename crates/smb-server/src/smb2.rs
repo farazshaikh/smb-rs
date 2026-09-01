@@ -110,6 +110,9 @@ pub struct Smb2Conn {
     /// Negotiated outbound compression algorithm ([MS-SMB2] §2.2.42), if the
     /// client and server share one; `None` disables compressed responses.
     pub compress_algo: Option<u16>,
+    /// Set when the peer advertised SMB2_COMPRESSION_CAPABILITIES_FLAG_CHAINED
+    /// ([MS-SMB2] §2.2.3.1.3): compressed responses use the chained transform.
+    pub compress_chained: bool,
     /// Set when the current request is a READ carrying
     /// SMB2_READFLAG_REQUEST_COMPRESSED ([MS-SMB2] §2.2.19): the response MUST
     /// be compressed if that shrinks it, regardless of size heuristics.
@@ -182,6 +185,7 @@ impl Smb2Conn {
             resume_keys: HashMap::new(),
             durable: HashMap::new(),
             compress_algo: None,
+            compress_chained: false,
             compress_response: false,
             client_guid: [0u8; 16],
             client_security_mode: 0,
@@ -437,7 +441,12 @@ pub(crate) async fn process_frame(
         let mut payload = out;
         if let Some(algo) = conn.compress_algo {
             if conn.compress_response {
-                if let Some(packed) = smb_proto_smb2::compress::compress_message(&payload, algo) {
+                let packed = if conn.compress_chained {
+                    smb_proto_smb2::compress::compress_message_chained(&payload)
+                } else {
+                    smb_proto_smb2::compress::compress_message(&payload, algo)
+                };
+                if let Some(packed) = packed {
                     payload = packed;
                 }
             }
@@ -1753,10 +1762,11 @@ pub(crate) fn negotiate(
     }
     // Compression: intersect the client's advertised algorithms with ours; a
     // common set enables compressed transforms both ways.
-    let comp_algos = req
+    let comp_ctx = req
         .contexts
         .iter()
-        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION)
+        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION);
+    let comp_algos = comp_ctx
         .map(|c| {
             smb_proto_smb2::compress::negotiate_algos(
                 &smb_proto_smb2::compress::parse_compression_caps(&c.data),
@@ -1767,7 +1777,17 @@ pub(crate) fn negotiate(
         && comp_algos.contains(&smb_proto_smb2::compress::algo::LZNT1)
     {
         conn.compress_algo = Some(smb_proto_smb2::compress::algo::LZNT1);
+        // Use the chained transform for responses when the peer advertised it
+        // ([MS-SMB2] §2.2.3.1.3 SMB2_COMPRESSION_CAPABILITIES_FLAG_CHAINED).
+        conn.compress_chained = comp_ctx.is_some_and(|c| {
+            smb_proto_smb2::compress::parse_compression_flags(&c.data)
+                & smb_proto_smb2::compress::CAP_FLAG_CHAINED
+                != 0
+        });
     }
+    // Echo the CHAINED flag only when the client requested it ([MS-SMB2]
+    // §3.3.5.4); advertising it otherwise would make peers chain every message.
+    let compression_chained = conn.compress_chained;
     NegotiateReply::Reply(
         Status::SUCCESS,
         smb_proto_smb2::negotiate::build_response_full(
@@ -1783,6 +1803,7 @@ pub(crate) fn negotiate(
                 .iter()
                 .any(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING),
             &comp_algos,
+            compression_chained,
             server.require_signing,
         ),
     )

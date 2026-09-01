@@ -21,8 +21,6 @@ use crate::state::{ConnState, ServerShared, Session, next_uid};
 
 /// Depth of the per-connection outbound frame queue.
 const OUTBOUND_QUEUE_DEPTH: usize = 64;
-/// Minimum plaintext response size before opportunistic compression is tried.
-const COMPRESS_MIN_LEN: usize = 1024;
 
 /// Short alias used by command handlers.
 pub type IoCtx<'a> = IoContext<'a>;
@@ -164,18 +162,21 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                 };
                 let start = std::time::Instant::now();
                 if let Some(mut resp) = crate::smb2::process_frame(&server, c2, msg).await {
-                    // Compress a plaintext response when the peer negotiated
-                    // compression: always when the READ asked for it
-                    // (SMB2_READFLAG_REQUEST_COMPRESSED), else opportunistically
-                    // for large payloads. compress_message only wraps it when
-                    // that actually shrinks the frame.
+                    // Compress a plaintext READ response only when the client
+                    // asked for it (SMB2_READFLAG_REQUEST_COMPRESSED); Windows
+                    // does not compress responses opportunistically, and doing
+                    // so breaks peers that reject a chained payload filling the
+                    // buffer. compress_message* wraps only when it shrinks.
                     if let Some(algo) = c2.compress_algo {
-                        if (c2.compress_response || resp.len() > COMPRESS_MIN_LEN)
+                        if c2.compress_response
                             && resp.first() != Some(&PROTO_ID_ENCRYPTED)
                         {
-                            if let Some(packed) =
+                            let packed = if c2.compress_chained {
+                                smb_proto_smb2::compress::compress_message_chained(&resp)
+                            } else {
                                 smb_proto_smb2::compress::compress_message(&resp, algo)
-                            {
+                            };
+                            if let Some(packed) = packed {
                                 resp = packed;
                             }
                         }
