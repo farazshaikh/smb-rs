@@ -1861,6 +1861,24 @@ pub(crate) fn session_setup(
             conn.session_key = out.session_key;
             // Dialect-aware signing key ([MS-SMB2] §3.2.5.3.1 / §3.3.5.2.1).
             conn.authenticated = true;
+            // Per-client dialect consistency ([MS-SMB2] §3.3.5.5.3): a client
+            // that authenticates under a ClientGuid already seen with a
+            // different negotiated dialect has its new session closed with
+            // STATUS_USER_SESSION_DELETED. Skipped for SMB 2.0.2 (no ClientGuid
+            // table) and guest/anonymous sessions.
+            if let Some(dialect) = conn.dialect.filter(|&d| d != smb_proto_smb2::negotiate::DIALECT_202) {
+                use std::sync::LazyLock;
+                static CLIENT_DIALECTS: LazyLock<std::sync::Mutex<std::collections::HashMap<[u8; 16], u16>>> =
+                    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                let mut table = CLIENT_DIALECTS.lock().unwrap();
+                match table.get(&conn.client_guid) {
+                    Some(&seen) if seen != dialect => return Err(Status::USER_SESSION_DELETED),
+                    Some(_) => {}
+                    None => {
+                        table.insert(conn.client_guid, dialect);
+                    }
+                }
+            }
             // A bound channel reuses the original session's crypto material so
             // signatures/encryption stay consistent across channels.
             if binding {

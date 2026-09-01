@@ -35,6 +35,8 @@ impl Status {
     pub const OBJECT_NAME_COLLISION: Status = Status(0xC000_0035);
     /// A component of the path was not found.
     pub const OBJECT_PATH_NOT_FOUND: Status = Status(0xC000_003A);
+    /// The user session referenced has been deleted/invalidated.
+    pub const USER_SESSION_DELETED: Status = Status(0xC000_0203);
     /// The request is not accepted in the current lease-break state.
     pub const REQUEST_NOT_ACCEPTED: Status = Status(0xC000_00D0);
     /// Access to the object was denied.
