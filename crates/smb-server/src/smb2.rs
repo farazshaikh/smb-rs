@@ -2123,16 +2123,19 @@ pub(crate) async fn create(
         }
     }
     // Sharing-violation check ([MS-FSA] §2.1.5.1): reject an open whose access
-    // or share flags conflict with an existing open on the same file. Undo the
-    // just-opened handle on rejection. Directories are not share-checked.
-    if !is_dir
-        && !server.share_modes.try_open(
-            &path,
-            req.desired_access,
-            req.share_access,
-            (conn.session_id, fid_bytes),
-        )
-    {
+    // or share flags conflict with an existing open on the same path. On a
+    // directory, an incompatible open first revokes HANDLE caching on any
+    // directory lease ([MS-SMB2] §3.3.1.4). Undo the just-opened handle on
+    // rejection.
+    if !server.share_modes.try_open(
+        &path,
+        req.desired_access,
+        req.share_access,
+        (conn.session_id, fid_bytes),
+    ) {
+        if is_dir {
+            break_dir_lease_wait(server, conn, &path, fid_bytes, c::lease::HANDLE_CACHING).await;
+        }
         let _ = vfs.close(open).await;
         counter!("smb_sharing_violations_total").increment(1);
         return Err(Status::SHARING_VIOLATION);
@@ -2643,6 +2646,29 @@ pub(crate) fn break_dir_lease(server: &Arc<ServerShared>, conn: &Smb2Conn, dir: 
             .break_conflict(dir, (conn.session_id, owner), req_key, clear)
     {
         send_lease_break(&outbound, &crypto, key, old, new, epoch);
+    }
+}
+
+/// Break a directory lease and wait (briefly) for the holder to acknowledge,
+/// as a HANDLE-caching break requires before the conflicting operation may
+/// proceed ([MS-SMB2] §3.3.1.4).
+pub(crate) async fn break_dir_lease_wait(
+    server: &Arc<ServerShared>,
+    conn: &Smb2Conn,
+    dir: &str,
+    owner: [u8; 16],
+    clear: u32,
+) {
+    let req_key = conn.lease_keys.get(&owner).copied();
+    if let Some((key, old, new, epoch, outbound, crypto)) =
+        server
+            .leases
+            .break_conflict(dir, (conn.session_id, owner), req_key, clear)
+    {
+        let rx = server.leases.register_ack_wait(key);
+        send_lease_break(&outbound, &crypto, key, old, new, epoch);
+        const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let _ = tokio::time::timeout(ACK_TIMEOUT, rx).await;
     }
 }
 

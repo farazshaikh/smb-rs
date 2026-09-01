@@ -522,12 +522,18 @@ pub enum LeaseAckError {
 #[derive(Default)]
 pub struct LeaseTable {
     held: std::sync::Mutex<HashMap<String, LeaseHolder>>,
+    /// One-shot signals delivered when a lease key's break is acknowledged, so
+    /// a conflicting open can wait for a HANDLE-caching break ([MS-SMB2] §3.3.1.4).
+    ack_waiters: std::sync::Mutex<HashMap<[u8; 16], Vec<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl LeaseTable {
     /// Create an empty table.
     pub fn new() -> Self {
-        Self { held: std::sync::Mutex::new(HashMap::new()) }
+        Self {
+            held: std::sync::Mutex::new(HashMap::new()),
+            ack_waiters: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Grant a lease on `path` if none is held; returns false if one exists.
@@ -663,9 +669,29 @@ impl LeaseTable {
         }
     }
 
+    /// Register interest in a lease key's break acknowledgment; the returned
+    /// receiver fires when the holder acknowledges ([MS-SMB2] §3.3.1.4).
+    pub fn register_ack_wait(&self, key: [u8; 16]) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.ack_waiters.lock().unwrap().entry(key).or_default().push(tx);
+        rx
+    }
+
+    /// Wake any opens waiting on a lease key's break acknowledgment.
+    pub fn signal_ack(&self, key: [u8; 16]) {
+        if let Some(waiters) = self.ack_waiters.lock().unwrap().remove(&key) {
+            for w in waiters {
+                let _ = w.send(());
+            }
+        }
+    }
+
     /// Drop every lease held by any open of `session_id`.
     pub fn release_session(&self, session_id: u64) {
-        self.held.lock().unwrap().retain(|_, h| h.session_id != session_id);
+        self.held
+            .lock()
+            .unwrap()
+            .retain(|_, h| h.session_id != session_id);
     }
 }
 

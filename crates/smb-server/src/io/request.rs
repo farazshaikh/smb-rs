@@ -451,9 +451,12 @@ impl Command for OplockBreakCmd {
                 Some(ack) => {
                     use crate::state::LeaseAckError;
                     match res.server.leases.acknowledge(res.conn.client_guid, ack.key, ack.state) {
-                        Ok(state) => Outcome::Final(
-                            ctx.respond(Status::SUCCESS, c::build_lease_break_resp(ack.key, state)),
-                        ),
+                        Ok(state) => {
+                            res.server.leases.signal_ack(ack.key);
+                            Outcome::Final(
+                                ctx.respond(Status::SUCCESS, c::build_lease_break_resp(ack.key, state)),
+                            )
+                        }
                         Err(LeaseAckError::NotFound) => {
                             Outcome::Final(ctx.respond(Status::OBJECT_NAME_NOT_FOUND, Vec::new()))
                         }
