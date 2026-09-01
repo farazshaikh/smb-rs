@@ -94,7 +94,7 @@ protocol,DurableHandleV1_Reconnect_WithoutRequestLease,DurableHandle,pass,230,20
 protocol,DurableHandleV1_WithLeaseV1_WithoutHandleCaching,DurableHandle,pass,127,2026-08-30T13:34:15.4141026-07:00,b6e8e04,
 protocol,BVT_DurableHandleV2_Reconnect_WithBatchOplock,DurableHandleV2,pass,173,2026-08-30T13:33:05.7195661-07:00,b6e8e04,
 protocol,BVT_DurableHandleV2_Reconnect_WithLeaseV1,DurableHandleV2,pass,176,2026-08-30T13:33:05.8934571-07:00,b6e8e04,
-protocol,BVT_PersistentHandle_Reconnect,DurableHandleV2,skip,51,2026-08-30T13:33:06.4207492-07:00,,
+protocol,BVT_PersistentHandle_Reconnect,DurableHandleV2,skip,51,2026-08-30T13:33:06.4207492-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
 protocol,DurableHandleV2_NoPersistenceGrantedOnNonCAShare,DurableHandleV2,pass,82,2026-08-30T13:33:04.9419792-07:00,b6e8e04,
 protocol,DurableHandleV2_Reconnect_IncludeDurableHandleReconnect,DurableHandleV2,pass,175,2026-08-30T13:33:05.3673381-07:00,b6e8e04,
 protocol,DurableHandleV2_Reconnect_IncludeDurableHandleRequest,DurableHandleV2,pass,176,2026-08-30T13:33:05.1905117-07:00,b6e8e04,
@@ -104,15 +104,15 @@ protocol,DurableHandleV2_Reconnect_WithLeaseV1_WithDifferentFileName,DurableHand
 protocol,DurableHandleV2_Reconnect_WithoutPersistence,DurableHandleV2,pass,191,2026-08-30T13:33:04.7504597-07:00,b6e8e04,
 protocol,DurableHandleV2_WithLeaseV1AndV2_WithDifferentLeaseKey,DurableHandleV2,pass,171,2026-08-30T13:33:06.9359476-07:00,b6e8e04,
 protocol,DurableHandleV2_WithLeaseV2_WithoutHandleCaching,DurableHandleV2,pass,132,2026-08-30T13:33:06.2877711-07:00,b6e8e04,
-protocol,PersistentHandle_ReOpenFromDiffClient,DurableHandleV2,skip,51,2026-08-30T13:33:06.8847582-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid,DurableHandleV2,skip,52,2026-08-30T13:33:06.4725384-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_CreateGuidNotFound,DurableHandleV2,skip,51,2026-08-30T13:33:06.5250859-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_SessionNotNull,DurableHandleV2,skip,51,2026-08-30T13:33:06.6283599-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentDurableOwner,DurableHandleV2,skip,50,2026-08-30T13:33:06.6805729-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV1,DurableHandleV2,skip,50,2026-08-30T13:33:06.7316162-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV2,DurableHandleV2,skip,50,2026-08-30T13:33:06.7831011-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutPersistentFlag,DurableHandleV2,skip,51,2026-08-30T13:33:06.5765191-07:00,,
-protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutReconnectLeaseContext,DurableHandleV2,skip,50,2026-08-30T13:33:06.8339160-07:00,,
+protocol,PersistentHandle_ReOpenFromDiffClient,DurableHandleV2,skip,51,2026-08-30T13:33:06.8847582-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid,DurableHandleV2,skip,52,2026-08-30T13:33:06.4725384-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_CreateGuidNotFound,DurableHandleV2,skip,51,2026-08-30T13:33:06.5250859-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_SessionNotNull,DurableHandleV2,skip,51,2026-08-30T13:33:06.6283599-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentDurableOwner,DurableHandleV2,skip,50,2026-08-30T13:33:06.6805729-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV1,DurableHandleV2,skip,50,2026-08-30T13:33:06.7316162-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithDifferentLeaseKeyV2,DurableHandleV2,skip,50,2026-08-30T13:33:06.7831011-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutPersistentFlag,DurableHandleV2,skip,51,2026-08-30T13:33:06.5765191-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
+protocol,PersistentHandle_Reconnect_ViaCreateGuid_WithoutReconnectLeaseContext,DurableHandleV2,skip,50,2026-08-30T13:33:06.8339160-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
 protocol,BVT_Encryption_GlobalEncryptionEnabled,Encryption,pass,237,2026-08-31T19:01:22.2163772-07:00,0c5d8c9,
 protocol,BVT_Encryption_PerShareEncryptionEnabled,Encryption,pass,8198,2026-08-31T19:01:14.0172703-07:00,0c5d8c9,
 protocol,BVT_Encryption_SMB311,Encryption,pass,8223,2026-08-31T19:01:22.4539944-07:00,0c5d8c9,
@@ -140,7 +140,7 @@ protocol,BVT_FileLevelTrim,MS_FSA_Clarification,skip,52,2026-08-30T13:33:39.7844
 protocol,BVT_OffloadReadWrite,MS_FSA_Clarification,skip,51,2026-08-30T13:33:39.6563811-07:00,,
 protocol,BVT_SetZeroData,MS_FSA_Clarification,pass,195,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,FileLevelTrim_Negative_NonZeroKeyInRequest,MS_FSA_Clarification,skip,50,2026-08-30T13:33:39.8367200-07:00,,
-protocol,BVT_PersistentHandles,MS_SMB2_Clarification,skip,51,2026-08-30T13:33:40.0355195-07:00,,
+protocol,BVT_PersistentHandles,MS_SMB2_Clarification,skip,51,2026-08-30T13:33:40.0355195-07:00,c7a1147,Needs persistent handles: GLOBAL_CAP_PERSISTENT_HANDLES + continuously-available (CA) share — not implemented
 protocol,BVT_Resiliency,MS_SMB2_Clarification,skip,64,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_SMBDialect,MS_SMB2_Clarification,pass,53,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_MultiCredit_OneRequestWithMultiCredit,MultiCredit,pass,319,2026-08-30T13:32:54.6195877-07:00,b6e8e04,
