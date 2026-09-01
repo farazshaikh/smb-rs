@@ -253,4 +253,28 @@ mod tests {
             "2b59530a759817720bf9ef519983621c"
         );
     }
+
+    #[cfg(feature = "lib")]
+    #[test]
+    fn aes256_seal_open_roundtrip() {
+        let key = [0x11u8; 32];
+        let aad = b"transform-header-aad";
+        let pt = b"AES-256 sealed SMB payload";
+
+        let g = aes256gcm_seal(&key, &[0x22u8; 12], aad, pt);
+        assert_eq!(
+            aes256gcm_open(&key, &[0x22u8; 12], aad, &g).as_deref(),
+            Some(&pt[..])
+        );
+        // A wrong key must not open the frame.
+        assert!(aes256gcm_open(&[0u8; 32], &[0x22u8; 12], aad, &g).is_none());
+
+        let c = aes256ccm_seal(&key, &[0x33u8; 11], aad, pt);
+        assert_eq!(
+            aes256ccm_open(&key, &[0x33u8; 11], aad, &c).as_deref(),
+            Some(&pt[..])
+        );
+        // Tampered AAD must fail authentication.
+        assert!(aes256ccm_open(&key, &[0x33u8; 11], b"other-aad", &c).is_none());
+    }
 }

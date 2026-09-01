@@ -55,6 +55,10 @@ pub mod ctx_type {
     pub const AES128_CCM: u16 = 0x0001;
     /// CIPHER values: AES-128-GCM.
     pub const AES128_GCM: u16 = 0x0002;
+    /// CIPHER values: AES-256-CCM.
+    pub const AES256_CCM: u16 = 0x0003;
+    /// CIPHER values: AES-256-GCM.
+    pub const AES256_GCM: u16 = 0x0004;
 }
 
 /// One parsed negotiate context.

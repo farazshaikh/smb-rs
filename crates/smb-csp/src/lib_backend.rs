@@ -221,6 +221,67 @@ pub fn aes128ccm_open(
     Some(buf)
 }
 
+/// AES-256-GCM seal ([MS-SMB2] AES-256-GCM cipher); appends the 16-byte tag.
+pub fn aes256gcm_seal(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    use aes_gcm::aead::AeadInPlace;
+    let c = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key)
+        .expect("AES-256-GCM key is exactly 32 bytes");
+    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let mut buf = plaintext.to_vec();
+    c.encrypt_in_place(nonce, aad, &mut buf).expect("GCM seal");
+    buf
+}
+
+/// AES-256-GCM open; `ciphertext` carries the trailing 16-byte tag.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-GCM AEAD
+pub fn aes256gcm_open(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Option<Vec<u8>> {
+    use aes_gcm::aead::AeadInPlace;
+    if ciphertext.len() < 16 {
+        return None;
+    }
+    let c = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key).ok()?;
+    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let mut buf = ciphertext.to_vec();
+    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    Some(buf)
+}
+
+/// AES-256-CCM seal with an 11-byte nonce ([MS-SMB2] CCM variant).
+pub fn aes256ccm_seal(key: &[u8; 32], nonce: &[u8; 11], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    use ccm::aead::AeadInPlace;
+    type AesCcm = ccm::Ccm<aes::Aes256, typenum::U16, typenum::U11>;
+    let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).expect("key is 32 bytes");
+    let nonce = ccm::Nonce::from_slice(nonce);
+    let mut buf = plaintext.to_vec();
+    c.encrypt_in_place(nonce, aad, &mut buf).expect("CCM seal");
+    buf
+}
+
+/// AES-256-CCM open; `ciphertext` carries the trailing 16-byte tag.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-CCM AEAD
+pub fn aes256ccm_open(
+    key: &[u8; 32],
+    nonce: &[u8; 11],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Option<Vec<u8>> {
+    use ccm::aead::AeadInPlace;
+    if ciphertext.len() < 16 {
+        return None;
+    }
+    type AesCcm = ccm::Ccm<aes::Aes256, typenum::U16, typenum::U11>;
+    let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).ok()?;
+    let nonce = ccm::Nonce::from_slice(nonce);
+    let mut buf = ciphertext.to_vec();
+    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    Some(buf)
+}
+
 /// NTLMSSP MIC for the SPNEGO mechListMIC ([RFC 4178] / [MS-NLMP] §3.4.6),
 /// matching samba's calc_ntlmv2_key + ntlmssp_make_packet_signature:
 ///

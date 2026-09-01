@@ -56,8 +56,9 @@ pub struct Smb2Conn {
     /// Chosen encryption cipher (from negotiate ENCRYPTION_CAPABILITIES).
     pub cipher: Option<u16>,
     /// (client-to-server, server-to-client) cipher keys; `None` until the
-    /// session enables encryption ([MS-SMB2] §3.1.4.1 labels).
-    pub enc_keys: Option<([u8; 16], [u8; 16])>,
+    /// session enables encryption ([MS-SMB2] §3.1.4.1 labels). AES-128 uses the
+    /// first 16 bytes; AES-256 uses all 32.
+    pub enc_keys: Option<([u8; 32], [u8; 32])>,
     /// True once every subsequent message for this session must be wrapped
     /// in a transform header (SMB2_SESSION_FLAG_ENCRYPT_DATA).
     pub encrypt_data: bool,
@@ -440,6 +441,27 @@ fn file_id_body_offset(command: u16) -> Option<usize> {
     }
 }
 
+/// True for the GCM cipher variants ([MS-SMB2] §2.2.3.1.2).
+fn cipher_is_gcm(cipher: u16) -> bool {
+    use smb_proto_smb2::negotiate::ctx_type::{AES128_GCM, AES256_GCM};
+    matches!(cipher, AES128_GCM | AES256_GCM)
+}
+
+/// True for the AES-256 cipher variants (32-byte keys).
+fn cipher_is_256(cipher: u16) -> bool {
+    use smb_proto_smb2::negotiate::ctx_type::{AES256_CCM, AES256_GCM};
+    matches!(cipher, AES256_GCM | AES256_CCM)
+}
+
+/// Key length in bytes for a negotiated cipher.
+fn cipher_key_len(cipher: u16) -> usize {
+    if cipher_is_256(cipher) {
+        32
+    } else {
+        16
+    }
+}
+
 /// Wrap an assembled response into a transform frame ([MS-SMB2] §2.2.41)
 /// using the S2C cipher key.
 #[cfg(not(feature = "lib"))]
@@ -450,7 +472,7 @@ fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
 #[cfg(not(feature = "lib"))]
 fn seal_pdu(
     session_id: u64,
-    enc_keys: ([u8; 16], [u8; 16]),
+    enc_keys: ([u8; 32], [u8; 32]),
     cipher: u16,
     msg: &[u8],
 ) -> Option<Vec<u8>> {
@@ -467,12 +489,12 @@ fn encrypt_response(conn: &Smb2Conn, msg: &[u8]) -> Option<Vec<u8>> {
 #[cfg(not(feature = "handrolled"))]
 fn seal_pdu(
     session_id: u64,
-    enc_keys: ([u8; 16], [u8; 16]),
+    enc_keys: ([u8; 32], [u8; 32]),
     cipher: u16,
     msg: &[u8],
 ) -> Option<Vec<u8>> {
     let (_c2s, s2c) = enc_keys;
-    let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
+    let gcm = cipher_is_gcm(cipher);
     let iv_size = if gcm {
         aead::GCM_NONCE_LEN
     } else {
@@ -484,20 +506,32 @@ fn seal_pdu(
 
     let mut tf = smb_proto_smb2::commands::build_transform(session_id, &nonce_field, msg.len());
     // AAD region: everything after the Nonce field ([MS-SMB2] §3.1.4.2).
-    let sealed = if gcm {
-        smb_auth::crypto::aes128gcm_seal(
+    let aad = &tf[smb_proto_smb2::commands::tf_off::NONCE..];
+    let sealed = match (gcm, cipher_is_256(cipher)) {
+        (true, true) => smb_auth::crypto::aes256gcm_seal(
             &s2c,
             nonce_field[..aead::GCM_NONCE_LEN].try_into().ok()?,
-            &tf[smb_proto_smb2::commands::tf_off::NONCE..],
+            aad,
             msg,
-        )
-    } else {
-        smb_auth::crypto::aes128ccm_seal(
+        ),
+        (true, false) => smb_auth::crypto::aes128gcm_seal(
+            s2c[..16].try_into().ok()?,
+            nonce_field[..aead::GCM_NONCE_LEN].try_into().ok()?,
+            aad,
+            msg,
+        ),
+        (false, true) => smb_auth::crypto::aes256ccm_seal(
             &s2c,
             nonce_field[..aead::CCM_NONCE_LEN].try_into().ok()?,
-            &tf[smb_proto_smb2::commands::tf_off::NONCE..],
+            aad,
             msg,
-        )
+        ),
+        (false, false) => smb_auth::crypto::aes128ccm_seal(
+            s2c[..16].try_into().ok()?,
+            nonce_field[..aead::CCM_NONCE_LEN].try_into().ok()?,
+            aad,
+            msg,
+        ),
     };
     // Tag lands in the Signature field; ciphertext follows the header.
     let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
@@ -538,7 +572,8 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
         tracing::warn!("no cipher negotiated");
         return None;
     };
-    let gcm = cipher == smb_proto_smb2::negotiate::ctx_type::AES128_GCM;
+    let gcm = cipher_is_gcm(cipher);
+    let is256 = cipher_is_256(cipher);
     let aad = frame
         .get(smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::HDR_SIZE)?;
     let payload =
@@ -549,43 +584,38 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
     let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
     let mut sealed = payload.to_vec();
     sealed.extend_from_slice(frame.get(tag_at..tag_at + aead::TAG_LEN)?);
-    let pt = if gcm {
-        match smb_auth::crypto::aes128gcm_open(
+    let nonce = &frame[smb_proto_smb2::commands::tf_off::NONCE..];
+    let opened = match (gcm, is256) {
+        (true, true) => smb_auth::crypto::aes256gcm_open(
             &c2s,
-            frame[smb_proto_smb2::commands::tf_off::NONCE..]
-                .get(..aead::GCM_NONCE_LEN)?
-                .try_into()
-                .ok()?,
+            nonce.get(..aead::GCM_NONCE_LEN)?.try_into().ok()?,
             aad,
             &sealed,
-        ) {
-            Some(p) => p,
-            None => {
-                tracing::warn!(
-                    nonce = %hex_str(&frame[smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::NONCE+aead::GCM_NONCE_LEN]),
-                    aad_len = aad.len(),
-                    payload_len = payload.len(),
-                    orig_len = tf.original_len,
-                    "gcm open failed"
-                );
-                return None;
-            }
-        }
-    } else {
-        match smb_auth::crypto::aes128ccm_open(
-            &c2s,
-            frame[smb_proto_smb2::commands::tf_off::NONCE..]
-                .get(..aead::CCM_NONCE_LEN)?
-                .try_into()
-                .ok()?,
+        ),
+        (true, false) => smb_auth::crypto::aes128gcm_open(
+            c2s[..16].try_into().ok()?,
+            nonce.get(..aead::GCM_NONCE_LEN)?.try_into().ok()?,
             aad,
             &sealed,
-        ) {
-            Some(p) => p,
-            None => {
-                tracing::warn!("ccm open failed");
-                return None;
-            }
+        ),
+        (false, true) => smb_auth::crypto::aes256ccm_open(
+            &c2s,
+            nonce.get(..aead::CCM_NONCE_LEN)?.try_into().ok()?,
+            aad,
+            &sealed,
+        ),
+        (false, false) => smb_auth::crypto::aes128ccm_open(
+            c2s[..16].try_into().ok()?,
+            nonce.get(..aead::CCM_NONCE_LEN)?.try_into().ok()?,
+            aad,
+            &sealed,
+        ),
+    };
+    let pt = match opened {
+        Some(p) => p,
+        None => {
+            tracing::warn!(cipher = cipher, aad_len = aad.len(), "aead open failed");
+            return None;
         }
     };
     counter!("smb_decrypted_msgs_total").increment(1);
@@ -910,10 +940,15 @@ async fn process_single(
                 Some(smb_proto_smb2::negotiate::DIALECT_311) => &conn.preauth_hash,
                 _ => b"ServerIn \0", // trailing space per [MS-SMB2] §3.1.4.1
             };
-            let kdf = |label: &[u8], context: &[u8]| -> [u8; 16] {
-                smb_auth::crypto::kdf_counter_mode_hmac_sha256(&key, label, context, 16)
-                    .try_into()
-                    .unwrap()
+            // AES-128 derives a 16-byte key; AES-256 derives 32 bytes (the KDF
+            // encodes the requested length as L in bits per [SP800-108]).
+            let klen = cipher_key_len(conn.cipher.unwrap());
+            let kdf = |label: &[u8], context: &[u8]| -> [u8; 32] {
+                let derived =
+                    smb_auth::crypto::kdf_counter_mode_hmac_sha256(&key, label, context, klen);
+                let mut k = [0u8; 32];
+                k[..klen].copy_from_slice(&derived);
+                k
             };
             conn.enc_keys = Some((kdf(c2s_label, c2s_ctx), kdf(s2c_label, s2c_ctx)));
             // Only *require* encryption (force-seal + set ENCRYPT_DATA on this
@@ -1050,7 +1085,7 @@ fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>) -> boo
 struct AsyncCrypto {
     dialect: Option<u16>,
     signing_key: Option<[u8; 16]>,
-    enc_keys: Option<([u8; 16], [u8; 16])>,
+    enc_keys: Option<([u8; 32], [u8; 32])>,
     cipher: Option<u16>,
     session_id: u64,
     encrypt: bool,
@@ -1649,21 +1684,19 @@ pub(crate) fn negotiate(
         })
         .unwrap_or_default();
     let chosen = {
-        // GCM preferred by default ([MS-SMB2] §3.1.4.1); override with
-        // RUSTSMB_CIPHER=ccm to exercise the CCM path live.
-        let prefer_ccm = std::env::var("RUSTSMB_CIPHER")
-            .map(|v| v.eq_ignore_ascii_case("ccm"))
-            .unwrap_or(false);
-        let order = if prefer_ccm {
-            [
-                smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
-                smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
-            ]
-        } else {
-            [
-                smb_proto_smb2::negotiate::ctx_type::AES128_GCM,
-                smb_proto_smb2::negotiate::ctx_type::AES128_CCM,
-            ]
+        // GCM preferred by default ([MS-SMB2] §3.1.4.1). RUSTSMB_CIPHER pins a
+        // preference to exercise a specific cipher live: ccm, 256gcm, 256ccm.
+        let pref = std::env::var("RUSTSMB_CIPHER")
+            .unwrap_or_default()
+            .to_lowercase();
+        use smb_proto_smb2::negotiate::ctx_type::{
+            AES128_CCM, AES128_GCM, AES256_CCM, AES256_GCM,
+        };
+        let order = match pref.as_str() {
+            "ccm" | "128ccm" => [AES128_CCM, AES256_CCM, AES128_GCM, AES256_GCM],
+            "256" | "256gcm" => [AES256_GCM, AES128_GCM, AES256_CCM, AES128_CCM],
+            "256ccm" => [AES256_CCM, AES128_CCM, AES256_GCM, AES128_GCM],
+            _ => [AES128_GCM, AES256_GCM, AES128_CCM, AES256_CCM],
         };
         order.into_iter().find(|ours| client_ciphers.contains(ours))
     };

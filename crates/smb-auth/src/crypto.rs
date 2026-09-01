@@ -7,6 +7,7 @@
 
 #[cfg(feature = "lib")]
 pub use smb_csp::{aes128ccm_open, aes128ccm_seal, aes128gcm_open, aes128gcm_seal,
+    aes256ccm_open, aes256ccm_seal, aes256gcm_open, aes256gcm_seal,
     ntlm_mech_list_mic};
 pub use smb_csp::{
     aes128_cmac,

@@ -409,7 +409,7 @@ pub struct BreakCrypto {
     /// Signing key, if the session signs.
     pub signing_key: Option<[u8; 16]>,
     /// (c2s, s2c) cipher keys, if a cipher is negotiated.
-    pub enc_keys: Option<([u8; 16], [u8; 16])>,
+    pub enc_keys: Option<([u8; 32], [u8; 32])>,
     /// Negotiated cipher id.
     pub cipher: Option<u16>,
     /// Session id for the transform header.
@@ -691,7 +691,7 @@ pub struct SessionEntry {
     /// Negotiated cipher id.
     pub cipher: Option<u16>,
     /// (client-to-server, server-to-client) cipher keys.
-    pub enc_keys: Option<([u8; 16], [u8; 16])>,
+    pub enc_keys: Option<([u8; 32], [u8; 32])>,
     /// Whether the session forces encryption.
     pub encrypt_data: bool,
 }
