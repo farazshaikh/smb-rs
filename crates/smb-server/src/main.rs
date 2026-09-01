@@ -66,6 +66,11 @@ struct Args {
     #[arg(long = "encrypt-share", value_name = "NAME")]
     encrypt_shares: Vec<String>,
 
+    /// Advertise SMB2_SHAREFLAG_COMPRESS_DATA on a share by NAME (repeatable):
+    /// its TREE_CONNECT response signals the client may compress traffic.
+    #[arg(long = "compress-share", value_name = "NAME")]
+    compress_shares: Vec<String>,
+
     /// Durable-handle store backend: `mem` (non-durable) or `redb` (survives
     /// a server restart, enabling persistent-handle reclaim).
     #[arg(long = "handle-store", default_value = "mem")]
@@ -191,13 +196,16 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
     let mut map = HashMap::new();
     let encrypt_set: std::collections::HashSet<String> =
         args.encrypt_shares.iter().map(|s| s.to_lowercase()).collect();
+    let compress_set: std::collections::HashSet<String> =
+        args.compress_shares.iter().map(|s| s.to_lowercase()).collect();
     for (name, root) in shares {
         let lname = name.to_lowercase();
         let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(root.clone()));
         let encrypt = encrypt_set.contains(&lname);
+        let compress = compress_set.contains(&lname);
         map.insert(
             lname.clone(),
-            state::Share { name, root: root.into(), vfs, is_ipc: false, encrypt },
+            state::Share { name, root: root.into(), vfs, is_ipc: false, encrypt, compress },
         );
     }
     // Virtual IPC$ share for named-pipe traffic.
@@ -209,6 +217,7 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
             vfs: Arc::new(smb_backend_posix::PosixVfs::new("/")),
             is_ipc: true,
             encrypt: false,
+            compress: false,
         },
     );
     map

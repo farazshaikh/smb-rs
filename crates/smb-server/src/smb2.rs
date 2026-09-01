@@ -1966,7 +1966,7 @@ pub(crate) fn tree_connect(
     server: &Arc<ServerShared>,
     conn: &mut Smb2Conn,
     buf: &[u8],
-) -> Result<(String, u8, bool), Status> {
+) -> Result<(String, u8, bool, bool), Status> {
     let path_len = g16(buf, c::tcon_off::PATH_LENGTH) as usize;
     let path_off = g16(buf, c::tcon_off::PATH_OFFSET) as usize;
     let raw = buf.get(path_off..path_off + path_len).unwrap_or(&[]);
@@ -1988,7 +1988,7 @@ pub(crate) fn tree_connect(
     } else {
         c::share_type::DISK
     };
-    Ok((name, share_type, share.encrypt))
+    Ok((name, share_type, share.encrypt, share.compress))
 }
 
 // ---------------- CREATE ----------------
@@ -3764,6 +3764,7 @@ mod oplock_tests {
                 vfs,
                 is_ipc: false,
                 encrypt: false,
+                compress: false,
             },
         );
         Arc::new(ServerShared {
@@ -3879,6 +3880,7 @@ mod lease_tests {
                 vfs,
                 is_ipc: false,
                 encrypt: false,
+                compress: false,
             },
         );
         Arc::new(ServerShared {
@@ -4250,6 +4252,7 @@ mod durable_tests {
                 vfs,
                 is_ipc: false,
                 encrypt: false,
+                compress: false,
             },
         );
         Arc::new(ServerShared {

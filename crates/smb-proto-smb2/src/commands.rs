@@ -1155,6 +1155,9 @@ pub fn build_set_info_resp() -> Vec<u8> {
 /// ShareFlags bit requiring SMB3 encryption on the tree ([MS-SMB2] §2.2.10).
 pub const SHAREFLAG_ENCRYPT_DATA: u32 = 0x0000_8000;
 
+/// ShareFlags bit advertising compression support on the tree ([MS-SMB2] §2.2.10).
+pub const SHAREFLAG_COMPRESS_DATA: u32 = 0x0010_0000;
+
 /// TREE_CONNECT response body (§2.2.10.2): 16-byte fixed part, no buffer.
 pub fn build_tree_connect_resp(share_type: u8, share_flags: u32) -> Vec<u8> {
     let mut b = Vec::with_capacity(16);

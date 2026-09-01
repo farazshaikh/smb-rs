@@ -466,16 +466,18 @@ impl Command for TreeConnectCmd {
     type Request = TreeConnectReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: TreeConnectReq, res: &mut Resources<'_>) -> Outcome {
         match crate::smb2::tree_connect(res.server, res.conn, res.frame) {
-            Ok((name, share_type, encrypt)) => {
+            Ok((name, share_type, encrypt, compress)) => {
                 let new_tid = crate::smb2::next_tree_id();
                 res.conn.trees.insert(new_tid, name);
                 res.conn.resp_tree_id = Some(new_tid);
-                let share_flags = if encrypt {
+                let mut share_flags = 0;
+                if encrypt {
                     res.conn.seal_current = true;
-                    c::SHAREFLAG_ENCRYPT_DATA
-                } else {
-                    0
-                };
+                    share_flags |= c::SHAREFLAG_ENCRYPT_DATA;
+                }
+                if compress {
+                    share_flags |= c::SHAREFLAG_COMPRESS_DATA;
+                }
                 counter!("smb_tcons_total").increment(1);
                 gauge!("smb_trees_active").increment(1.0);
                 Outcome::Final(ctx.respond(Status::SUCCESS, c::build_tree_connect_resp(share_type, share_flags)))

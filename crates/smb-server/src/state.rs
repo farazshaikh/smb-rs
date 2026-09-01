@@ -48,6 +48,9 @@ pub struct Share {
     /// its TREE_CONNECT response advertises the flag and every message on the
     /// tree is sealed ([MS-SMB2] §3.3.5.7).
     pub encrypt: bool,
+    /// True when the share advertises SMB2_SHAREFLAG_COMPRESS_DATA in its
+    /// TREE_CONNECT response ([MS-SMB2] §2.2.10).
+    pub compress: bool,
 }
 
 /// Global (per-process) server configuration and user database.
