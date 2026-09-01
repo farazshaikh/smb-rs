@@ -1516,6 +1516,8 @@ pub mod fsctl {
     pub const SET_SPARSE: u32 = 0x0009_00C4;
     /// FSCTL_SET_ZERO_DATA ([MS-FSCC] §2.3.79) — punch a zero range.
     pub const SET_ZERO_DATA: u32 = 0x0009_80C8;
+    /// FSCTL_FILE_LEVEL_TRIM ([MS-FSCC] §2.3.73) — deallocate byte ranges.
+    pub const FILE_LEVEL_TRIM: u32 = 0x0009_8208;
     /// FSCTL_LMR_REQ_RESILIENCY.
     pub const LMR_REQUEST_RESILIENCY: u32 = 0x0014_01D4;
     /// FSCTL_PIPE_TRANSACT ([MS-SMB2] §2.2.31.10 "Transact named pipe"):
@@ -1681,6 +1683,21 @@ pub fn parse_zero_data(input: &[u8]) -> Option<(u64, u64)> {
         return None;
     }
     Some((g64(input, 0), g64(input, 8)))
+}
+
+/// Parse an FSCTL_FILE_LEVEL_TRIM request ([MS-FSCC] §2.3.73) into its `Key`
+/// and `NumRanges` fields. The per-range array follows but is advisory.
+pub fn parse_file_level_trim(input: &[u8]) -> Option<(u32, u32)> {
+    if input.len() < 8 {
+        return None;
+    }
+    Some((g32(input, 0), g32(input, 4)))
+}
+
+/// Build an FSCTL_FILE_LEVEL_TRIM_OUTPUT ([MS-FSCC] §2.3.74) reporting the
+/// number of ranges processed.
+pub fn build_file_level_trim_resp(num_ranges_processed: u32) -> Vec<u8> {
+    num_ranges_processed.to_le_bytes().to_vec()
 }
 
 // ---------------- Encryption transform header ([MS-SMB2] §2.2.41) ----------------

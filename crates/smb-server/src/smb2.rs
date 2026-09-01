@@ -2181,18 +2181,21 @@ pub(crate) async fn create(
 
     // Oplock arbitration ([MS-SMB2] §2.2.23): grant an exclusive oplock only
     // to the sole opener of a file. A contending open first breaks the current
-    // holder to NONE, then gets no oplock itself.
+    // holder to NONE, then gets no oplock itself. A LEASE request without an
+    // RqLs context is treated as an ordinary oplock request ([MS-SMB2]
+    // §3.3.5.9 "Oplock Acquisition": any non-NONE level acquires an oplock).
+    let lease_context = req.oplock_level == c::oplock::LEASE && req.lease.is_some();
     let wants_oplock = matches!(
         req.oplock_level,
         c::oplock::LEVEL_II | c::oplock::EXCLUSIVE | c::oplock::BATCH
-    );
+    ) || (req.oplock_level == c::oplock::LEASE && req.lease.is_none());
     // A lease request (RequestedOplockLevel = LEASE + an RqLs context) uses the
     // lease path; leases and oplocks are arbitrated independently.
     let mut lease_grant: Option<c::LeaseResp> = None;
     // Directory leasing ([MS-SMB2] §3.3.1.4) is an SMB 3.x feature; a directory
     // lease supports only READ + HANDLE caching.
     let dir_leasing = is_dir && conn.dialect.map(|d| d >= smb_proto_smb2::negotiate::DIALECT_300).unwrap_or(false);
-    let granted = if req.oplock_level == c::oplock::LEASE && (!is_dir || dir_leasing) {
+    let granted = if lease_context && (!is_dir || dir_leasing) {
         if let Some(lr) = req.lease {
             lease_grant = Some(arbitrate_lease(
                 server, conn, &path, fid_bytes, &lr, req_signed, is_dir,
@@ -3030,6 +3033,20 @@ pub(crate) async fn ioctl(
             Status::SUCCESS,
             c::build_ioctl_resp(req.file_id, req.ctl_code, &[]),
         ),
+        // FSCTL_FILE_LEVEL_TRIM ([MS-FSCC] §2.3.73): deallocate byte ranges. The
+        // Key field MUST be zero; the trim is advisory, so every requested range
+        // is reported as processed (§2.3.74).
+        c::fsctl::FILE_LEVEL_TRIM => match c::parse_file_level_trim(&req.input) {
+            Some((0, num_ranges)) => (
+                Status::SUCCESS,
+                c::build_ioctl_resp(
+                    req.file_id,
+                    req.ctl_code,
+                    &c::build_file_level_trim_resp(num_ranges),
+                ),
+            ),
+            _ => return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new()),
+        },
         // FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2): our named pipes are
         // always instantiable, so the wait completes immediately.
         c::fsctl::PIPE_WAIT => (
