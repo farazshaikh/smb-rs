@@ -110,6 +110,10 @@ pub struct Smb2Conn {
     /// Negotiated outbound compression algorithm ([MS-SMB2] §2.2.42), if the
     /// client and server share one; `None` disables compressed responses.
     pub compress_algo: Option<u16>,
+    /// Set when the current request is a READ carrying
+    /// SMB2_READFLAG_REQUEST_COMPRESSED ([MS-SMB2] §2.2.19): the response MUST
+    /// be compressed if that shrinks it, regardless of size heuristics.
+    pub compress_response: bool,
     /// Client's NEGOTIATE parameters, retained to validate a later
     /// FSCTL_VALIDATE_NEGOTIATE_INFO request ([MS-SMB2] §3.3.5.15.12).
     pub client_guid: [u8; 16],
@@ -178,6 +182,7 @@ impl Smb2Conn {
             resume_keys: HashMap::new(),
             durable: HashMap::new(),
             compress_algo: None,
+            compress_response: false,
             client_guid: [0u8; 16],
             client_security_mode: 0,
             client_capabilities: 0,
@@ -713,6 +718,10 @@ async fn process_single(
         len = buf.len(),
         "smb2 request"
     );
+    // SMB2_READFLAG_REQUEST_COMPRESSED (0x02) in a READ Flags byte (body off 3)
+    // asks the server to compress the read response ([MS-SMB2] §2.2.19/§3.3.5.12).
+    conn.compress_response = hdr.command == ss::cmd::READ
+        && buf.get(hdr::LEN + 3).map(|f| f & 0x02 != 0).unwrap_or(false);
     // Request half of the 3.1.1 pre-auth integrity hash ([MS-SMB2] §3.3.4.1.1):
     // every NEGOTIATE / SESSION_SETUP message updates it before processing.
     let is_preauth_msg = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP);

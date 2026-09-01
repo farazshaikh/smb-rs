@@ -160,10 +160,13 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                 };
                 let start = std::time::Instant::now();
                 if let Some(mut resp) = crate::smb2::process_frame(&server, c2, msg).await {
-                    // Opportunistically compress large plaintext responses when
-                    // the peer negotiated compression (never a sealed frame).
+                    // Compress a plaintext response when the peer negotiated
+                    // compression: always when the READ asked for it
+                    // (SMB2_READFLAG_REQUEST_COMPRESSED), else opportunistically
+                    // for large payloads. compress_message only wraps it when
+                    // that actually shrinks the frame.
                     if let Some(algo) = c2.compress_algo {
-                        if resp.len() > COMPRESS_MIN_LEN
+                        if (c2.compress_response || resp.len() > COMPRESS_MIN_LEN)
                             && resp.first() != Some(&PROTO_ID_ENCRYPTED)
                         {
                             if let Some(packed) =
