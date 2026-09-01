@@ -1594,6 +1594,26 @@ pub(crate) fn negotiate(
             );
         }
     }
+    // SMB2_COMPRESSION_CAPABILITIES validation ([MS-SMB2] §3.3.5.4): a present
+    // context must be at least the fixed structure size (8 bytes) and advertise
+    // a non-zero CompressionAlgorithmCount, else the negotiate fails with
+    // STATUS_INVALID_PARAMETER.
+    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+        if let Some(c) = req
+            .contexts
+            .iter()
+            .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION)
+        {
+            let count = c
+                .data
+                .get(0..2)
+                .map(|s| u16::from_le_bytes([s[0], s[1]]))
+                .unwrap_or(0);
+            if c.data.len() < 8 || count == 0 {
+                return NegotiateReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+            }
+        }
+    }
     // Must match the Capabilities word written by build_response_full below so
     // VALIDATE_NEGOTIATE_INFO echoes it.
     conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
