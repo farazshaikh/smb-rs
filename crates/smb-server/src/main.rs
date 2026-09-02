@@ -5,6 +5,7 @@ pub mod cmds;
 pub mod dispatch;
 pub mod io;
 pub mod security;
+pub mod session_scope;
 pub mod smb2;
 pub mod srvsvc;
 pub mod state;

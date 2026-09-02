@@ -71,8 +71,6 @@ pub struct Smb2Conn {
     /// Challenge token sent during leg 1 (for the mechListMIC input).
     pub ntlm_targ: Option<Vec<u8>>,
     /// Raw challenge token sent during leg 1 (for mechListMIC).
-    /// TID -> share name map.
-    pub trees: HashMap<u32, String>,
     /// Open handles keyed by 16-byte SMB2 FileId.
     pub handles: HashMap<[u8; 16], Box<smb_vfs::OpenFile>>,
     /// Lease key each open handle joined, so a write/open from a co-holder of
@@ -152,6 +150,10 @@ pub struct Smb2Conn {
     /// §3.3.5.5.3): the connection derives its own Channel.SigningKey but MUST
     /// NOT overwrite the shared session's stored crypto material.
     pub binding: bool,
+    /// Per-session shared state (Session.TreeConnectTable + Session.OpenTable)
+    /// this channel is bound to ([MS-SMB2] §3.3.5.5.3); `None` until a session
+    /// is established. Channels bound to one session share the same scope.
+    pub scope: Option<crate::session_scope::ScopeRef>,
 }
 
 impl Smb2Conn {
@@ -176,7 +178,6 @@ impl Smb2Conn {
             peer_encrypts: false,
             ntlm_blobs: None,
             ntlm_targ: None,
-            trees: HashMap::new(),
             handles: HashMap::new(),
             lease_keys: HashMap::new(),
             pipes: HashMap::new(),
@@ -202,12 +203,39 @@ impl Smb2Conn {
             seal_current: false,
             req_encrypted: false,
             binding: false,
+            scope: None,
         }
     }
 
     /// Clone the outbound frame sender for a background/async task.
     pub fn outbound(&self) -> mpsc::Sender<Vec<u8>> {
         self.outbound.clone()
+    }
+
+    /// Share name bound to `tid` in the session's tree table, if any.
+    pub(crate) fn tree_name(&self, tid: u32) -> Option<String> {
+        self.scope.as_ref()?.borrow().trees.get(&tid).cloned()
+    }
+
+    /// True when `tid` names a tree in the session's tree table.
+    pub(crate) fn tree_exists(&self, tid: u32) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|s| s.borrow().trees.contains_key(&tid))
+    }
+
+    /// Bind `tid` to `name` in the session's tree table.
+    pub(crate) fn tree_insert(&self, tid: u32, name: String) {
+        if let Some(s) = self.scope.as_ref() {
+            s.borrow_mut().trees.insert(tid, name);
+        }
+    }
+
+    /// Remove `tid` from the session's tree table.
+    pub(crate) fn tree_remove(&self, tid: u32) {
+        if let Some(s) = self.scope.as_ref() {
+            s.borrow_mut().trees.remove(&tid);
+        }
     }
 
     /// Allocate a fresh per-connection async id for a STATUS_PENDING op.
@@ -434,9 +462,8 @@ pub(crate) async fn process_frame(
     let first_tid = if work.len() >= hdr::LEN { g32(&work, hdr::TREE_ID) } else { 0 };
     let tree_requires_seal = conn.seal_current
         || conn
-            .trees
-            .get(&first_tid)
-            .and_then(|n| server.shares.get(n))
+            .tree_name(first_tid)
+            .and_then(|n| server.shares.get(&n))
             .is_some_and(|s| s.encrypt);
     if (conn.encrypt_data || request_encrypted || tree_requires_seal)
         && parts.iter().all(|(_, w)| *w)
@@ -791,7 +818,7 @@ async fn process_single(
     );
     if needs_tree
         && hdr.flags & hdr_flags::RELATED_OPERATIONS == 0
-        && !conn.trees.contains_key(&hdr.tree_id)
+        && !conn.tree_exists(hdr.tree_id)
     {
         return Some((
             response(&hdr, Status::NETWORK_NAME_DELETED, Vec::new(), conn.session_id),
@@ -878,9 +905,8 @@ async fn process_single(
         && hdr.command != ss::cmd::SESSION_SETUP
         && hdr.command != ss::cmd::TREE_CONNECT
         && conn
-            .trees
-            .get(&hdr.tree_id)
-            .and_then(|n| server.shares.get(n))
+            .tree_name(hdr.tree_id)
+            .and_then(|n| server.shares.get(&n))
             .map(|s| s.encrypt)
             .unwrap_or(false)
     {
@@ -1949,6 +1975,10 @@ pub(crate) fn session_setup(
                     conn.dialect = entry.dialect.or(conn.dialect);
                 }
             }
+            // Attach to the session's shared scope (Session.TreeConnectTable +
+            // OpenTable). A binding channel reuses the scope the first channel
+            // created; a new session creates it ([MS-SMB2] §3.3.5.5.3).
+            conn.scope = Some(crate::session_scope::get_or_create(conn.session_id));
             let flags: u16 = if out.guest { 0x0001 } else { 0x0000 };
             // Close the SPNEGO exchange. When the AUTHENTICATE message
             // carried a mechListMIC (required by --client-protection=encrypt
@@ -3279,9 +3309,8 @@ pub(crate) fn close_all_handles(conn: &mut Smb2Conn) {
 
 /// True when the tree behind `tid` is the virtual IPC$ share.
 pub(crate) fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32) -> bool {
-    conn.trees
-        .get(&tid)
-        .and_then(|n| server.shares.get(n))
+    conn.tree_name(tid)
+        .and_then(|n| server.shares.get(&n))
         .map(|s| s.is_ipc)
         .unwrap_or(false)
 }
@@ -3289,9 +3318,8 @@ pub(crate) fn share_is_ipc(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32
 /// True when the tree behind `tid` is a continuously-available share, which may
 /// grant persistent handles ([MS-SMB2] §3.3.5.9.11).
 pub(crate) fn share_is_ca(server: &Arc<ServerShared>, conn: &Smb2Conn, tid: u32) -> bool {
-    conn.trees
-        .get(&tid)
-        .and_then(|n| server.shares.get(n))
+    conn.tree_name(tid)
+        .and_then(|n| server.shares.get(&n))
         .map(|s| s.ca)
         .unwrap_or(false)
 }
@@ -3594,9 +3622,8 @@ pub(crate) fn share_vfs(
     conn: &Smb2Conn,
     tid: u32,
 ) -> Option<Arc<dyn smb_vfs::Vfs>> {
-    conn.trees
-        .get(&tid)
-        .and_then(|n| server.shares.get(n))
+    conn.tree_name(tid)
+        .and_then(|n| server.shares.get(&n))
         .map(|s| s.vfs.clone())
 }
 

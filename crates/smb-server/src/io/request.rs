@@ -133,7 +133,7 @@ pub struct TreeDisconnectCmd;
 impl Command for TreeDisconnectCmd {
     type Request = TreeDisconnectReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: TreeDisconnectReq, res: &mut Resources<'_>) -> Outcome {
-        res.conn.trees.remove(&ctx.reply.tree_id);
+        res.conn.tree_remove(ctx.reply.tree_id);
         Outcome::Final(ctx.respond(Status::SUCCESS, c::build_tree_disconnect_resp()))
     }
 }
@@ -152,7 +152,7 @@ impl Command for LogoffCmd {
         res.server.leases.release_session(sid);
         res.server.app_instances.close_session(sid);
         res.server.sessions.remove(sid);
-        res.conn.trees.clear();
+        crate::session_scope::remove(sid);
         res.conn.searches.clear();
         if res.conn.authenticated {
             gauge!("smb_sessions_active").decrement(1.0);
@@ -522,7 +522,7 @@ impl Command for TreeConnectCmd {
         match crate::smb2::tree_connect(res.server, res.conn, res.frame) {
             Ok((name, share_type, encrypt, compress, ca)) => {
                 let new_tid = crate::smb2::next_tree_id();
-                res.conn.trees.insert(new_tid, name);
+                res.conn.tree_insert(new_tid, name);
                 res.conn.resp_tree_id = Some(new_tid);
                 let mut share_flags = 0;
                 let mut capabilities = 0;
