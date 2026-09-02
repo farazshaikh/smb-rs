@@ -304,9 +304,28 @@ impl Command for SetInfoCmd {
         // A rename of a child changes directory contents: capture the pre-rename
         // path so the parent directory lease's READ caching can be revoked
         // ([MS-SMB2] §3.3.1.4).
-        let rename_old = SetInfoReq::parse(res.frame)
+        let rename = SetInfoReq::parse(res.frame)
             .filter(|r| r.info_type == c::info_type::FILE && r.class == smb_proto_smb2::info::file_class::RENAME)
-            .and_then(|r| res.conn.with_handle(&r.file_id.0, |h| (r.file_id.0, h.path.clone())));
+            .and_then(|r| res.conn.with_handle(&r.file_id.0, |h| (r.file_id.0, h.path.clone(), h.is_dir)));
+        // Renaming a directory with open handles anywhere in its subtree first
+        // revokes HANDLE caching on the affected directory leases, then fails
+        // with STATUS_ACCESS_DENIED because the subtree is in use ([MS-SMB2]
+        // §3.3.1.4, [MS-FSA] §2.1.5.14.2).
+        if let Some((fid, old_path, true)) = &rename {
+            let owner = (res.conn.session_id, *fid);
+            crate::smb2::break_subtree_lease_wait(
+                res.server,
+                res.conn,
+                old_path,
+                *fid,
+                c::lease::HANDLE_CACHING,
+            )
+            .await;
+            if res.server.share_modes.has_open_under(old_path, owner) {
+                return Outcome::Final(ctx.respond(Status::ACCESS_DENIED, Vec::new()));
+            }
+        }
+        let rename_old = rename.map(|(fid, path, _)| (fid, path));
         match crate::smb2::set_info(res.conn, vfs, res.frame).await {
             Ok(()) => {
                 if let Some((fid, old_path)) = rename_old {

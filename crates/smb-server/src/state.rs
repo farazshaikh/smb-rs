@@ -293,6 +293,23 @@ impl ShareModeTable {
     pub fn open_count(&self, path: &str) -> usize {
         self.opens.lock().unwrap().get(path).map_or(0, |l| l.len())
     }
+
+    /// True when any open exists on a strict descendant of `dir`, or on `dir`
+    /// itself by an open other than `exclude`. A directory rename fails while
+    /// such a subtree handle is held ([MS-FSA] §2.1.5.14.2).
+    pub fn has_open_under(&self, dir: &str, exclude: LockOwner) -> bool {
+        let prefix = format!("{dir}/");
+        let opens = self.opens.lock().unwrap();
+        opens.iter().any(|(path, list)| {
+            if path.starts_with(&prefix) {
+                !list.is_empty()
+            } else if path.as_str() == dir {
+                list.iter().any(|e| e.owner != exclude)
+            } else {
+                false
+            }
+        })
+    }
 }
 
 /// A recorded application-instance open ([MS-SMB2] §3.3.5.9.13).
@@ -627,6 +644,57 @@ impl LeaseTable {
                 h.outbound.clone(),
                 h.crypto.clone(),
             ));
+        }
+        breaks
+    }
+
+    /// Break every holder whose path is `dir` or a descendant of it, clearing
+    /// the `clear` caching bits and skipping the caller's own open (`owner`).
+    /// Renaming a directory invalidates the cached handles across its whole
+    /// subtree, so each such directory lease must be broken ([MS-SMB2]
+    /// §3.3.1.4). Returns one notification tuple per holder broken.
+    pub fn break_subtree(
+        &self,
+        dir: &str,
+        owner: LockOwner,
+        clear: u32,
+    ) -> Vec<(
+        [u8; 16],
+        u32,
+        u32,
+        u16,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        BreakCrypto,
+    )> {
+        let prefix = format!("{dir}/");
+        let mut held = self.held.lock().unwrap();
+        let mut breaks = Vec::new();
+        for (path, holders) in held.iter_mut() {
+            if path.as_str() != dir && !path.starts_with(&prefix) {
+                continue;
+            }
+            for h in holders.iter_mut() {
+                if (h.session_id, h.file_id) == owner {
+                    continue;
+                }
+                let new_state = h.state & !clear;
+                if new_state == h.state {
+                    continue;
+                }
+                let old = h.state;
+                h.state = new_state;
+                h.epoch = h.epoch.wrapping_add(1);
+                h.breaking = true;
+                h.break_to = new_state;
+                breaks.push((
+                    h.key,
+                    old,
+                    new_state,
+                    h.epoch,
+                    h.outbound.clone(),
+                    h.crypto.clone(),
+                ));
+            }
         }
         breaks
     }

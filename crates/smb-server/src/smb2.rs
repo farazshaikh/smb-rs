@@ -3074,6 +3074,33 @@ pub(crate) async fn break_dir_lease_wait(
     }
 }
 
+/// Break HANDLE caching on every directory lease across the subtree rooted at
+/// `dir` and wait (briefly) for each holder to acknowledge, as required before
+/// a directory rename that invalidates the subtree's cached handles may be
+/// evaluated ([MS-SMB2] §3.3.1.4). `owner` is the renaming open, suppressed
+/// from the break.
+pub(crate) async fn break_subtree_lease_wait(
+    server: &Arc<ServerShared>,
+    conn: &Smb2Conn,
+    dir: &str,
+    owner: [u8; 16],
+    clear: u32,
+) {
+    let mut waits = Vec::new();
+    for (key, old, new, epoch, outbound, crypto) in
+        server
+            .leases
+            .break_subtree(dir, (conn.session_id, owner), clear)
+    {
+        let rx = server.leases.register_ack_wait(key);
+        send_lease_break(&outbound, &crypto, key, old, new, epoch);
+        waits.push(rx);
+    }
+    for rx in waits {
+        let _ = tokio::time::timeout(LEASE_ACK_TIMEOUT, rx).await;
+    }
+}
+
 /// The parent directory portion of a normalized share-relative path, or the
 /// share root (`""`) when the path has no parent component.
 pub(crate) fn parent_dir(path: &str) -> &str {
@@ -3538,7 +3565,14 @@ pub(crate) async fn close(
         s.borrow_mut().channel_seq.remove(&req.file_id.0);
     }
     let meta = vfs.stat(&h.path).await.ok().unwrap_or_default();
-    vfs.close(h).await.map_err(vfs_err)?;
+    match vfs.close(h).await {
+        Ok(()) => {}
+        // A delete-on-close on a directory that is not empty at close time
+        // abandons the delete and still completes the CLOSE successfully
+        // ([MS-FSA] §2.1.5.4); the object simply remains.
+        Err(smb_vfs::VfsError::DirectoryNotEmpty) => {}
+        Err(e) => return Err(vfs_err(e)),
+    }
     counter!("smb_closes_total").increment(1);
     Ok(c::build_close_resp(
         [
