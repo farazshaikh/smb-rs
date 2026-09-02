@@ -55,6 +55,8 @@ pub mod hdr_flags {
     pub const RELATED_OPERATIONS: u32 = 0x0000_0004;
     /// SMB2_FLAGS_SIGNED — the PDU carries a signature.
     pub const SIGNED: u32 = 0x0000_0008;
+    /// SMB2_FLAGS_REPLAY_OPERATION — the request is a replay ([MS-SMB2] §2.2.1.2).
+    pub const REPLAY_OPERATION: u32 = 0x2000_0000;
 }
 
 /// AEAD parameters for SMB3 transform (encrypted) messages ([MS-SMB2] §3.1.4.3).

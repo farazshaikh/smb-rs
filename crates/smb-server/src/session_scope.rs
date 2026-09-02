@@ -22,6 +22,20 @@ pub struct SessionScope {
     pub trees: HashMap<u32, String>,
     /// Open handles keyed by 16-byte SMB2 FileId (Session.OpenTable).
     pub handles: HashMap<[u8; 16], Box<smb_vfs::OpenFile>>,
+    /// Per-open channel-sequence replay state keyed by FileId ([MS-SMB2]
+    /// §3.3.5.2.10), shared so a bound channel sees the same Open.ChannelSequence.
+    pub channel_seq: HashMap<[u8; 16], ChannelSeq>,
+}
+
+/// Per-open channel-sequence counters ([MS-SMB2] §3.3.5.2.10).
+#[derive(Clone, Copy, Default)]
+pub struct ChannelSeq {
+    /// Open.ChannelSequence.
+    pub channel_sequence: u16,
+    /// Open.OutstandingRequestCount.
+    pub outstanding_request_count: u32,
+    /// Open.OutstandingPreRequestCount.
+    pub outstanding_pre_request_count: u32,
 }
 
 /// Shared, per-thread handle to a session's [`SessionScope`].

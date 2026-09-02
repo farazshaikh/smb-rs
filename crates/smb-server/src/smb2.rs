@@ -886,6 +886,30 @@ async fn process_single(
         ));
     }
 
+    // Channel-sequence replay verification ([MS-SMB2] §3.3.5.2.10): a WRITE,
+    // SET_INFO, or IOCTL whose header ChannelSequence has drifted more than
+    // 0x7FFF from the open's fails STATUS_FILE_NOT_AVAILABLE.
+    if matches!(hdr.command, ss::cmd::WRITE | ss::cmd::SET_INFO | ss::cmd::IOCTL)
+        && matches!(conn.dialect, Some(d) if d >= smb_proto_smb2::negotiate::DIALECT_300)
+    {
+        if let Some(foff) = file_id_body_offset(hdr.command) {
+            let abs = hdr::LEN + foff;
+            if let Some(fid) = buf
+                .get(abs..abs + 16)
+                .and_then(|s| <[u8; 16]>::try_from(s).ok())
+            {
+                let channel_seq = u16::from_le_bytes([buf[hdr::STATUS], buf[hdr::STATUS + 1]]);
+                let is_replay = hdr.flags & hdr_flags::REPLAY_OPERATION != 0;
+                if !verify_channel_sequence(conn, &fid, channel_seq, is_replay) {
+                    return Some((
+                        response(&hdr, Status::FILE_NOT_AVAILABLE, Vec::new(), conn.session_id),
+                        true,
+                    ));
+                }
+            }
+        }
+    }
+
     // A handle force-closed by an application-instance failover ([MS-SMB2]
     // §3.3.5.9.13): the owner's next operation on it fails STATUS_FILE_CLOSED.
     if let Some(foff) = file_id_body_offset(hdr.command) {
@@ -2400,6 +2424,18 @@ pub(crate) async fn create(
     let fid = c::FileId(fid_bytes);
     conn.searches.remove(&fid_bytes);
     conn.handle_insert(fid_bytes, open);
+    // Seed per-open channel-sequence replay state ([MS-SMB2] §3.3.5.2.10).
+    if let Some(scope) = conn.scope.as_ref() {
+        let channel_sequence = u16::from_le_bytes([buf[hdr::STATUS], buf[hdr::STATUS + 1]]);
+        scope.borrow_mut().channel_seq.insert(
+            fid_bytes,
+            crate::session_scope::ChannelSeq {
+                channel_sequence,
+                outstanding_request_count: 1,
+                outstanding_pre_request_count: 0,
+            },
+        );
+    }
     // Record this handle so a related follow-up in the compound chain that
     // carries the wildcard FileId resolves to it ([MS-SMB2] §3.3.5.2.7.2).
     conn.chain_fid = Some(fid_bytes);
@@ -3455,6 +3491,9 @@ pub(crate) async fn close(
     conn.searches.remove(&req.file_id.0);
     conn.lease_keys.remove(&req.file_id.0);
     conn.integrity.remove(&req.file_id.0);
+    if let Some(s) = conn.scope.as_ref() {
+        s.borrow_mut().channel_seq.remove(&req.file_id.0);
+    }
     let meta = vfs.stat(&h.path).await.ok().unwrap_or_default();
     vfs.close(h).await.map_err(vfs_err)?;
     counter!("smb_closes_total").increment(1);
@@ -3473,9 +3512,59 @@ pub(crate) async fn close(
 
 pub(crate) fn close_all_handles(conn: &mut Smb2Conn) {
     if let Some(s) = conn.scope.as_ref() {
-        s.borrow_mut().handles.clear();
+        let mut s = s.borrow_mut();
+        s.handles.clear();
+        s.channel_seq.clear();
     }
     conn.pipes.clear();
+}
+
+/// Verify the request's ChannelSequence against the open's ([MS-SMB2]
+/// §3.3.5.2.10), updating the open's counters. Returns `false` when the caller
+/// must fail the WRITE/SET_INFO/IOCTL with STATUS_FILE_NOT_AVAILABLE. An open
+/// with no tracked state always passes.
+fn verify_channel_sequence(conn: &Smb2Conn, fid: &[u8; 16], channel_seq: u16, is_replay: bool) -> bool {
+    let Some(scope) = conn.scope.as_ref() else {
+        return true;
+    };
+    let mut scope = scope.borrow_mut();
+    let Some(cs) = scope.channel_seq.get_mut(fid) else {
+        return true;
+    };
+    // Unsigned 16-bit difference from Open.ChannelSequence.
+    let diff = channel_seq.wrapping_sub(cs.channel_sequence);
+    if !is_replay {
+        if channel_seq == cs.channel_sequence {
+            cs.outstanding_request_count += 1;
+            true
+        } else if diff <= 0x7FFF {
+            cs.outstanding_pre_request_count += cs.outstanding_request_count;
+            cs.outstanding_request_count = 1;
+            cs.channel_sequence = channel_seq;
+            true
+        } else {
+            false
+        }
+    } else if channel_seq == cs.channel_sequence {
+        if cs.outstanding_pre_request_count == 0 {
+            cs.outstanding_request_count += 1;
+            true
+        } else {
+            false
+        }
+    } else if diff <= 0x7FFF {
+        cs.outstanding_pre_request_count += cs.outstanding_request_count;
+        cs.channel_sequence = channel_seq;
+        if cs.outstanding_pre_request_count == 0 {
+            cs.outstanding_request_count = 1;
+            true
+        } else {
+            cs.outstanding_request_count = 0;
+            false
+        }
+    } else {
+        false
+    }
 }
 
 // ---------------- Named pipes (IPC$) ----------------
