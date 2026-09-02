@@ -47,8 +47,12 @@ pub mod ctx_type {
     pub const COMPRESSION: u16 = 0x0003;
     /// SIGNING_CAPABILITIES.
     pub const SIGNING: u16 = 0x0008;
-    /// SIGNING_ALGORITHM values: AES-128-CMAC.
+    /// SIGNING_ALGORITHM: HMAC-SHA256 ([MS-SMB2] §2.2.3.1.7).
+    pub const SIGNING_HMAC_SHA256: u16 = 0x0000;
+    /// SIGNING_ALGORITHM: AES-128-CMAC.
     pub const SIGNING_AES128_CMAC: u16 = 0x0001;
+    /// SIGNING_ALGORITHM: AES-128-GMAC.
+    pub const SIGNING_AES128_GMAC: u16 = 0x0002;
     /// HASH_ALGORITHMS values: SHA-512.
     pub const SHA512: u16 = 0x0001;
     /// CIPHER values: AES-128-CCM.
@@ -154,6 +158,36 @@ pub fn pick(dialects: &[u16]) -> Option<u16> {
     best
 }
 
+/// Signing algorithms this server can compute, in fallback preference order.
+pub const SUPPORTED_SIGNING: &[u16] = &[
+    ctx_type::SIGNING_AES128_GMAC,
+    ctx_type::SIGNING_AES128_CMAC,
+    ctx_type::SIGNING_HMAC_SHA256,
+];
+
+/// Parse a client `SMB2_SIGNING_CAPABILITIES` context (§2.2.3.1.7) into its
+/// advertised SigningAlgorithms list.
+pub fn parse_signing_algos(data: &[u8]) -> Vec<u16> {
+    if data.len() < 2 {
+        return Vec::new();
+    }
+    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
+    data.get(2..)
+        .map(|r| {
+            r.chunks_exact(2)
+                .take(count)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Select the signing algorithm: the client's first that the server supports
+/// ([MS-SMB2] §3.3.5.4).
+pub fn select_signing_algo(client: &[u16]) -> Option<u16> {
+    client.iter().copied().find(|a| SUPPORTED_SIGNING.contains(a))
+}
+
 /// Build the NEGOTIATE response body (§2.2.3.1) — no security blob
 /// (clients initiate NTLMSSP in SESSION_SETUP).
 ///
@@ -167,7 +201,7 @@ pub fn build_response_full(
     now: u64,
     salt: &[u8; 32],
     encryption: Option<u16>,
-    offer_signing: bool,
+    signing_algo: Option<u16>,
     compression: &[u16],
     compression_chained: bool,
     require_signing: bool,
@@ -181,7 +215,7 @@ pub fn build_response_full(
         // Echo only the contexts the client offered ([MS-SMB2] §3.3.5.4);
         // PREAUTH is mandatory, the rest are conditional.
         let count = 1
-            + u16::from(offer_signing)
+            + u16::from(signing_algo.is_some())
             + u16::from(encryption.is_some())
             + u16::from(!compression.is_empty());
         b.extend_from_slice(&count.to_le_bytes()); // NegotiateContextCount
@@ -233,10 +267,10 @@ pub fn build_response_full(
         preauth.extend_from_slice(salt);
         push_ctx(&mut ctx, ctx_type::PREAUTH_INTEGRITY, &preauth);
 
-        // SIGNING_CAPABILITIES: AES-128-CMAC — only when the client offered
-        // a SIGNING_CAPABILITIES context ([MS-SMB2] §3.3.5.4).
-        if offer_signing {
-            let signing = [1u16.to_le_bytes(), ctx_type::SIGNING_AES128_CMAC.to_le_bytes()].concat();
+        // SIGNING_CAPABILITIES: echo the signing algorithm selected from the
+        // client's SIGNING_CAPABILITIES context ([MS-SMB2] §3.3.5.4).
+        if let Some(algo) = signing_algo {
+            let signing = [1u16.to_le_bytes(), algo.to_le_bytes()].concat();
             push_ctx(&mut ctx, ctx_type::SIGNING, &signing);
         }
 
@@ -273,5 +307,5 @@ const BODY_START_FIXED: usize = 64 + 64;
 /// pre-3.1.1 dialects (where the spec marks it Reserved); every real-world
 /// parser expects the field's presence.
 pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
-    build_response_full(dialect, guid, now, &[0u8; 32], None, false, &[], false, false)
+    build_response_full(dialect, guid, now, &[0u8; 32], None, None, &[], false, false)
 }

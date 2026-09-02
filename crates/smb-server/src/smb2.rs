@@ -45,6 +45,9 @@ pub struct Smb2Conn {
     pub session_key: Option<[u8; 16]>,
     /// Derived signing key (dialect-specific); `None` disables signing.
     pub signing_key: Option<[u8; 16]>,
+    /// Negotiated 3.1.1 signing algorithm ([MS-SMB2] §2.2.3.1.7): HMAC-SHA256,
+    /// AES-128-CMAC, or AES-128-GMAC. Unused for 2.x (always HMAC-SHA256).
+    pub signing_algo: u16,
     /// Capabilities word advertised in our NEGOTIATE response — echoed
     /// verbatim in FSCTL_VALIDATE_NEGOTIATE_INFO ([MS-SMB2] §3.3.5.15).
     pub advertised_caps: u32,
@@ -167,6 +170,7 @@ impl Smb2Conn {
             guest: false,
             session_key: None,
             signing_key: None,
+            signing_algo: smb_proto_smb2::negotiate::ctx_type::SIGNING_AES128_CMAC,
             advertised_caps: 0,
             client_credits: 0,
             preauth_hash: [0u8; 64],
@@ -509,6 +513,12 @@ pub(crate) async fn process_frame(
     if (conn.encrypt_data || request_encrypted || tree_requires_seal)
         && parts.iter().all(|(_, w)| *w)
     {
+        // The AEAD transform provides integrity, so each inner PDU travels
+        // unsigned with a zero Signature field ([MS-SMB2] §3.3.4.1.1).
+        for &s in &starts {
+            out[s + hdr::FLAGS] &= !(hdr_flags::SIGNED as u8);
+            out[s + hdr::SIGNATURE..s + hdr::LEN].fill(0);
+        }
         // Compress before sealing when the peer negotiated compression and the
         // READ asked for it ([MS-SMB2] §3.1.4.4: compress, then encrypt).
         let mut payload = out;
@@ -785,7 +795,7 @@ async fn via_typestate(
             );
             if hdr.is_signed() {
                 if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
-                    sign_pdu(&mut frame, &key, conn.dialect);
+                    sign_pdu(&mut frame, &key, conn.dialect, conn.signing_algo);
                 }
             }
             Routed::Raw(frame)
@@ -927,7 +937,7 @@ async fn process_single(
     {
         let key = conn.signing_key.unwrap();
         if hdr.is_signed() {
-            if !verify_pdu_signature(buf, &key, conn.dialect) {
+            if !verify_pdu_signature(buf, &key, conn.dialect, conn.signing_algo) {
                 counter!("smb_reject_bad_signature_total").increment(1);
                 return Some((
                     response(&hdr, Status::ACCESS_DENIED, Vec::new(), conn.session_id),
@@ -1153,46 +1163,94 @@ async fn process_single(
         hdr.command == ss::cmd::SESSION_SETUP && status == Status::SUCCESS && conn.authenticated;
     if hdr.is_signed() || final_setup_leg {
         if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
-            sign_pdu(&mut resp, &key, conn.dialect);
+            sign_pdu(&mut resp, &key, conn.dialect, conn.signing_algo);
         }
     }
     Some((resp, allow_wrap))
 }
 
-/// Stamp an SMB2 signature over `resp` in place ([MS-SMB2] §3.3.4.1.1):
-/// AES-CMAC for 3.x dialects, HMAC-SHA256 for 2.x. Sets the SIGNED flag and
-/// fills the 16-byte Signature field (bytes 48..64).
-fn sign_pdu(resp: &mut [u8], key: &[u8; 16], dialect: Option<u16>) {
-    resp[hdr::FLAGS] |= hdr_flags::SIGNED as u8;
-    let mut msg = Vec::with_capacity(resp.len());
-    msg.extend_from_slice(&resp[..hdr::SIGNATURE]);
-    msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
-    msg.extend_from_slice(&resp[hdr::LEN..]);
-    let sig = if matches!(
+/// AES-GMAC nonce for signing ([MS-SMB2] §3.1.4.1): MessageId in the low 8
+/// bytes; in the top 4 bytes bit 0 marks a server-sent message and bit 1 an
+/// SMB2 CANCEL request.
+fn gmac_nonce(msg: &[u8], server_sender: bool) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    n[..8].copy_from_slice(&msg[hdr::MESSAGE_ID..hdr::MESSAGE_ID + 8]);
+    let mut flags = u32::from(server_sender);
+    if u16::from_le_bytes([msg[hdr::COMMAND], msg[hdr::COMMAND + 1]]) == ss::cmd::CANCEL {
+        flags |= 2;
+    }
+    n[8..].copy_from_slice(&flags.to_le_bytes());
+    n
+}
+
+#[cfg(feature = "lib")]
+fn sig_gmac(key: &[u8; 16], msg: &[u8], server_sender: bool) -> [u8; 16] {
+    smb_auth::crypto::aes128_gmac(key, &gmac_nonce(msg, server_sender), msg)
+}
+#[cfg(not(feature = "lib"))]
+fn sig_gmac(key: &[u8; 16], msg: &[u8], _server_sender: bool) -> [u8; 16] {
+    let t = smb_auth::crypto::aes128_cmac(key, msg);
+    let mut s = [0u8; 16];
+    s.copy_from_slice(&t);
+    s
+}
+
+/// The 16-byte SMB2 signature over `msg` (signature field pre-zeroed): the
+/// negotiated 3.x algorithm (AES-CMAC / AES-GMAC / HMAC-SHA256), or HMAC-SHA256
+/// for 2.x ([MS-SMB2] §3.1.4.1). `server_sender` picks the AES-GMAC nonce bit.
+fn message_signature(
+    msg: &[u8],
+    key: &[u8; 16],
+    dialect: Option<u16>,
+    signing_algo: u16,
+    server_sender: bool,
+) -> [u8; 16] {
+    use smb_proto_smb2::negotiate::ctx_type;
+    let hmac16 = || {
+        let t = smb_auth::crypto::hmac_sha256(key, msg);
+        let mut s = [0u8; 16];
+        s.copy_from_slice(&t[..hdr::SIGNATURE_LEN]);
+        s
+    };
+    let is_3x = matches!(
         dialect,
         Some(
             smb_proto_smb2::negotiate::DIALECT_300
                 | smb_proto_smb2::negotiate::DIALECT_302
                 | smb_proto_smb2::negotiate::DIALECT_311
         )
-    ) {
-        let t = smb_auth::crypto::aes128_cmac(key, &msg);
-        let mut s = [0u8; 16];
-        s.copy_from_slice(&t);
-        s
-    } else {
-        let t = smb_auth::crypto::hmac_sha256(key, &msg);
-        let mut s = [0u8; 16];
-        s.copy_from_slice(&t[..hdr::SIGNATURE_LEN]);
-        s
-    };
+    );
+    if !is_3x {
+        return hmac16();
+    }
+    match signing_algo {
+        ctx_type::SIGNING_HMAC_SHA256 => hmac16(),
+        ctx_type::SIGNING_AES128_GMAC => sig_gmac(key, msg, server_sender),
+        _ => {
+            let t = smb_auth::crypto::aes128_cmac(key, msg);
+            let mut s = [0u8; 16];
+            s.copy_from_slice(&t);
+            s
+        }
+    }
+}
+
+/// Stamp an SMB2 signature over `resp` in place ([MS-SMB2] §3.3.4.1.1). Sets the
+/// SIGNED flag and fills the 16-byte Signature field (bytes 48..64).
+fn sign_pdu(resp: &mut [u8], key: &[u8; 16], dialect: Option<u16>, signing_algo: u16) {
+    resp[hdr::FLAGS] |= hdr_flags::SIGNED as u8;
+    let mut msg = Vec::with_capacity(resp.len());
+    msg.extend_from_slice(&resp[..hdr::SIGNATURE]);
+    msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
+    msg.extend_from_slice(&resp[hdr::LEN..]);
+    let sig = message_signature(&msg, key, dialect, signing_algo, true);
     resp[hdr::SIGNATURE..hdr::LEN].copy_from_slice(&sig);
 }
 
-/// Verify a request PDU's signature against `key` for `dialect`: recompute the
-/// AES-CMAC (3.x) / HMAC-SHA256 (2.x) over the PDU with the signature field
-/// zeroed and compare to the header's Signature ([MS-SMB2] §3.3.5.2.4).
-fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>) -> bool {
+/// Verify a request PDU's signature against `key` ([MS-SMB2] §3.3.5.2.4):
+/// recompute the negotiated signature over the PDU with the signature field
+/// zeroed and compare to the header's Signature.
+fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>, signing_algo: u16) -> bool {
     if buf.len() < hdr::LEN {
         return false;
     }
@@ -1200,22 +1258,7 @@ fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>) -> boo
     msg.extend_from_slice(&buf[..hdr::SIGNATURE]);
     msg.extend_from_slice(&[0u8; 16]); // zeroed Signature field
     msg.extend_from_slice(&buf[hdr::LEN..]);
-    let expected: [u8; 16] = if matches!(
-        dialect,
-        Some(
-            smb_proto_smb2::negotiate::DIALECT_300
-                | smb_proto_smb2::negotiate::DIALECT_302
-                | smb_proto_smb2::negotiate::DIALECT_311
-        )
-    ) {
-        smb_auth::crypto::aes128_cmac(key, &msg)[..hdr::SIGNATURE_LEN]
-            .try_into()
-            .unwrap()
-    } else {
-        smb_auth::crypto::hmac_sha256(key, &msg)[..hdr::SIGNATURE_LEN]
-            .try_into()
-            .unwrap()
-    };
+    let expected = message_signature(&msg, key, dialect, signing_algo, false);
     expected == buf[hdr::SIGNATURE..hdr::LEN]
 }
 
@@ -1226,6 +1269,7 @@ fn verify_pdu_signature(buf: &[u8], key: &[u8; 16], dialect: Option<u16>) -> boo
 struct AsyncCrypto {
     dialect: Option<u16>,
     signing_key: Option<[u8; 16]>,
+    signing_algo: u16,
     enc_keys: Option<([u8; 32], [u8; 32])>,
     cipher: Option<u16>,
     session_id: u64,
@@ -1238,6 +1282,7 @@ impl AsyncCrypto {
         Self {
             dialect: conn.dialect,
             signing_key: conn.signing_key.or(conn.session_key),
+            signing_algo: conn.signing_algo,
             enc_keys: conn.enc_keys,
             cipher: conn.cipher,
             session_id: conn.session_id,
@@ -1280,7 +1325,7 @@ fn build_async_frame(
 fn finalize_async(crypto: &AsyncCrypto, mut frame: Vec<u8>) -> Vec<u8> {
     if crypto.signed {
         if let Some(key) = crypto.signing_key {
-            sign_pdu(&mut frame, &key, crypto.dialect);
+            sign_pdu(&mut frame, &key, crypto.dialect, crypto.signing_algo);
         }
     }
     if crypto.encrypt {
@@ -1879,6 +1924,22 @@ pub(crate) fn negotiate(
     // Echo the CHAINED flag only when the client requested it ([MS-SMB2]
     // §3.3.5.4); advertising it otherwise would make peers chain every message.
     let compression_chained = conn.compress_chained;
+    // Select the 3.1.1 signing algorithm from the client's SIGNING_CAPABILITIES
+    // (the first the server supports, [MS-SMB2] §3.3.5.4) and echo it back.
+    let signing_algo = req
+        .contexts
+        .iter()
+        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING)
+        .and_then(|c| {
+            smb_proto_smb2::negotiate::select_signing_algo(
+                &smb_proto_smb2::negotiate::parse_signing_algos(&c.data),
+            )
+        });
+    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+        if let Some(a) = signing_algo {
+            conn.signing_algo = a;
+        }
+    }
     NegotiateReply::Reply(
         Status::SUCCESS,
         smb_proto_smb2::negotiate::build_response_full(
@@ -1890,9 +1951,7 @@ pub(crate) fn negotiate(
             // ([MS-SMB2] §3.3.5.4). With no common cipher, echo ENCRYPTION_NONE
             // (0) so the client clears Connection.CipherId.
             (!client_ciphers.is_empty()).then(|| chosen.unwrap_or(0)),
-            req.contexts
-                .iter()
-                .any(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING),
+            signing_algo,
             &comp_algos,
             compression_chained,
             server.require_signing,
@@ -4819,26 +4878,27 @@ mod signing_tests {
     fn sign_then_verify_round_trips_and_detects_tamper() {
         let key = [0x42u8; 16];
         let dialect = Some(smb_proto_smb2::negotiate::DIALECT_311);
+        let algo = smb_proto_smb2::negotiate::ctx_type::SIGNING_AES128_CMAC;
         let mut pdu = vec![0u8; 96];
         pdu[0..4].copy_from_slice(&smb_proto_smb2::SMB2_MAGIC);
         for (i, b) in pdu[64..].iter_mut().enumerate() {
             *b = i as u8; // arbitrary body bytes
         }
-        sign_pdu(&mut pdu, &key, dialect);
+        sign_pdu(&mut pdu, &key, dialect, algo);
         assert!(
-            verify_pdu_signature(&pdu, &key, dialect),
+            verify_pdu_signature(&pdu, &key, dialect, algo),
             "valid signature verifies"
         );
         // Tamper with the body: verification must fail.
         pdu[70] ^= 0xFF;
         assert!(
-            !verify_pdu_signature(&pdu, &key, dialect),
+            !verify_pdu_signature(&pdu, &key, dialect, algo),
             "tampered body rejected"
         );
         // Wrong key: fails.
         pdu[70] ^= 0xFF;
         assert!(
-            !verify_pdu_signature(&pdu, &[0u8; 16], dialect),
+            !verify_pdu_signature(&pdu, &[0u8; 16], dialect, algo),
             "wrong key rejected"
         );
     }

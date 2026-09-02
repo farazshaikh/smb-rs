@@ -9,6 +9,18 @@
 pub use smb_csp::{aes128ccm_open, aes128ccm_seal, aes128gcm_open, aes128gcm_seal,
     aes256ccm_open, aes256ccm_seal, aes256gcm_open, aes256gcm_seal,
     ntlm_mech_list_mic};
+
+/// AES-128-GMAC authentication tag over `msg` with `nonce` ([RFC4543]): the
+/// SMB 3.1.1 AES-GMAC signature ([MS-SMB2] §3.1.4.1). GMAC is AES-GCM with an
+/// empty plaintext and the message supplied as additional authenticated data;
+/// the 16-byte GCM tag is the signature.
+#[cfg(feature = "lib")]
+pub fn aes128_gmac(key: &[u8; 16], nonce: &[u8; 12], msg: &[u8]) -> [u8; 16] {
+    let out = aes128gcm_seal(key, nonce, msg, &[]);
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&out[out.len() - 16..]);
+    tag
+}
 pub use smb_csp::{
     aes128_cmac,
     aes128_encrypt_block, des_encrypt_key7, hmac_md5, hmac_sha256,
