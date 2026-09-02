@@ -3136,7 +3136,7 @@ pub(crate) async fn read(
     let len = (req.length as usize).min(1 << 20); // clamp to 1 MiB
     let (path, is_dir, can_read) = conn
         .with_handle(&req.file_id.0, |h| (h.path.clone(), h.is_dir, h.can_read))
-        .ok_or(Status::INVALID_HANDLE)?;
+        .ok_or(Status::FILE_CLOSED)?;
     if is_dir || !can_read {
         return Err(Status::ACCESS_DENIED);
     }
@@ -3153,7 +3153,7 @@ pub(crate) async fn read(
     // borrow spans the await, then check it back in ([MS-SMB2] §3.3.5.5.3).
     let mut open = conn
         .handle_take(&req.file_id.0)
-        .ok_or(Status::INVALID_HANDLE)?;
+        .ok_or(Status::FILE_CLOSED)?;
     let result = vfs.read(&mut open, req.offset, len).await;
     conn.handle_insert(req.file_id.0, open);
     let data = result.map_err(vfs_err)?;
@@ -3171,7 +3171,7 @@ pub(crate) async fn write(
     let req = c::WriteReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let (path, is_dir, can_write) = conn
         .with_handle(&req.file_id.0, |h| (h.path.clone(), h.is_dir, h.can_write))
-        .ok_or(Status::INVALID_HANDLE)?;
+        .ok_or(Status::FILE_CLOSED)?;
     if is_dir || !can_write {
         return Err(Status::ACCESS_DENIED);
     }
@@ -3186,7 +3186,7 @@ pub(crate) async fn write(
     }
     let mut open = conn
         .handle_take(&req.file_id.0)
-        .ok_or(Status::INVALID_HANDLE)?;
+        .ok_or(Status::FILE_CLOSED)?;
     let result = vfs.write(&mut open, req.offset, &req.payload, false).await;
     conn.handle_insert(req.file_id.0, open);
     let written = result.map_err(vfs_err)?;
