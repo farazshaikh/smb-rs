@@ -26,6 +26,14 @@ use crate::state::{ServerShared, Share};
 /// rejects an OutputBufferLength larger than this ([MS-SMB2] §3.3.5.19).
 const MAX_TRANSACT_SIZE: u32 = 1024 * 1024;
 
+/// How long a conflicting open waits for a lease-break acknowledgment before
+/// proceeding ([MS-SMB2] §3.3.1.4). Kept short under test to keep unit tests
+/// fast (no real client acks there).
+#[cfg(not(test))]
+const LEASE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const LEASE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Per-connection SMB2 state.
 pub struct Smb2Conn {
     /// Negotiated dialect revision (set after successful NEGOTIATE).
@@ -2493,10 +2501,16 @@ pub(crate) async fn create(
             .unwrap_or(false);
     let granted = if lease_context && (!is_dir || dir_leasing) {
         if let Some(lr) = req.lease {
-            lease_grant = Some(arbitrate_lease(
+            let (resp, ack_wait) = arbitrate_lease(
                 server, conn, &path, fid_bytes, &lr, req_signed, is_dir,
-            ));
+            );
+            lease_grant = Some(resp);
             conn.lease_keys.insert(fid_bytes, lr.key);
+            // Block this conflicting create until the prior holder acknowledges
+            // the write-caching break ([MS-SMB2] §3.3.1.4), or a short timeout.
+            if let Some(rx) = ack_wait {
+                let _ = tokio::time::timeout(LEASE_ACK_TIMEOUT, rx).await;
+            }
             c::oplock::LEASE
         } else {
             c::oplock::NONE
@@ -2867,35 +2881,45 @@ fn arbitrate_lease(
     lr: &c::LeaseReq,
     signed: bool,
     is_dir: bool,
-) -> c::LeaseResp {
+) -> (c::LeaseResp, Option<tokio::sync::oneshot::Receiver<()>>) {
     // A directory lease supports only READ + HANDLE caching; a file lease also
     // supports WRITE caching ([MS-SMB2] §3.3.1.4).
     let allowed = if is_dir { c::lease::RH } else { c::lease::RWH };
     let requested = lr.state & allowed;
     if let Some((key, state, epoch, v2)) = server.leases.peek(path) {
         if key == lr.key {
-            return c::LeaseResp {
-                key: lr.key,
-                state,
-                flags: 0,
-                epoch,
-                v2,
-            };
+            return (
+                c::LeaseResp {
+                    key: lr.key,
+                    state,
+                    flags: 0,
+                    epoch,
+                    v2,
+                },
+                None,
+            );
         }
         let new_state = state & c::lease::RH;
-        if let Some((hkey, old, nepoch, outbound, crypto)) =
-            server.leases.downgrade(path, new_state)
-        {
-            send_lease_break(&outbound, &crypto, hkey, old, new_state, nepoch);
-        }
+        // Register the ack wait before sending so the conflicting create can
+        // block until the holder acknowledges ([MS-SMB2] §3.3.1.4).
+        let ack_wait = server.leases.downgrade(path, new_state).map(
+            |(hkey, old, nepoch, outbound, crypto)| {
+                let rx = server.leases.register_ack_wait(hkey);
+                send_lease_break(&outbound, &crypto, hkey, old, new_state, nepoch);
+                rx
+            },
+        );
         let grant = requested & c::lease::RH;
-        return c::LeaseResp {
-            key: lr.key,
-            state: grant,
-            flags: 0,
-            epoch: lr.epoch,
-            v2: lr.v2,
-        };
+        return (
+            c::LeaseResp {
+                key: lr.key,
+                state: grant,
+                flags: 0,
+                epoch: lr.epoch,
+                v2: lr.v2,
+            },
+            ack_wait,
+        );
     }
     // A newly established lease initializes its epoch from the request and
     // increments it by one for a LeaseV2 grant ([MS-SMB2] §3.3.5.9.11); V1
@@ -2916,13 +2940,16 @@ fn arbitrate_lease(
     };
     server.leases.grant(path, holder);
     counter!("smb_leases_granted_total").increment(1);
-    c::LeaseResp {
-        key: lr.key,
-        state: requested,
-        flags: 0,
-        epoch: granted_epoch,
-        v2: lr.v2,
-    }
+    (
+        c::LeaseResp {
+            key: lr.key,
+            state: requested,
+            flags: 0,
+            epoch: granted_epoch,
+            v2: lr.v2,
+        },
+        None,
+    )
 }
 
 /// Build a NETWORK_INTERFACE_INFO list ([MS-SMB2] §2.2.32.5) from the host's
@@ -3026,8 +3053,7 @@ pub(crate) async fn break_dir_lease_wait(
     {
         let rx = server.leases.register_ack_wait(key);
         send_lease_break(&outbound, &crypto, key, old, new, epoch);
-        const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-        let _ = tokio::time::timeout(ACK_TIMEOUT, rx).await;
+        let _ = tokio::time::timeout(LEASE_ACK_TIMEOUT, rx).await;
     }
 }
 
