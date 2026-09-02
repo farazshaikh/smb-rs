@@ -176,7 +176,8 @@ impl Smb2Conn {
             peer_encrypts: false,
             ntlm_blobs: None,
             ntlm_targ: None,
-            lease_keys: HashMap::new(),            pipes: HashMap::new(),
+            lease_keys: HashMap::new(),
+            pipes: HashMap::new(),
             searches: HashMap::new(),
             outbound,
             next_async_id: 1,
@@ -495,7 +496,11 @@ pub(crate) async fn process_frame(
     // request itself arrived encrypted ([MS-SMB2] §3.3.5.16 — a sealed request
     // is answered with a sealed response even if the server does not force it).
     // The enabling SESSION_SETUP response itself always travels in the clear.
-    let first_tid = if work.len() >= hdr::LEN { g32(&work, hdr::TREE_ID) } else { 0 };
+    let first_tid = if work.len() >= hdr::LEN {
+        g32(&work, hdr::TREE_ID)
+    } else {
+        0
+    };
     let tree_requires_seal = conn.seal_current
         || conn
             .tree_name(first_tid)
@@ -553,11 +558,7 @@ fn cipher_is_256(cipher: u16) -> bool {
 
 /// Key length in bytes for a negotiated cipher.
 fn cipher_key_len(cipher: u16) -> usize {
-    if cipher_is_256(cipher) {
-        32
-    } else {
-        16
-    }
+    if cipher_is_256(cipher) { 32 } else { 16 }
 }
 
 /// Wrap an assembled response into a transform frame ([MS-SMB2] §2.2.41)
@@ -814,7 +815,10 @@ async fn process_single(
     // SMB2_READFLAG_REQUEST_COMPRESSED (0x02) in a READ Flags byte (body off 3)
     // asks the server to compress the read response ([MS-SMB2] §2.2.19/§3.3.5.12).
     conn.compress_response = hdr.command == ss::cmd::READ
-        && buf.get(hdr::LEN + 3).map(|f| f & 0x02 != 0).unwrap_or(false);
+        && buf
+            .get(hdr::LEN + 3)
+            .map(|f| f & 0x02 != 0)
+            .unwrap_or(false);
     // Request half of the 3.1.1 pre-auth integrity hash ([MS-SMB2] §3.3.4.1.1):
     // every NEGOTIATE / SESSION_SETUP message updates it before processing.
     let is_preauth_msg = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP);
@@ -857,7 +861,12 @@ async fn process_single(
         && !conn.tree_exists(hdr.tree_id)
     {
         return Some((
-            response(&hdr, Status::NETWORK_NAME_DELETED, Vec::new(), conn.session_id),
+            response(
+                &hdr,
+                Status::NETWORK_NAME_DELETED,
+                Vec::new(),
+                conn.session_id,
+            ),
             true,
         ));
     }
@@ -1813,9 +1822,7 @@ pub(crate) fn negotiate(
         let pref = std::env::var("RUSTSMB_CIPHER")
             .unwrap_or_default()
             .to_lowercase();
-        use smb_proto_smb2::negotiate::ctx_type::{
-            AES128_CCM, AES128_GCM, AES256_CCM, AES256_GCM,
-        };
+        use smb_proto_smb2::negotiate::ctx_type::{AES128_CCM, AES128_GCM, AES256_CCM, AES256_GCM};
         let order = match pref.as_str() {
             "ccm" | "128ccm" => [AES128_CCM, AES256_CCM, AES128_GCM, AES256_GCM],
             "256" | "256gcm" => [AES256_GCM, AES128_GCM, AES256_CCM, AES128_CCM],
@@ -1903,6 +1910,14 @@ pub(crate) fn session_setup(
     let binding = req.flags & ss::FLAG_BINDING != 0
         && hdr_session != 0
         && server.sessions.get(hdr_session).is_some();
+    // Channel binding requires the SMB 3.x dialect family; a 2.0.2/2.1
+    // connection that sets the binding flag is rejected ([MS-SMB2] §3.3.5.5).
+    if req.flags & ss::FLAG_BINDING != 0
+        && hdr_session != 0
+        && !matches!(conn.dialect, Some(d) if d >= smb_proto_smb2::negotiate::DIALECT_300)
+    {
+        return Err(Status::REQUEST_NOT_ACCEPTED);
+    }
     conn.binding = binding;
     let inner = smb_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
     tracing::trace!(
@@ -1984,10 +1999,14 @@ pub(crate) fn session_setup(
             // different negotiated dialect has its new session closed with
             // STATUS_USER_SESSION_DELETED. Skipped for SMB 2.0.2 (no ClientGuid
             // table) and guest/anonymous sessions.
-            if let Some(dialect) = conn.dialect.filter(|&d| d != smb_proto_smb2::negotiate::DIALECT_202) {
+            if let Some(dialect) = conn
+                .dialect
+                .filter(|&d| d != smb_proto_smb2::negotiate::DIALECT_202)
+            {
                 use std::sync::LazyLock;
-                static CLIENT_DIALECTS: LazyLock<std::sync::Mutex<std::collections::HashMap<[u8; 16], u16>>> =
-                    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                static CLIENT_DIALECTS: LazyLock<
+                    std::sync::Mutex<std::collections::HashMap<[u8; 16], u16>>,
+                > = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
                 let mut table = CLIENT_DIALECTS.lock().unwrap();
                 match table.get(&conn.client_guid) {
                     Some(&seen) if seen != dialect => return Err(Status::USER_SESSION_DELETED),
@@ -2261,10 +2280,13 @@ pub(crate) async fn create(
     // Durable reconnect is handled earlier and skips this path.
     if let Some(app_id) = req.app_instance_id {
         let is_311 = conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311);
-        match server
-            .app_instances
-            .resolve(app_id, &path, conn.client_guid, is_311, req.app_instance_version)
-        {
+        match server.app_instances.resolve(
+            app_id,
+            &path,
+            conn.client_guid,
+            is_311,
+            req.app_instance_version,
+        ) {
             crate::state::AppInstanceMatch::Reject => {
                 let _ = vfs.close(open).await;
                 return Err(Status::FILE_FORCED_CLOSED);
@@ -2350,7 +2372,11 @@ pub(crate) async fn create(
     let mut lease_grant: Option<c::LeaseResp> = None;
     // Directory leasing ([MS-SMB2] §3.3.1.4) is an SMB 3.x feature; a directory
     // lease supports only READ + HANDLE caching.
-    let dir_leasing = is_dir && conn.dialect.map(|d| d >= smb_proto_smb2::negotiate::DIALECT_300).unwrap_or(false);
+    let dir_leasing = is_dir
+        && conn
+            .dialect
+            .map(|d| d >= smb_proto_smb2::negotiate::DIALECT_300)
+            .unwrap_or(false);
     let granted = if lease_context && (!is_dir || dir_leasing) {
         if let Some(lr) = req.lease {
             lease_grant = Some(arbitrate_lease(
@@ -2851,7 +2877,13 @@ fn send_lease_break(
 /// contents or state change, unless the change originates from the lease holder
 /// itself ([MS-SMB2] §3.3.1.4). `owner` is the file id of the open performing
 /// the change, used to suppress a self-break.
-pub(crate) fn break_dir_lease(server: &Arc<ServerShared>, conn: &Smb2Conn, dir: &str, owner: [u8; 16], clear: u32) {
+pub(crate) fn break_dir_lease(
+    server: &Arc<ServerShared>,
+    conn: &Smb2Conn,
+    dir: &str,
+    owner: [u8; 16],
+    clear: u32,
+) {
     let req_key = conn.lease_keys.get(&owner).copied();
     if let Some((key, old, new, epoch, outbound, crypto)) =
         server
@@ -2979,7 +3011,9 @@ pub(crate) async fn read(
     }
     // Check the open out of the shared table for the async read so no RefCell
     // borrow spans the await, then check it back in ([MS-SMB2] §3.3.5.5.3).
-    let mut open = conn.handle_take(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+    let mut open = conn
+        .handle_take(&req.file_id.0)
+        .ok_or(Status::INVALID_HANDLE)?;
     let result = vfs.read(&mut open, req.offset, len).await;
     conn.handle_insert(req.file_id.0, open);
     let data = result.map_err(vfs_err)?;
@@ -3010,7 +3044,9 @@ pub(crate) async fn write(
     ) {
         return Err(Status::FILE_LOCK_CONFLICT);
     }
-    let mut open = conn.handle_take(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+    let mut open = conn
+        .handle_take(&req.file_id.0)
+        .ok_or(Status::INVALID_HANDLE)?;
     let result = vfs.write(&mut open, req.offset, &req.payload, false).await;
     conn.handle_insert(req.file_id.0, open);
     let written = result.map_err(vfs_err)?;
@@ -3138,11 +3174,7 @@ pub(crate) async fn ioctl(
                     .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
                     .filter(|t| *t != 0)
                     .unwrap_or(60_000);
-                let access = if can_write {
-                    0x001F_01FF
-                } else {
-                    0x0012_0089
-                };
+                let access = if can_write { 0x001F_01FF } else { 0x0012_0089 };
                 let options = if is_dir { 0x1 } else { 0x40 };
                 let entry = crate::state::DurableEntry {
                     persistent_id: req.file_id.0,
@@ -3600,7 +3632,9 @@ pub(crate) async fn set_info(
                 Err(_) => return Err(Status::INVALID_PARAMETER),
             };
             let Some(op) = op else { return Ok(()) }; // advisory-only class
-            let mut open = conn.handle_take(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+            let mut open = conn
+                .handle_take(&req.file_id.0)
+                .ok_or(Status::INVALID_HANDLE)?;
             let result = vfs.set_info_open(&mut open, &op).await;
             conn.handle_insert(req.file_id.0, open);
             result.map_err(vfs_err)
@@ -3609,9 +3643,7 @@ pub(crate) async fn set_info(
             let path = conn
                 .with_handle(&req.file_id.0, |h| h.path.clone())
                 .ok_or(Status::INVALID_HANDLE)?;
-            vfs.set_security(&path, &req.buffer)
-                .await
-                .map_err(vfs_err)
+            vfs.set_security(&path, &req.buffer).await.map_err(vfs_err)
         }
         // Disk quotas are not tracked on this volume ([MS-FSCC] §2.4.33).
         c::info_type::QUOTA => Err(Status::INVALID_DEVICE_REQUEST),
