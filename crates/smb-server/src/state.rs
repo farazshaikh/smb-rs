@@ -519,14 +519,15 @@ pub enum LeaseAckError {
     StateNotAccepted,
 }
 
-/// Server-wide lease table: at most one primary lease holder per file path.
+/// Server-wide lease table: the set of caching-lease holders per file path.
 ///
-/// Simplified relative to [MS-SMB2] §3.3.1.10: a single holder is tracked per
-/// path (the one that may need breaking), and leases are managed independently
-/// of oplocks. This is sufficient for the common single-writer caching case.
+/// Simplified relative to [MS-SMB2] §3.3.1.10 (leases are managed independently
+/// of oplocks), but READ and HANDLE caching are shareable, so multiple clients
+/// may hold a lease on the same path with distinct lease keys — notably several
+/// directory-lease holders that must each be broken on a conflicting access.
 #[derive(Default)]
 pub struct LeaseTable {
-    held: std::sync::Mutex<HashMap<String, LeaseHolder>>,
+    held: std::sync::Mutex<HashMap<String, Vec<LeaseHolder>>>,
     /// One-shot signals delivered when a lease key's break is acknowledged, so
     /// a conflicting open can wait for a HANDLE-caching break ([MS-SMB2] §3.3.1.4).
     ack_waiters: std::sync::Mutex<HashMap<[u8; 16], Vec<tokio::sync::oneshot::Sender<()>>>>,
@@ -541,65 +542,58 @@ impl LeaseTable {
         }
     }
 
-    /// Grant a lease on `path` if none is held; returns false if one exists.
+    /// Record a lease holder on `path`. Multiple clients may hold shareable
+    /// (READ / HANDLE) caching on the same path with distinct lease keys
+    /// ([MS-SMB2] §3.3.1.4); a duplicate of an existing key+open is ignored.
     pub fn grant(&self, path: &str, holder: LeaseHolder) -> bool {
         let mut held = self.held.lock().unwrap();
-        if held.contains_key(path) {
+        let holders = held.entry(path.to_string()).or_default();
+        if holders
+            .iter()
+            .any(|h| h.key == holder.key && h.file_id == holder.file_id)
+        {
             return false;
         }
-        held.insert(path.to_string(), holder);
+        holders.push(holder);
         true
     }
 
-    /// Snapshot the current holder's identity/state on `path`, if any:
-    /// `(key, state, epoch, v2)`.
-    pub fn peek(&self, path: &str) -> Option<([u8; 16], u32, u16, bool)> {
+    /// Snapshot a co-holder's state on `path` sharing lease key `key`, if any:
+    /// `(state, epoch, v2)`. A CREATE reusing an existing lease key shares that
+    /// caching state rather than establishing a new grant ([MS-SMB2]
+    /// §3.3.5.9.11).
+    pub fn peek_key(&self, path: &str, key: [u8; 16]) -> Option<(u32, u16, bool)> {
+        self.held
+            .lock()
+            .unwrap()
+            .get(path)?
+            .iter()
+            .find(|h| h.key == key)
+            .map(|h| (h.state, h.epoch, h.v2))
+    }
+
+    /// True when any lease is currently held on `path`.
+    pub fn has_holders(&self, path: &str) -> bool {
         self.held
             .lock()
             .unwrap()
             .get(path)
-            .map(|h| (h.key, h.state, h.epoch, h.v2))
+            .is_some_and(|h| !h.is_empty())
     }
 
-    /// Break the write-caching bit of the holder on `path` down to `new_state`,
-    /// returning a clone of the notification-relevant fields when a break is
-    /// actually needed (state changed). Bumps the stored epoch and state.
-    pub fn downgrade(
-        &self,
-        path: &str,
-        new_state: u32,
-    ) -> Option<(
-        [u8; 16],
-        u32,
-        u16,
-        tokio::sync::mpsc::Sender<Vec<u8>>,
-        BreakCrypto,
-    )> {
-        let mut held = self.held.lock().unwrap();
-        let h = held.get_mut(path)?;
-        if h.state == new_state {
-            return None;
-        }
-        let old = h.state;
-        h.state = new_state;
-        h.epoch = h.epoch.wrapping_add(1);
-        h.breaking = true;
-        h.break_to = new_state;
-        Some((h.key, old, h.epoch, h.outbound.clone(), h.crypto.clone()))
-    }
-
-    /// Break the lease on `path` by clearing the `clear` caching bits, unless
-    /// it is held by `owner` (the caller's own open) or the caller shares the
-    /// lease key `req_key` (a co-holder of the same lease). Returns the
-    /// notification fields `(key, old_state, new_state, epoch, outbound,
-    /// crypto)` when a break is actually needed ([MS-SMB2] §3.3.4.7).
+    /// Break every conflicting holder on `path` by clearing the `clear` caching
+    /// bits, skipping the caller's own open (`owner`) and any co-holder sharing
+    /// `req_key`. Returns one notification tuple `(key, old_state, new_state,
+    /// epoch, outbound, crypto)` per holder that must be broken ([MS-SMB2]
+    /// §3.3.4.7); READ / HANDLE caching is shareable, so multiple directory
+    /// holders may each require a break.
     pub fn break_conflict(
         &self,
         path: &str,
         owner: LockOwner,
         req_key: Option<[u8; 16]>,
         clear: u32,
-    ) -> Option<(
+    ) -> Vec<(
         [u8; 16],
         u32,
         u32,
@@ -608,33 +602,39 @@ impl LeaseTable {
         BreakCrypto,
     )> {
         let mut held = self.held.lock().unwrap();
-        let h = held.get_mut(path)?;
-        if (h.session_id, h.file_id) == owner || req_key == Some(h.key) {
-            return None;
+        let mut breaks = Vec::new();
+        let Some(holders) = held.get_mut(path) else {
+            return breaks;
+        };
+        for h in holders.iter_mut() {
+            if (h.session_id, h.file_id) == owner || req_key == Some(h.key) {
+                continue;
+            }
+            let new_state = h.state & !clear;
+            if new_state == h.state {
+                continue;
+            }
+            let old = h.state;
+            h.state = new_state;
+            h.epoch = h.epoch.wrapping_add(1);
+            h.breaking = true;
+            h.break_to = new_state;
+            breaks.push((
+                h.key,
+                old,
+                new_state,
+                h.epoch,
+                h.outbound.clone(),
+                h.crypto.clone(),
+            ));
         }
-        let new_state = h.state & !clear;
-        if new_state == h.state {
-            return None;
-        }
-        let old = h.state;
-        h.state = new_state;
-        h.epoch = h.epoch.wrapping_add(1);
-        h.breaking = true;
-        h.break_to = new_state;
-        Some((
-            h.key,
-            old,
-            new_state,
-            h.epoch,
-            h.outbound.clone(),
-            h.crypto.clone(),
-        ))
+        breaks
     }
 
     /// Record the state a holder settled on after acknowledging a break.
     pub fn set_state(&self, key: [u8; 16], state: u32) {
         let mut held = self.held.lock().unwrap();
-        if let Some(h) = held.values_mut().find(|h| h.key == key) {
+        if let Some(h) = held.values_mut().flatten().find(|h| h.key == key) {
             h.state = state;
         }
     }
@@ -651,6 +651,7 @@ impl LeaseTable {
         let mut held = self.held.lock().unwrap();
         let h = held
             .values_mut()
+            .flatten()
             .find(|h| h.key == key && h.client_guid == client_guid)
             .ok_or(LeaseAckError::NotFound)?;
         if !h.breaking {
@@ -667,11 +668,15 @@ impl LeaseTable {
     /// Drop the lease held by `owner` on `path` (on close), returning it.
     pub fn release(&self, path: &str, owner: LockOwner) -> Option<LeaseHolder> {
         let mut held = self.held.lock().unwrap();
-        if held.get(path).map(|h| (h.session_id, h.file_id)) == Some(owner) {
-            held.remove(path)
-        } else {
-            None
+        let holders = held.get_mut(path)?;
+        let idx = holders
+            .iter()
+            .position(|h| (h.session_id, h.file_id) == owner)?;
+        let removed = holders.remove(idx);
+        if holders.is_empty() {
+            held.remove(path);
         }
+        Some(removed)
     }
 
     /// Register interest in a lease key's break acknowledgment; the returned
@@ -693,10 +698,11 @@ impl LeaseTable {
 
     /// Drop every lease held by any open of `session_id`.
     pub fn release_session(&self, session_id: u64) {
-        self.held
-            .lock()
-            .unwrap()
-            .retain(|_, h| h.session_id != session_id);
+        let mut held = self.held.lock().unwrap();
+        for holders in held.values_mut() {
+            holders.retain(|h| h.session_id != session_id);
+        }
+        held.retain(|_, holders| !holders.is_empty());
     }
 }
 

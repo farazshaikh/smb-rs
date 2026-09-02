@@ -2461,7 +2461,7 @@ pub(crate) async fn create(
     // write caching (RWH -> RH) ([MS-SMB2] §3.3.4.7); lease-context opens are
     // handled by arbitrate_lease below.
     if req.lease.is_none() && !is_dir {
-        if let Some((k, old, new, ep, out, crypto)) = server.leases.break_conflict(
+        for (k, old, new, ep, out, crypto) in server.leases.break_conflict(
             &path,
             (conn.session_id, fid_bytes),
             None,
@@ -2501,14 +2501,14 @@ pub(crate) async fn create(
             .unwrap_or(false);
     let granted = if lease_context && (!is_dir || dir_leasing) {
         if let Some(lr) = req.lease {
-            let (resp, ack_wait) = arbitrate_lease(
+            let (resp, ack_waits) = arbitrate_lease(
                 server, conn, &path, fid_bytes, &lr, req_signed, is_dir,
             );
             lease_grant = Some(resp);
             conn.lease_keys.insert(fid_bytes, lr.key);
-            // Block this conflicting create until the prior holder acknowledges
+            // Block this conflicting create until the prior holders acknowledge
             // the write-caching break ([MS-SMB2] §3.3.1.4), or a short timeout.
-            if let Some(rx) = ack_wait {
+            for rx in ack_waits {
                 let _ = tokio::time::timeout(LEASE_ACK_TIMEOUT, rx).await;
             }
             c::oplock::LEASE
@@ -2869,10 +2869,11 @@ fn grant_durable(
 }
 
 /// Arbitrate a caching lease for a lease-requesting CREATE ([MS-SMB2]
-/// §2.2.13.2). The sole opener gets the requested state (capped at RWH); an
-/// open reusing the same lease key shares the existing state; an open with a
-/// different key strips write caching from the current holder (RWH -> RH) via
-/// an unsolicited LEASE_BREAK and is itself granted read/handle caching.
+/// §2.2.13.2). A sole opener gets the requested state (capped at RWH); an open
+/// reusing the same lease key shares the existing state; READ and HANDLE
+/// caching are shareable, so directory holders with distinct keys coexist,
+/// whereas a contending file open strips write caching from existing holders
+/// (RWH -> RH) via unsolicited LEASE_BREAKs and is itself capped at RH.
 fn arbitrate_lease(
     server: &Arc<ServerShared>,
     conn: &Smb2Conn,
@@ -2881,53 +2882,65 @@ fn arbitrate_lease(
     lr: &c::LeaseReq,
     signed: bool,
     is_dir: bool,
-) -> (c::LeaseResp, Option<tokio::sync::oneshot::Receiver<()>>) {
+) -> (c::LeaseResp, Vec<tokio::sync::oneshot::Receiver<()>>) {
     // A directory lease supports only READ + HANDLE caching; a file lease also
     // supports WRITE caching ([MS-SMB2] §3.3.1.4).
     let allowed = if is_dir { c::lease::RH } else { c::lease::RWH };
     let requested = lr.state & allowed;
-    if let Some((key, state, epoch, v2)) = server.leases.peek(path) {
-        if key == lr.key {
-            return (
-                c::LeaseResp {
-                    key: lr.key,
-                    state,
-                    flags: 0,
-                    epoch,
-                    v2,
-                },
-                None,
-            );
-        }
-        let new_state = state & c::lease::RH;
-        // Register the ack wait before sending so the conflicting create can
-        // block until the holder acknowledges ([MS-SMB2] §3.3.1.4).
-        let ack_wait = server.leases.downgrade(path, new_state).map(
-            |(hkey, old, nepoch, outbound, crypto)| {
-                let rx = server.leases.register_ack_wait(hkey);
-                send_lease_break(&outbound, &crypto, hkey, old, new_state, nepoch);
-                rx
-            },
-        );
-        let grant = requested & c::lease::RH;
+    // A CREATE reusing an existing lease key shares that holder's caching state
+    // ([MS-SMB2] §3.3.5.9.11).
+    if let Some((state, epoch, v2)) = server.leases.peek_key(path, lr.key) {
         return (
             c::LeaseResp {
                 key: lr.key,
-                state: grant,
+                state,
                 flags: 0,
-                epoch: lr.epoch,
-                v2: lr.v2,
+                epoch,
+                v2,
             },
-            ack_wait,
+            Vec::new(),
         );
     }
+    // Other holders already cache this path. WRITE caching is exclusive, so a
+    // contending file open strips it from every existing holder (RWH -> RH) and
+    // blocks on their acknowledgments; READ/HANDLE caching is shareable, so
+    // directory co-holders are simply added ([MS-SMB2] §3.3.1.4/§3.3.4.7).
+    let contended = server.leases.has_holders(path);
+    let mut ack_waits = Vec::new();
+    if !is_dir {
+        for (hkey, old, new, ep, out, crypto) in server.leases.break_conflict(
+            path,
+            (conn.session_id, fid),
+            Some(lr.key),
+            c::lease::WRITE_CACHING,
+        ) {
+            let rx = server.leases.register_ack_wait(hkey);
+            send_lease_break(&out, &crypto, hkey, old, new, ep);
+            ack_waits.push(rx);
+        }
+    }
+    // A file lease contending with an existing holder is capped at READ+HANDLE
+    // (WRITE is exclusive); a directory lease and a sole opener keep the full
+    // requested caching.
+    let grant_state = if contended && !is_dir {
+        requested & c::lease::RH
+    } else {
+        requested
+    };
     // A newly established lease initializes its epoch from the request and
-    // increments it by one for a LeaseV2 grant ([MS-SMB2] §3.3.5.9.11); V1
-    // leases have no epoch (reported as zero).
-    let granted_epoch = if lr.v2 { lr.epoch.wrapping_add(1) } else { 0 };
+    // increments it by one for a LeaseV2 grant ([MS-SMB2] §3.3.5.9.11); a file
+    // co-holder capped to RH keeps the requested epoch (matching the write
+    // holder it displaced); V1 leases have no epoch (reported as zero).
+    let granted_epoch = if !lr.v2 {
+        0
+    } else if contended && !is_dir {
+        lr.epoch
+    } else {
+        lr.epoch.wrapping_add(1)
+    };
     let holder = crate::state::LeaseHolder {
         key: lr.key,
-        state: requested,
+        state: grant_state,
         epoch: granted_epoch,
         v2: lr.v2,
         session_id: conn.session_id,
@@ -2936,19 +2949,19 @@ fn arbitrate_lease(
         crypto: break_crypto(conn, signed),
         client_guid: conn.client_guid,
         breaking: false,
-        break_to: requested,
+        break_to: grant_state,
     };
     server.leases.grant(path, holder);
     counter!("smb_leases_granted_total").increment(1);
     (
         c::LeaseResp {
             key: lr.key,
-            state: requested,
+            state: grant_state,
             flags: 0,
             epoch: granted_epoch,
             v2: lr.v2,
         },
-        None,
+        ack_waits,
     )
 }
 
@@ -3026,7 +3039,7 @@ pub(crate) fn break_dir_lease(
     clear: u32,
 ) {
     let req_key = conn.lease_keys.get(&owner).copied();
-    if let Some((key, old, new, epoch, outbound, crypto)) =
+    for (key, old, new, epoch, outbound, crypto) in
         server
             .leases
             .break_conflict(dir, (conn.session_id, owner), req_key, clear)
@@ -3046,13 +3059,17 @@ pub(crate) async fn break_dir_lease_wait(
     clear: u32,
 ) {
     let req_key = conn.lease_keys.get(&owner).copied();
-    if let Some((key, old, new, epoch, outbound, crypto)) =
+    let mut waits = Vec::new();
+    for (key, old, new, epoch, outbound, crypto) in
         server
             .leases
             .break_conflict(dir, (conn.session_id, owner), req_key, clear)
     {
         let rx = server.leases.register_ack_wait(key);
         send_lease_break(&outbound, &crypto, key, old, new, epoch);
+        waits.push(rx);
+    }
+    for rx in waits {
         let _ = tokio::time::timeout(LEASE_ACK_TIMEOUT, rx).await;
     }
 }
@@ -3195,7 +3212,7 @@ pub(crate) async fn write(
     // A write from a non-holder invalidates cached reads: break the lease to
     // NONE ([MS-SMB2] §3.3.4.7). A co-holder of the same lease key is exempt.
     let req_key = conn.lease_keys.get(&req.file_id.0).copied();
-    if let Some((k, old, new, ep, out, crypto)) = server.leases.break_conflict(
+    for (k, old, new, ep, out, crypto) in server.leases.break_conflict(
         &path,
         (conn.session_id, req.file_id.0),
         req_key,
