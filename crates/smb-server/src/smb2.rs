@@ -148,6 +148,10 @@ pub struct Smb2Conn {
     /// Its AEAD tag is the integrity check, so the inner SMB2 signature is not
     /// verified ([MS-SMB2] §3.3.5.2.4). Reset per frame.
     pub req_encrypted: bool,
+    /// True while handling a channel-binding SESSION_SETUP ([MS-SMB2]
+    /// §3.3.5.5.3): the connection derives its own Channel.SigningKey but MUST
+    /// NOT overwrite the shared session's stored crypto material.
+    pub binding: bool,
 }
 
 impl Smb2Conn {
@@ -197,6 +201,7 @@ impl Smb2Conn {
             resp_tree_id: None,
             seal_current: false,
             req_encrypted: false,
+            binding: false,
         }
     }
 
@@ -1026,11 +1031,14 @@ async fn process_single(
     }
 
     // Register the established session so later channels can bind to it
-    // ([MS-SMB2] §3.3.5.5.3 multichannel session binding).
+    // ([MS-SMB2] §3.3.5.5.3 multichannel session binding). A binding setup
+    // attaches a new channel to an existing session and MUST NOT overwrite the
+    // stored session crypto with this channel's freshly derived keys.
     if hdr.command == ss::cmd::SESSION_SETUP
         && status == Status::SUCCESS
         && conn.authenticated
         && conn.session_id != 0
+        && !conn.binding
     {
         server.sessions.insert(
             conn.session_id,
@@ -1833,6 +1841,7 @@ pub(crate) fn session_setup(
     let binding = req.flags & ss::FLAG_BINDING != 0
         && hdr_session != 0
         && server.sessions.get(hdr_session).is_some();
+    conn.binding = binding;
     let inner = smb_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
     tracing::trace!(
         blob_len = req.blob.len(),
@@ -1926,12 +1935,14 @@ pub(crate) fn session_setup(
                     }
                 }
             }
-            // A bound channel reuses the original session's crypto material so
-            // signatures/encryption stay consistent across channels.
+            // A bound channel derives its own Channel.SigningKey from *this*
+            // authentication ([MS-SMB2] §3.3.5.5.3 step 9) and the SPNEGO
+            // mechListMIC is computed with this exchange's session key, so
+            // conn.session_key/signing_key must stay the freshly authenticated
+            // values. Only the session-wide encryption material (keyed by the
+            // original Session.SessionKey) is inherited from the session.
             if binding {
                 if let Some(entry) = server.sessions.get(conn.session_id) {
-                    conn.session_key = entry.session_key;
-                    conn.signing_key = entry.signing_key;
                     conn.cipher = entry.cipher;
                     conn.enc_keys = entry.enc_keys;
                     conn.encrypt_data = entry.encrypt_data;
