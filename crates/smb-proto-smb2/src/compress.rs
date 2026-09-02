@@ -38,7 +38,27 @@ pub mod algo {
 }
 
 /// Algorithms this server can both send and receive.
-pub const SUPPORTED: &[u16] = &[algo::LZNT1, algo::PATTERN_V1];
+pub const SUPPORTED: &[u16] = &[algo::LZNT1, algo::LZ77, algo::PATTERN_V1];
+
+/// Compress with Plain LZ77 (LZXpress, [MS-XCA]); `None` if the codec errors.
+fn lz77_compress(data: &[u8]) -> Option<Vec<u8>> {
+    xpress_rs::lz77::LZ77Compressor::new(data.to_vec())
+        .compress()
+        .ok()
+}
+
+/// Decompress a Plain LZ77 (LZXpress, [MS-XCA]) stream. Wrapped in `catch_unwind`
+/// so malformed attacker-supplied input that panics the codec is contained as a
+/// decode failure (the dispatcher then disconnects) instead of unwinding the
+/// connection task.
+fn lz77_decompress(data: &[u8]) -> Option<Vec<u8>> {
+    let input = data.to_vec();
+    std::panic::catch_unwind(move || {
+        xpress_rs::lz77::LZ77Decompressor::new(input).decompress().ok()
+    })
+    .ok()
+    .flatten()
+}
 
 /// Parse a client `SMB2_COMPRESSION_CAPABILITIES` context (§2.2.3.1.3) into its
 /// advertised algorithm list.
@@ -108,6 +128,7 @@ pub fn decompress_message(frame: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(prefix);
     match algorithm {
         algo::LZNT1 => lznt1::decompress(compressed, &mut out).ok()?,
+        algo::LZ77 => out.extend_from_slice(&lz77_decompress(compressed)?),
         algo::PATTERN_V1 => expand_pattern_v1(compressed, &mut out)?,
         algo::NONE => out.extend_from_slice(compressed),
         _ => return None,
@@ -157,6 +178,16 @@ fn decompress_chained(frame: &[u8]) -> Option<Vec<u8>> {
                     return None;
                 }
             }
+            algo::LZ77 => {
+                // Length includes the leading 4-byte OriginalPayloadSize field.
+                let orig_payload =
+                    u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?) as usize;
+                let data = lz77_decompress(payload.get(4..)?)?;
+                if data.len() != orig_payload {
+                    return None;
+                }
+                out.extend_from_slice(&data);
+            }
             _ => return None,
         }
         pos += length;
@@ -181,13 +212,17 @@ pub fn compress_message(msg: &[u8], algorithm: u16) -> Option<Vec<u8>> {
 /// Compress the portion of `msg` at or after `offset`, leaving the leading
 /// `offset` bytes uncompressed ([MS-SMB2] §3.1.4.4 step 2).
 fn compress_message_at(msg: &[u8], algorithm: u16, offset: usize) -> Option<Vec<u8>> {
-    if algorithm != algo::LZNT1 {
-        return None;
-    }
     let prefix = msg.get(..offset)?;
     let body = msg.get(offset..)?;
-    let mut payload = Vec::new();
-    lznt1::compress(body, &mut payload);
+    let payload = match algorithm {
+        algo::LZNT1 => {
+            let mut p = Vec::new();
+            lznt1::compress(body, &mut p);
+            p
+        }
+        algo::LZ77 => lz77_compress(body)?,
+        _ => return None,
+    };
     // §3.1.4.4 step 6: send uncompressed when compression does not shrink the
     // compressed portion.
     if payload.len() >= body.len() {
@@ -196,7 +231,7 @@ fn compress_message_at(msg: &[u8], algorithm: u16, offset: usize) -> Option<Vec<
     let mut f = Vec::with_capacity(16 + prefix.len() + payload.len());
     f.extend_from_slice(&PROTOCOL_ID);
     f.extend_from_slice(&(body.len() as u32).to_le_bytes()); // OriginalCompressedSegmentSize
-    f.extend_from_slice(&algo::LZNT1.to_le_bytes()); // CompressionAlgorithm
+    f.extend_from_slice(&algorithm.to_le_bytes()); // CompressionAlgorithm
     f.extend_from_slice(&0u16.to_le_bytes()); // Flags
     f.extend_from_slice(&(offset as u32).to_le_bytes()); // Offset of the compressed portion
     f.extend_from_slice(prefix);
@@ -205,12 +240,12 @@ fn compress_message_at(msg: &[u8], algorithm: u16, offset: usize) -> Option<Vec<
 }
 
 /// Wrap `msg` in a chained COMPRESSION_TRANSFORM_HEADER ([MS-SMB2] \u00a72.2.42.2),
-/// emitting a Pattern_V1 payload for each long single-byte run and an LZNT1 (or
-/// uncompressed NONE) payload for the data between runs ([MS-SMB2] \u00a73.1.4.4).
+/// emitting a Pattern_V1 payload for each long single-byte run and an `algorithm`
+/// (or uncompressed NONE) payload for the data between runs ([MS-SMB2] \u00a73.1.4.4).
 /// For a READ response the SMB2 header and READ structure are carried in a
 /// leading NONE payload so only the file data is compressed. Returns `None` when
 /// the result would not shrink the message.
-pub fn compress_message_chained(msg: &[u8]) -> Option<Vec<u8>> {
+pub fn compress_message_chained(msg: &[u8], algorithm: u16) -> Option<Vec<u8>> {
     let offset = read_response_data_offset(msg).unwrap_or(0);
     let mut payloads = Vec::new();
     let mut first = true;
@@ -237,18 +272,23 @@ pub fn compress_message_chained(msg: &[u8]) -> Option<Vec<u8>> {
             i += 1;
         }
         let seg = &body[seg_start..i];
-        let mut comp = Vec::new();
-        lznt1::compress(seg, &mut comp);
-        if comp.len() < seg.len() {
-            push_chained_payload(
+        let comp = match algorithm {
+            algo::LZ77 => lz77_compress(seg),
+            _ => {
+                let mut c = Vec::new();
+                lznt1::compress(seg, &mut c);
+                Some(c)
+            }
+        };
+        match comp {
+            Some(comp) if comp.len() < seg.len() => push_chained_payload(
                 &mut payloads,
                 &mut first,
-                algo::LZNT1,
+                algorithm,
                 &comp,
                 Some(seg.len() as u32),
-            );
-        } else {
-            push_chained_payload(&mut payloads, &mut first, algo::NONE, seg, None);
+            ),
+            _ => push_chained_payload(&mut payloads, &mut first, algo::NONE, seg, None),
         }
     }
     let mut f = Vec::with_capacity(8 + payloads.len());
@@ -333,6 +373,21 @@ mod tests {
     }
 
     #[test]
+    fn lz77_transform_round_trips() {
+        let msg = b"abc".repeat(100);
+        let frame = compress_message(&msg, algo::LZ77).expect("compresses");
+        assert_eq!(&frame[0..4], &PROTOCOL_ID, "transform magic");
+        assert_eq!(
+            u16::from_le_bytes([frame[8], frame[9]]),
+            algo::LZ77,
+            "advertises LZ77"
+        );
+        assert!(frame.len() < msg.len(), "shrunk");
+        let back = decompress_message(&frame).expect("decompresses");
+        assert_eq!(back, msg, "round-trips");
+    }
+
+    #[test]
     fn incompressible_message_is_not_wrapped() {
         // Random-ish, tiny input rarely shrinks under LZNT1.
         let msg: Vec<u8> = (0..32u8).collect();
@@ -356,8 +411,9 @@ mod tests {
 
     #[test]
     fn negotiate_intersects_with_client() {
+        // Order follows the client's request; LZ77+Huffman is not yet supported.
         let client = [algo::LZ77, algo::LZNT1, algo::LZ77_HUFFMAN];
-        assert_eq!(negotiate_algos(&client), vec![algo::LZNT1]);
+        assert_eq!(negotiate_algos(&client), vec![algo::LZ77, algo::LZNT1]);
         let caps = build_compression_caps(&[algo::LZNT1, algo::PATTERN_V1], true);
         assert_eq!(parse_compression_caps(&caps), vec![algo::LZNT1, algo::PATTERN_V1]);
         assert_eq!(parse_compression_flags(&caps), CAP_FLAG_CHAINED);
@@ -368,7 +424,7 @@ mod tests {
         // A long single-byte run (Pattern_V1) followed by compressible data.
         let mut msg = vec![0xAAu8; 256];
         msg.extend(b"chained compression payload data ".repeat(64));
-        let frame = compress_message_chained(&msg).expect("compresses");
+        let frame = compress_message_chained(&msg, algo::LZNT1).expect("compresses");
         assert_eq!(&frame[0..4], &PROTOCOL_ID, "transform magic");
         assert_eq!(
             u16::from_le_bytes([frame[10], frame[11]]) & CHAINED_FLAG,

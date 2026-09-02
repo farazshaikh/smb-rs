@@ -442,7 +442,7 @@ pub(crate) async fn process_frame(
         if let Some(algo) = conn.compress_algo {
             if conn.compress_response {
                 let packed = if conn.compress_chained {
-                    smb_proto_smb2::compress::compress_message_chained(&payload)
+                    smb_proto_smb2::compress::compress_message_chained(&payload, algo)
                 } else {
                     smb_proto_smb2::compress::compress_message(&payload, algo)
                 };
@@ -1773,17 +1773,23 @@ pub(crate) fn negotiate(
             )
         })
         .unwrap_or_default();
-    if dialect == smb_proto_smb2::negotiate::DIALECT_311
-        && comp_algos.contains(&smb_proto_smb2::compress::algo::LZNT1)
-    {
-        conn.compress_algo = Some(smb_proto_smb2::compress::algo::LZNT1);
+    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+        // Choose the outbound compression algorithm: the first negotiated
+        // non-pattern algorithm (Pattern_V1 is a scan applied within chained
+        // payloads, not a standalone transform codec).
+        use smb_proto_smb2::compress::algo;
+        conn.compress_algo = comp_algos
+            .iter()
+            .copied()
+            .find(|a| matches!(*a, algo::LZNT1 | algo::LZ77));
         // Use the chained transform for responses when the peer advertised it
         // ([MS-SMB2] §2.2.3.1.3 SMB2_COMPRESSION_CAPABILITIES_FLAG_CHAINED).
-        conn.compress_chained = comp_ctx.is_some_and(|c| {
-            smb_proto_smb2::compress::parse_compression_flags(&c.data)
-                & smb_proto_smb2::compress::CAP_FLAG_CHAINED
-                != 0
-        });
+        conn.compress_chained = conn.compress_algo.is_some()
+            && comp_ctx.is_some_and(|c| {
+                smb_proto_smb2::compress::parse_compression_flags(&c.data)
+                    & smb_proto_smb2::compress::CAP_FLAG_CHAINED
+                    != 0
+            });
     }
     // Echo the CHAINED flag only when the client requested it ([MS-SMB2]
     // §3.3.5.4); advertising it otherwise would make peers chain every message.

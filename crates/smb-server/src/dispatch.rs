@@ -172,7 +172,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                             && resp.first() != Some(&PROTO_ID_ENCRYPTED)
                         {
                             let packed = if c2.compress_chained {
-                                smb_proto_smb2::compress::compress_message_chained(&resp)
+                                smb_proto_smb2::compress::compress_message_chained(&resp, algo)
                             } else {
                                 smb_proto_smb2::compress::compress_message(&resp, algo)
                             };

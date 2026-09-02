@@ -9,6 +9,7 @@ license.workspace = true
 smb-proto = { path = "../smb-proto" }
 smb-vfs = { path = "../smb-vfs" }
 lznt1 = { workspace = true }
+xpress_rs = { workspace = true }
 
 [lints]
 workspace = true

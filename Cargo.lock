@@ -1470,6 +1470,7 @@ dependencies = [
  "lznt1",
  "smb-proto",
  "smb-vfs",
+ "xpress_rs",
 ]
 
 [[package]]
@@ -2046,6 +2047,21 @@ dependencies = [
  "libc",
  "rustix",
 ]
+
+[[package]]
+name = "xpress_rs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12b56dcadbc0a57d30c4cd727353ac05046fba57f877da4e8fcbaf6975262730"
+dependencies = [
+ "xxhash-rust",
+]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "zerocopy"
