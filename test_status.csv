@@ -128,7 +128,7 @@ protocol,Leasing_FileLeasingV1_SameLeaseKey,FileLeasing,pass,8143,2026-08-30T13:
 protocol,Leasing_FileLeasingV2_SameLeaseKey,FileLeasing,pass,8138,2026-08-30T13:33:58.6653322-07:00,b6e8e04,
 protocol,BVT_DirectoryLeasing_LeaseBreakOnMultiClients,LeasingExtendedTest,pass,340,2026-09-01T23:29:19-07:00,29ca7f1,Multi-holder directory lease table; both co-holders receive the HANDLE-caching break
 protocol,DirectoryLeasing_BreakHandleCachingByConflictOpen,LeasingExtendedTest,pass,135,2026-09-01T03:38:56.636792-07:00,c7a1147,
-protocol,DirectoryLeasing_BreakHandleCachingByParentRenamed,LeasingExtendedTest,fail,211,2026-09-01T03:38:56.636792-07:00,c7a1147,Needs delete-on-close of non-empty dir + subtree open-handle tracking to fail rename with ACCESS_DENIED
+protocol,DirectoryLeasing_BreakHandleCachingByParentRenamed,LeasingExtendedTest,pass,393,2026-09-01T23:39:19-07:00,82b55cb,Directory rename fails ACCESS_DENIED with open subtree handle; subtree lease break; delete-on-close of non-empty dir no longer fails CLOSE
 protocol,DirectoryLeasing_BreakReadCachingByChildAdded,LeasingExtendedTest,pass,170,2026-09-01T03:38:56.636792-07:00,c7a1147,
 protocol,DirectoryLeasing_BreakReadCachingByChildDeleted,LeasingExtendedTest,pass,170,2026-09-01T03:38:56.636792-07:00,c7a1147,
 protocol,DirectoryLeasing_BreakReadCachingByChildModified,LeasingExtendedTest,pass,173,2026-09-01T03:38:56.636792-07:00,c7a1147,
