@@ -822,6 +822,7 @@ async fn process_single(
     // Request half of the 3.1.1 pre-auth integrity hash ([MS-SMB2] §3.3.4.1.1):
     // every NEGOTIATE / SESSION_SETUP message updates it before processing.
     let is_preauth_msg = matches!(hdr.command, ss::cmd::NEGOTIATE | ss::cmd::SESSION_SETUP);
+    let preauth_before = conn.preauth_hash;
     if is_preauth_msg {
         let mut joined = Vec::with_capacity(hdr::LEN + buf.len());
         joined.extend_from_slice(&conn.preauth_hash);
@@ -1126,7 +1127,14 @@ async fn process_single(
         );
     }
 
-    if is_preauth_msg && conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
+    // A session setup that fails (e.g. a malformed binding token) does not
+    // contribute to the 3.1.1 pre-auth integrity hash ([MS-SMB2] §3.3.5.5): roll
+    // back the request-side update so a later attempt derives the right keys.
+    let ss_failed = hdr.command == ss::cmd::SESSION_SETUP
+        && !matches!(status, Status::SUCCESS | Status::MORE_PROCESSING_REQUIRED);
+    if ss_failed {
+        conn.preauth_hash = preauth_before;
+    } else if is_preauth_msg && conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
         let mut joined = Vec::with_capacity(hdr::LEN + resp.len());
         joined.extend_from_slice(&conn.preauth_hash);
         joined.extend_from_slice(&resp);
@@ -1920,6 +1928,13 @@ pub(crate) fn session_setup(
     }
     conn.binding = binding;
     let inner = smb_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
+    // A binding channel does a full NTLM exchange; its GSS token must be a
+    // well-formed SPNEGO token (negTokenInit 0x60 or negTokenResp 0xA1). A
+    // malformed token is rejected with STATUS_INVALID_PARAMETER ([MS-SMB2]
+    // §3.3.5.5) rather than treated as a fresh first leg.
+    if binding && !matches!(req.blob.first(), Some(0x60) | Some(0xA1)) {
+        return Err(Status::INVALID_PARAMETER);
+    }
     tracing::trace!(
         blob_len = req.blob.len(),
         msg_type = ?smb_auth::ntlm::msg_type(inner),
