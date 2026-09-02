@@ -22,10 +22,10 @@ protocol,Compound_Encrypt_RelatedRequests,Compound,pass,219,2026-09-01T00:37:17.
 protocol,Compound_Encrypt_UnrelatedRequests,Compound,pass,298,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_SMB2Compression_Chained_PatternV1,Compression,pass,50,2026-09-01T10:56:17.504028-07:00,c5fb28a,
 protocol,BVT_SMB2Compression_Chained_PatternV1_Encrypted,Compression,pass,50,2026-09-01T10:56:17.504028-07:00,c5fb28a,
-protocol,BVT_SMB2Compression_LZ77,Compression,skip,51,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77/LZ77+Huffman compressor not implemented; no Rust crate provides Xpress compression (decompress-only). Chained+LZNT1+Pattern_V1 done.
-protocol,BVT_SMB2Compression_LZ77Huffman,Compression,skip,50,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77/LZ77+Huffman compressor not implemented; no Rust crate provides Xpress compression (decompress-only). Chained+LZNT1+Pattern_V1 done.
-protocol,BVT_SMB2Compression_LZ77Huffman_Encrypted,Compression,skip,50,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77/LZ77+Huffman compressor not implemented; no Rust crate provides Xpress compression (decompress-only). Chained+LZNT1+Pattern_V1 done.
-protocol,BVT_SMB2Compression_LZ77_Encrypted,Compression,skip,51,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77/LZ77+Huffman compressor not implemented; no Rust crate provides Xpress compression (decompress-only). Chained+LZNT1+Pattern_V1 done.
+protocol,BVT_SMB2Compression_LZ77,Compression,pass,51,2026-09-01T02:32:37.738410-07:00,314b785,LZ77 (LZXpress/MS-XCA) compress+decompress via xpress_rs crate.
+protocol,BVT_SMB2Compression_LZ77Huffman,Compression,skip,50,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77+Huffman (Xpress-Huffman) compress needs a Huffman-table encoder; available Rust crates are decode-only (xpress-huffman). LZ77/LZNT1/Pattern_V1/chained done.
+protocol,BVT_SMB2Compression_LZ77Huffman_Encrypted,Compression,skip,50,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77+Huffman (Xpress-Huffman) compress needs a Huffman-table encoder; available Rust crates are decode-only (xpress-huffman). LZ77/LZNT1/Pattern_V1/chained done.
+protocol,BVT_SMB2Compression_LZ77_Encrypted,Compression,pass,51,2026-09-01T02:32:37.738410-07:00,314b785,LZ77 (LZXpress/MS-XCA) compress+decompress via xpress_rs crate.
 protocol,BVT_SMB2Compression_LZNT1,Compression,pass,52,2026-09-01T02:32:37.738410-07:00,c5fb28a,
 protocol,BVT_SMB2Compression_LZNT1_Encrypted,Compression,pass,50,2026-09-01T02:32:37.738410-07:00,c5fb28a,
 protocol,BVT_SMB2Compression_Unchained,Compression,pass,51,2026-09-01T02:32:37.738410-07:00,c5fb28a,
@@ -51,8 +51,8 @@ protocol,SMB2Compression_IncompressibleReadResponse,Compression,pass,50,2026-09-
 protocol,SMB2Compression_InvalidCompressedPacketLength,Compression,pass,51,2026-09-01T02:32:37.738410-07:00,c5fb28a,
 protocol,SMB2Compression_InvalidCompressionAlgorithm,Compression,pass,50,2026-09-01T02:32:37.738410-07:00,c5fb28a,
 protocol,SMB2Compression_InvalidDecompressedProtocolId,Compression,pass,51,2026-09-01T02:32:37.738410-07:00,c5fb28a,
-protocol,SMB2Compression_LZ77Huffman_LargeFile,Compression,skip,0,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77/LZ77+Huffman compressor not implemented; no Rust crate provides Xpress compression (decompress-only). Chained+LZNT1+Pattern_V1 done.
-protocol,SMB2Compression_LZ77_LargeFile,Compression,skip,50,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77/LZ77+Huffman compressor not implemented; no Rust crate provides Xpress compression (decompress-only). Chained+LZNT1+Pattern_V1 done.
+protocol,SMB2Compression_LZ77Huffman_LargeFile,Compression,skip,0,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77+Huffman (Xpress-Huffman) compress needs a Huffman-table encoder; available Rust crates are decode-only (xpress-huffman). LZ77/LZNT1/Pattern_V1/chained done.
+protocol,SMB2Compression_LZ77_LargeFile,Compression,pass,50,2026-09-01T02:32:37.738410-07:00,314b785,LZ77 (LZXpress/MS-XCA) compress+decompress via xpress_rs crate.
 protocol,SMB2Compression_LZNT1_LargeFile,Compression,pass,51,2026-09-01T02:32:37.738410-07:00,c5fb28a,
 protocol,BVT_CopyOffload,CopyOffload,skip,51,2026-09-01T03:38:56.636792-07:00,c7a1147,Needs FSCTL_OFFLOAD_READ/WRITE (ODX) — not implemented
 protocol,CopyOffload_CopyContentWithinSameFile,CopyOffload,skip,50,2026-09-01T03:38:56.636792-07:00,c7a1147,Needs FSCTL_OFFLOAD_READ/WRITE (ODX) — not implemented
