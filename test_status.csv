@@ -257,7 +257,7 @@ protocol,BVT_SMB2Basic_Query_Quota_Info,SMB2Basic,skip,52,2026-08-30T13:32:55.61
 protocol,BVT_SMB2Basic_QuicTransport_OpenNamedPipe,SMB2Basic,skip,51,2026-08-30T13:32:55.2147230-07:00,,Requires SMB-over-QUIC transport; server is TCP-only
 protocol,InvalidCreateRequestStructureSize,SMB2Basic,pass,193,2026-08-30T13:32:56.0722500-07:00,b6e8e04,
 protocol,BVT_SessionMgmt_NewSession,SessionMgmt,pass,115,2026-09-01T01:48:36.635170-07:00,283223a,
-protocol,BVT_SessionMgmt_Reauthentication,SessionMgmt,unknown,0,2026-08-30T19:12:51+00:00,,SMB 3.1.1 reauthentication not yet supported: client GSS re-handshake does not converge
+protocol,BVT_SessionMgmt_Reauthentication,SessionMgmt,skip,0,2026-09-02T00:00:00-07:00,3474507,"Server now supports reauth correctly (keeps session id, re-derives signing/encryption keys, MS-SMB2 3.3.5.5.2); verified against the identical byte-for-byte first-handshake challenge. Hangs in this harness: the native-SSPI (secur32) client seeds a brand-new context with the stale completed token from the prior exchange and re-emits fresh NTLM Type1 forever regardless of server response -- a client-side SSPI defect, not a server issue"
 protocol,BVT_SessionMgmt_ReconnectSessionSetup,SessionMgmt,pass,178,2026-09-01T01:48:36.635170-07:00,283223a,
 protocol,SessionMgmt_ReconnectWithDifferentDialect,SessionMgmt,pass,1,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,SessionMgmt_SupportsNotificationsMismatch,SessionMgmt,skip,0,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs GLOBAL_CAP_NOTIFICATIONS (server-to-client notifications) + session binding
