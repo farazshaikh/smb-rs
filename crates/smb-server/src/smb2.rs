@@ -1202,7 +1202,13 @@ async fn process_single(
     // its request was not (clients verify it once their key is complete).
     let final_setup_leg =
         hdr.command == ss::cmd::SESSION_SETUP && status == Status::SUCCESS && conn.authenticated;
-    if hdr.is_signed() || final_setup_leg {
+    // A SESSION_SETUP interim (MORE_PROCESSING) response is never signed, even
+    // when its request was signed (as a reauthentication leg is): the signing
+    // key for this exchange is only finalized on the last leg ([MS-SMB2]
+    // §3.3.4.1.1). Only the final leg, and non-setup signed requests, are signed.
+    let sign_setup = final_setup_leg;
+    let sign_other = hdr.is_signed() && hdr.command != ss::cmd::SESSION_SETUP;
+    if sign_setup || sign_other {
         if let Some(key) = conn.signing_key.clone().or(conn.session_key) {
             sign_pdu(&mut resp, &key, conn.dialect, conn.signing_algo);
         }
@@ -2027,6 +2033,10 @@ pub(crate) fn session_setup(
         return Err(Status::REQUEST_NOT_ACCEPTED);
     }
     conn.binding = binding;
+    // Reauthentication ([MS-SMB2] §3.3.5.5.2): a SESSION_SETUP that names an
+    // already-established session without the binding flag re-runs the NTLM
+    // handshake on that same session id (the client refreshes its credentials).
+    let reauth = !binding && hdr_session != 0 && server.sessions.get(hdr_session).is_some();
     let inner = smb_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
     // A binding channel does a full NTLM exchange; its GSS token must be a
     // well-formed SPNEGO token (negTokenInit 0x60 or negTokenResp 0xA1). A
@@ -2043,8 +2053,9 @@ pub(crate) fn session_setup(
     match smb_auth::ntlm::msg_type(inner) {
         Some(smb_auth::ntlm::MSG_TYPE1) | None => {
             // Leg 1: issue CHALLENGE under MORE_PROCESSING_REQUIRED. A binding
-            // channel keeps the existing session id instead of allocating one.
-            conn.session_id = if binding {
+            // channel and a reauthentication keep the existing session id
+            // instead of allocating one ([MS-SMB2] §3.3.5.5.2/§3.3.5.5.3).
+            conn.session_id = if binding || reauth {
                 hdr_session
             } else {
                 next_session_id()
@@ -2109,6 +2120,13 @@ pub(crate) fn session_setup(
             conn.session_key = out.session_key;
             // Dialect-aware signing key ([MS-SMB2] §3.2.5.3.1 / §3.3.5.2.1).
             conn.authenticated = true;
+            // Reauthentication re-runs NTLM on a live session ([MS-SMB2]
+            // §3.3.5.5.2): the new exchange yields a fresh session key, so the
+            // old signing and encryption keys are cleared and re-derived below.
+            if reauth {
+                conn.signing_key = None;
+                conn.enc_keys = None;
+            }
             // Per-client dialect consistency ([MS-SMB2] §3.3.5.5.3): a client
             // that authenticates under a ClientGuid already seen with a
             // different negotiated dialect has its new session closed with
