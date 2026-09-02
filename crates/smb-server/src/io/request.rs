@@ -119,8 +119,10 @@ impl Command for FlushCmd {
         let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, tid) else {
             return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
         };
-        if let Some(h) = res.conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) {
-            if let Err(e) = vfs.flush(h).await {
+        if let Some(mut open) = res.conn.handle_take(&req.file_id.0) {
+            let r = vfs.flush(&mut open).await;
+            res.conn.handle_insert(req.file_id.0, open);
+            if let Err(e) = r {
                 return Outcome::Final(ctx.respond(crate::smb2::vfs_err(e), Vec::new()));
             }
         }
@@ -214,7 +216,7 @@ impl Command for CloseCmd {
             return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
         };
         let close_path = CloseReq::parse(res.frame)
-            .and_then(|r| res.conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone(), h.delete_on_close)));
+            .and_then(|r| res.conn.with_handle(&r.file_id.0, |h| (r.file_id.0, h.path.clone(), h.delete_on_close)));
         match crate::smb2::close(res.conn, vfs, res.frame).await {
             Ok(body) => {
                 if let Some((fid, path, deleted)) = close_path {
@@ -304,7 +306,7 @@ impl Command for SetInfoCmd {
         // ([MS-SMB2] §3.3.1.4).
         let rename_old = SetInfoReq::parse(res.frame)
             .filter(|r| r.info_type == c::info_type::FILE && r.class == smb_proto_smb2::info::file_class::RENAME)
-            .and_then(|r| res.conn.handles.get(&r.file_id.0).map(|h| (r.file_id.0, h.path.clone())));
+            .and_then(|r| res.conn.with_handle(&r.file_id.0, |h| (r.file_id.0, h.path.clone())));
         match crate::smb2::set_info(res.conn, vfs, res.frame).await {
             Ok(()) => {
                 if let Some((fid, old_path)) = rename_old {
@@ -315,7 +317,7 @@ impl Command for SetInfoCmd {
                         fid,
                         c::lease::RH,
                     );
-                    if let Some(new_path) = res.conn.handles.get(&fid).map(|h| h.path.clone()) {
+                    if let Some(new_path) = res.conn.with_handle(&fid, |h| h.path.clone()) {
                         crate::smb2::break_dir_lease(
                             res.server,
                             res.conn,

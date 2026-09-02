@@ -20,6 +20,8 @@ use std::rc::Rc;
 pub struct SessionScope {
     /// TreeId -> share name (Session.TreeConnectTable).
     pub trees: HashMap<u32, String>,
+    /// Open handles keyed by 16-byte SMB2 FileId (Session.OpenTable).
+    pub handles: HashMap<[u8; 16], Box<smb_vfs::OpenFile>>,
 }
 
 /// Shared, per-thread handle to a session's [`SessionScope`].
@@ -45,4 +47,11 @@ pub fn remove(session_id: u64) {
     SCOPES.with(|s| {
         s.borrow_mut().remove(&session_id);
     });
+}
+
+/// Create a fresh, unregistered scope. A new connection starts with one so
+/// pre-session state is isolated; session setup replaces it with the session's
+/// shared scope from the registry.
+pub fn detached() -> ScopeRef {
+    Rc::new(RefCell::new(SessionScope::default()))
 }

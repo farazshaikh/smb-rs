@@ -71,8 +71,6 @@ pub struct Smb2Conn {
     /// Challenge token sent during leg 1 (for the mechListMIC input).
     pub ntlm_targ: Option<Vec<u8>>,
     /// Raw challenge token sent during leg 1 (for mechListMIC).
-    /// Open handles keyed by 16-byte SMB2 FileId.
-    pub handles: HashMap<[u8; 16], Box<smb_vfs::OpenFile>>,
     /// Lease key each open handle joined, so a write/open from a co-holder of
     /// the same lease does not break it ([MS-SMB2] §3.3.4.7).
     pub lease_keys: HashMap<[u8; 16], [u8; 16]>,
@@ -178,9 +176,7 @@ impl Smb2Conn {
             peer_encrypts: false,
             ntlm_blobs: None,
             ntlm_targ: None,
-            handles: HashMap::new(),
-            lease_keys: HashMap::new(),
-            pipes: HashMap::new(),
+            lease_keys: HashMap::new(),            pipes: HashMap::new(),
             searches: HashMap::new(),
             outbound,
             next_async_id: 1,
@@ -203,7 +199,7 @@ impl Smb2Conn {
             seal_current: false,
             req_encrypted: false,
             binding: false,
-            scope: None,
+            scope: Some(crate::session_scope::detached()),
         }
     }
 
@@ -236,6 +232,46 @@ impl Smb2Conn {
         if let Some(s) = self.scope.as_ref() {
             s.borrow_mut().trees.remove(&tid);
         }
+    }
+
+    /// True when `fid` names an open handle in the session's open table.
+    pub(crate) fn handle_exists(&self, fid: &[u8; 16]) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|s| s.borrow().handles.contains_key(fid))
+    }
+
+    /// Insert an open handle into the session's open table.
+    pub(crate) fn handle_insert(&self, fid: [u8; 16], open: Box<smb_vfs::OpenFile>) {
+        if let Some(s) = self.scope.as_ref() {
+            s.borrow_mut().handles.insert(fid, open);
+        }
+    }
+
+    /// Remove and return an open handle from the session's open table. Used both
+    /// to close a handle and to check one out for an async VFS call (reinsert
+    /// with [`Self::handle_insert`] afterwards) so no `RefCell` borrow is ever
+    /// held across an `.await`.
+    pub(crate) fn handle_take(&self, fid: &[u8; 16]) -> Option<Box<smb_vfs::OpenFile>> {
+        self.scope.as_ref()?.borrow_mut().handles.remove(fid)
+    }
+
+    /// Run `f` against a shared handle reference (no `.await` inside).
+    pub(crate) fn with_handle<R>(
+        &self,
+        fid: &[u8; 16],
+        f: impl FnOnce(&smb_vfs::OpenFile) -> R,
+    ) -> Option<R> {
+        Some(f(self.scope.as_ref()?.borrow().handles.get(fid)?))
+    }
+
+    /// Run `f` against a mutable handle reference (no `.await` inside).
+    pub(crate) fn with_handle_mut<R>(
+        &self,
+        fid: &[u8; 16],
+        f: impl FnOnce(&mut smb_vfs::OpenFile) -> R,
+    ) -> Option<R> {
+        Some(f(self.scope.as_ref()?.borrow_mut().handles.get_mut(fid)?))
     }
 
     /// Allocate a fresh per-connection async id for a STATUS_PENDING op.
@@ -835,7 +871,7 @@ async fn process_single(
             .and_then(|s| <[u8; 16]>::try_from(s).ok())
         {
             if server.app_instances.take_forced((conn.session_id, fid)) {
-                conn.handles.remove(&fid);
+                conn.handle_take(&fid);
                 return Some((
                     response(&hdr, Status::FILE_CLOSED, Vec::new(), conn.session_id),
                     true,
@@ -1263,10 +1299,9 @@ pub(crate) fn begin_lock(
     let Some(req) = c::LockReq::parse(buf) else {
         return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
     };
-    let Some(h) = conn.handles.get(&req.file_id.0) else {
+    let Some(path) = conn.with_handle(&req.file_id.0, |h| h.path.clone()) else {
         return AsyncStart::Reply(Status::INVALID_HANDLE, Vec::new());
     };
-    let path = h.path.clone();
     let owner = (conn.session_id, req.file_id.0);
 
     // Unlocks first, then acquisitions ([MS-SMB2] §3.3.5.14).
@@ -1318,20 +1353,21 @@ pub(crate) fn begin_change_notify(
     let Some(req) = c::ChangeNotifyReq::parse(buf) else {
         return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
     };
-    let Some(open) = conn.handles.get(&req.file_id.0) else {
+    let Some((is_dir, can_read, dir_path)) =
+        conn.with_handle(&req.file_id.0, |o| (o.is_dir, o.can_read, o.path.clone()))
+    else {
         return AsyncStart::Reply(Status::INVALID_HANDLE, Vec::new());
     };
     // Validate before registering the watch ([MS-SMB2] §3.3.5.19).
-    if !open.is_dir {
+    if !is_dir {
         return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
     }
-    if !open.can_read {
+    if !can_read {
         return AsyncStart::Reply(Status::ACCESS_DENIED, Vec::new());
     }
     if req.output_len > MAX_TRANSACT_SIZE {
         return AsyncStart::Reply(Status::INVALID_PARAMETER, Vec::new());
     }
-    let dir_path = open.path.clone();
 
     let async_id = conn.alloc_async_id();
     let crypto = AsyncCrypto::snapshot(conn, hdr.is_signed());
@@ -2263,7 +2299,7 @@ pub(crate) async fn create(
 
     let fid = c::FileId(fid_bytes);
     conn.searches.remove(&fid_bytes);
-    conn.handles.insert(fid_bytes, open);
+    conn.handle_insert(fid_bytes, open);
     // Record this handle so a related follow-up in the compound chain that
     // carries the wildcard FileId resolves to it ([MS-SMB2] §3.3.5.2.7.2).
     conn.chain_fid = Some(fid_bytes);
@@ -2532,7 +2568,7 @@ async fn durable_reconnect(
         .await
         .map_err(vfs_err)?;
     open.delete_on_close = false;
-    conn.handles.insert(id, open);
+    conn.handle_insert(id, open);
     conn.durable.insert(
         id,
         crate::state::DurableEntry {
@@ -2926,13 +2962,9 @@ pub(crate) async fn read(
 ) -> Result<Vec<u8>, Status> {
     let req = c::ReadReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     let len = (req.length as usize).min(1 << 20); // clamp to 1 MiB
-    let (path, is_dir, can_read) = {
-        let h = conn
-            .handles
-            .get(&req.file_id.0)
-            .ok_or(Status::INVALID_HANDLE)?;
-        (h.path.clone(), h.is_dir, h.can_read)
-    };
+    let (path, is_dir, can_read) = conn
+        .with_handle(&req.file_id.0, |h| (h.path.clone(), h.is_dir, h.can_read))
+        .ok_or(Status::INVALID_HANDLE)?;
     if is_dir || !can_read {
         return Err(Status::ACCESS_DENIED);
     }
@@ -2945,13 +2977,12 @@ pub(crate) async fn read(
     ) {
         return Err(Status::FILE_LOCK_CONFLICT);
     }
-    let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
-        return Err(Status::INVALID_HANDLE);
-    };
-    if h.is_dir || !h.can_read {
-        return Err(Status::ACCESS_DENIED);
-    }
-    let data = vfs.read(h, req.offset, len).await.map_err(vfs_err)?;
+    // Check the open out of the shared table for the async read so no RefCell
+    // borrow spans the await, then check it back in ([MS-SMB2] §3.3.5.5.3).
+    let mut open = conn.handle_take(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+    let result = vfs.read(&mut open, req.offset, len).await;
+    conn.handle_insert(req.file_id.0, open);
+    let data = result.map_err(vfs_err)?;
     counter!("smb_bytes_read_total").increment(data.len() as u64);
     tracing::trace!(offset = req.offset, got = data.len(), "read");
     Ok(c::build_read_resp(&data))
@@ -2964,13 +2995,9 @@ pub(crate) async fn write(
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::WriteReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
-    let (path, is_dir, can_write) = {
-        let h = conn
-            .handles
-            .get(&req.file_id.0)
-            .ok_or(Status::INVALID_HANDLE)?;
-        (h.path.clone(), h.is_dir, h.can_write)
-    };
+    let (path, is_dir, can_write) = conn
+        .with_handle(&req.file_id.0, |h| (h.path.clone(), h.is_dir, h.can_write))
+        .ok_or(Status::INVALID_HANDLE)?;
     if is_dir || !can_write {
         return Err(Status::ACCESS_DENIED);
     }
@@ -2983,16 +3010,10 @@ pub(crate) async fn write(
     ) {
         return Err(Status::FILE_LOCK_CONFLICT);
     }
-    let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
-        return Err(Status::INVALID_HANDLE);
-    };
-    if h.is_dir || !h.can_write {
-        return Err(Status::ACCESS_DENIED);
-    }
-    let written = vfs
-        .write(h, req.offset, &req.payload, false)
-        .await
-        .map_err(vfs_err)?;
+    let mut open = conn.handle_take(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+    let result = vfs.write(&mut open, req.offset, &req.payload, false).await;
+    conn.handle_insert(req.file_id.0, open);
+    let written = result.map_err(vfs_err)?;
     counter!("smb_bytes_written_total").increment(written);
     tracing::trace!(offset = req.offset, wrote = written, "write");
     // A write from a non-holder invalidates cached reads: break the lease to
@@ -3108,24 +3129,26 @@ pub(crate) async fn ioctl(
         // handle like a durable open ([MS-SMB2] §3.3.5.15.9) so a later
         // SMB2_CREATE_DURABLE_HANDLE_RECONNECT can reclaim it.
         c::fsctl::LMR_REQUEST_RESILIENCY => {
-            if let Some(open) = conn.handles.get(&req.file_id.0) {
+            if let Some((can_write, is_dir, rel)) =
+                conn.with_handle(&req.file_id.0, |o| (o.can_write, o.is_dir, o.rel.clone()))
+            {
                 let timeout = req
                     .input
                     .get(0..4)
                     .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
                     .filter(|t| *t != 0)
                     .unwrap_or(60_000);
-                let access = if open.can_write {
+                let access = if can_write {
                     0x001F_01FF
                 } else {
                     0x0012_0089
                 };
-                let options = if open.is_dir { 0x1 } else { 0x40 };
+                let options = if is_dir { 0x1 } else { 0x40 };
                 let entry = crate::state::DurableEntry {
                     persistent_id: req.file_id.0,
                     create_guid: [0u8; 16],
-                    rel: open.rel.clone(),
-                    is_dir: open.is_dir,
+                    rel,
+                    is_dir,
                     access,
                     options,
                     session_id: conn.session_id,
@@ -3170,7 +3193,7 @@ pub(crate) async fn ioctl(
         // Server-side copy: hand the client a resume key naming this
         // open so a later COPYCHUNK can use it as the source.
         c::fsctl::SRV_REQUEST_RESUME_KEY => {
-            if !conn.handles.contains_key(&req.file_id.0) {
+            if !conn.handle_exists(&req.file_id.0) {
                 return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
             }
             let mut key = [0u8; 24];
@@ -3253,10 +3276,12 @@ pub(crate) async fn ioctl(
             let Some((start, end)) = c::parse_zero_data(&req.input).filter(|(s, e)| e >= s) else {
                 return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new());
             };
-            let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
+            let Some(mut open) = conn.handle_take(&req.file_id.0) else {
                 return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
             };
-            match vfs.zero_range(h, start, end - start).await {
+            let result = vfs.zero_range(&mut open, start, end - start).await;
+            conn.handle_insert(req.file_id.0, open);
+            match result {
                 Ok(()) => {
                     counter!("smb_zeroed_bytes_total").increment(end - start);
                     (
@@ -3279,7 +3304,7 @@ pub(crate) async fn close(
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::CloseReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
-    let Some(mut h) = conn.handles.remove(&req.file_id.0) else {
+    let Some(h) = conn.handle_take(&req.file_id.0) else {
         return Err(Status::INVALID_HANDLE);
     };
     conn.searches.remove(&req.file_id.0);
@@ -3301,7 +3326,9 @@ pub(crate) async fn close(
 }
 
 pub(crate) fn close_all_handles(conn: &mut Smb2Conn) {
-    conn.handles.clear();
+    if let Some(s) = conn.scope.as_ref() {
+        s.borrow_mut().handles.clear();
+    }
     conn.pipes.clear();
 }
 
@@ -3427,11 +3454,10 @@ pub(crate) async fn query_directory(
 
     if restart {
         let dir_rel = {
-            let h = conn
-                .handles
-                .get(&req.file_id.0)
+            let (is_dir, rel) = conn
+                .with_handle(&req.file_id.0, |h| (h.is_dir, h.rel.clone()))
                 .ok_or(Status::INVALID_HANDLE)?;
-            if !h.is_dir {
+            if !is_dir {
                 // QUERY_DIRECTORY on a non-directory open ([MS-SMB2] §3.3.5.18).
                 return Err(Status::INVALID_PARAMETER);
             }
@@ -3440,11 +3466,11 @@ pub(crate) async fn query_directory(
             let pattern = req.pattern.trim_start_matches(['\\', '/']).to_string();
             let (dir_part, _) = crate::cmds::dir_cmds_split(&pattern);
             if dir_part.is_empty() {
-                h.rel.clone()
-            } else if h.rel.is_empty() {
+                rel
+            } else if rel.is_empty() {
                 dir_part
             } else {
-                format!("{}\\{}", h.rel.trim_end_matches(['\\', '/']), dir_part)
+                format!("{}\\{}", rel.trim_end_matches(['\\', '/']), dir_part)
             }
         };
 
@@ -3507,27 +3533,26 @@ pub(crate) async fn query_info(
     let req = c::QueryInfoReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
     match req.info_type {
         c::info_type::FILE => {
-            let h = conn
-                .handles
-                .get(&req.file_id.0)
+            let (path, rel) = conn
+                .with_handle(&req.file_id.0, |h| (h.path.clone(), h.rel.clone()))
                 .ok_or(Status::INVALID_HANDLE)?;
-            let m = vfs.stat(&h.path).await.map_err(vfs_err)?;
+            let m = vfs.stat(&path).await.map_err(vfs_err)?;
             if req.class == info::file_class::STREAM {
                 // Default `::$DATA` data stream (files only) plus any ADS.
                 let mut streams = Vec::new();
                 if !m.is_dir {
                     streams.push(("::$DATA".to_string(), m.eof));
                 }
-                streams.extend(vfs.list_streams(&h.path).await.map_err(vfs_err)?);
+                streams.extend(vfs.list_streams(&path).await.map_err(vfs_err)?);
                 return Ok(Some(info::encode_stream_info(&streams)));
             }
             let qm = info::QueryMeta::from_vfs(&m);
             let name = if req.class == info::file_class::NORMALIZED_NAME {
                 // Normalized name is the full share-relative path ([MS-FSCC]
                 // §2.4.NormalizedName): no leading separator, backslash-joined.
-                h.rel.trim_start_matches(['\\', '/']).replace('/', "\\")
+                rel.trim_start_matches(['\\', '/']).replace('/', "\\")
             } else {
-                h.rel.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+                rel.rsplit(['\\', '/']).next().unwrap_or("").to_string()
             };
             info::encode_file_info(req.class, &qm, &name)
                 .map(Some)
@@ -3537,11 +3562,10 @@ pub(crate) async fn query_info(
             .map(Some)
             .ok_or(Status::NOT_IMPLEMENTED),
         c::info_type::SECURITY => {
-            let h = conn
-                .handles
-                .get(&req.file_id.0)
+            let path = conn
+                .with_handle(&req.file_id.0, |h| h.path.clone())
                 .ok_or(Status::INVALID_HANDLE)?;
-            let stored = vfs.get_security(&h.path).await.map_err(vfs_err)?;
+            let stored = vfs.get_security(&path).await.map_err(vfs_err)?;
             let additional = if req.additional == 0 {
                 crate::security::sec_info::DEFAULT
             } else {
@@ -3576,17 +3600,16 @@ pub(crate) async fn set_info(
                 Err(_) => return Err(Status::INVALID_PARAMETER),
             };
             let Some(op) = op else { return Ok(()) }; // advisory-only class
-            let Some(h) = conn.handles.get_mut(&req.file_id.0).map(|b| &mut **b) else {
-                return Err(Status::INVALID_HANDLE);
-            };
-            vfs.set_info_open(h, &op).await.map_err(vfs_err)
+            let mut open = conn.handle_take(&req.file_id.0).ok_or(Status::INVALID_HANDLE)?;
+            let result = vfs.set_info_open(&mut open, &op).await;
+            conn.handle_insert(req.file_id.0, open);
+            result.map_err(vfs_err)
         }
         c::info_type::SECURITY => {
-            let h = conn
-                .handles
-                .get(&req.file_id.0)
+            let path = conn
+                .with_handle(&req.file_id.0, |h| h.path.clone())
                 .ok_or(Status::INVALID_HANDLE)?;
-            vfs.set_security(&h.path, &req.buffer)
+            vfs.set_security(&path, &req.buffer)
                 .await
                 .map_err(vfs_err)
         }
@@ -3673,23 +3696,18 @@ async fn do_copychunk(
     let mut chunks_written = 0u32;
     let mut total_written = 0u32;
     for k in &cc.chunks {
-        let data = {
-            let src = conn
-                .handles
-                .get_mut(&src_fid)
-                .ok_or((Status::INVALID_HANDLE, Vec::new()))?;
-            vfs.read(src, k.source_offset, k.length as usize)
-                .await
-                .map_err(|e| (vfs_err(e), Vec::new()))?
-        };
-        let tgt = conn
-            .handles
-            .get_mut(&tgt_fid)
+        let mut src = conn
+            .handle_take(&src_fid)
             .ok_or((Status::INVALID_HANDLE, Vec::new()))?;
-        let w = vfs
-            .write(tgt, k.target_offset, &data, false)
-            .await
-            .map_err(|e| (vfs_err(e), Vec::new()))?;
+        let read = vfs.read(&mut src, k.source_offset, k.length as usize).await;
+        conn.handle_insert(src_fid, src);
+        let data = read.map_err(|e| (vfs_err(e), Vec::new()))?;
+        let mut tgt = conn
+            .handle_take(&tgt_fid)
+            .ok_or((Status::INVALID_HANDLE, Vec::new()))?;
+        let written = vfs.write(&mut tgt, k.target_offset, &data, false).await;
+        conn.handle_insert(tgt_fid, tgt);
+        let w = written.map_err(|e| (vfs_err(e), Vec::new()))?;
         total_written += w as u32;
         chunks_written += 1;
     }
@@ -3928,8 +3946,8 @@ mod fsctl_tests {
                 .await
                 .unwrap();
             let (src_fid, dst_fid) = ([1u8; 16], [2u8; 16]);
-            conn.handles.insert(src_fid, src);
-            conn.handles.insert(dst_fid, dst);
+            conn.handle_insert(src_fid, src);
+            conn.handle_insert(dst_fid, dst);
 
             let mut key = [0u8; 24];
             key[..16].copy_from_slice(&src_fid);
@@ -3957,7 +3975,7 @@ mod fsctl_tests {
             assert_eq!(&out[0..4], &1u32.to_le_bytes(), "ChunksWritten");
             assert_eq!(&out[8..12], &21u32.to_le_bytes(), "TotalBytesWritten");
 
-            let dst = conn.handles.remove(&dst_fid).unwrap();
+            let dst = conn.handle_take(&dst_fid).unwrap();
             vfs.close(dst).await.unwrap();
             assert_eq!(
                 std::fs::read(dir.join("dst.txt")).unwrap(),
@@ -3978,7 +3996,7 @@ mod fsctl_tests {
             let (mut conn, vfs) = conn_with_vfs(&dir);
             let (f, _m, _a) = vfs.create("f", false, 0x8000_0000, 1, 0, 0).await.unwrap();
             let fid = [3u8; 16];
-            conn.handles.insert(fid, f);
+            conn.handle_insert(fid, f);
             let mut key = [0u8; 24];
             key[..16].copy_from_slice(&fid);
             conn.resume_keys.insert(key, fid);
@@ -4023,11 +4041,12 @@ mod fsctl_tests {
                 .await
                 .unwrap();
             let fid = [4u8; 16];
-            conn.handles.insert(fid, f);
+            conn.handle_insert(fid, f);
 
-            let h = conn.handles.get_mut(&fid).map(|b| &mut **b).unwrap();
-            vfs.zero_range(h, 4, 8).await.expect("zero range");
-            let f = conn.handles.remove(&fid).unwrap();
+            let mut open = conn.handle_take(&fid).unwrap();
+            vfs.zero_range(&mut open, 4, 8).await.expect("zero range");
+            conn.handle_insert(fid, open);
+            let f = conn.handle_take(&fid).unwrap();
             vfs.close(f).await.unwrap();
 
             let mut expected = vec![0xFFu8; 16];
@@ -4446,7 +4465,7 @@ mod security_tests {
                 .await
                 .unwrap();
             let fid = [1u8; 16];
-            conn.handles.insert(fid, open);
+            conn.handle_insert(fid, open);
 
             // Default query: parseable, DACL present.
             let q = query_info_frame(
@@ -4518,7 +4537,7 @@ mod security_tests {
                 .await
                 .unwrap();
             let fid = [2u8; 16];
-            conn.handles.insert(fid, open);
+            conn.handle_insert(fid, open);
 
             let q = query_info_frame(
                 c::info_type::SECURITY,
@@ -4680,7 +4699,7 @@ mod durable_tests {
             let rid: [u8; 16] = resp2[64..80].try_into().unwrap();
             assert_eq!(rid, pid, "reconnect returns the persistent id");
             assert!(
-                conn2.handles.contains_key(&pid),
+                conn2.handle_exists(&pid),
                 "handle reinstated on new connection"
             );
 
