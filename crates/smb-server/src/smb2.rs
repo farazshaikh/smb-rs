@@ -81,6 +81,9 @@ pub struct Smb2Conn {
     pub pipes: HashMap<[u8; 16], crate::srvsvc::Pipe>,
     /// Directory-enumeration continuation queues keyed by directory FileId.
     pub searches: HashMap<[u8; 16], VecDeque<info::FindEntry>>,
+    /// Per-open integrity state (ChecksumAlgorithm, Flags) set/queried by
+    /// FSCTL_SET/GET_INTEGRITY_INFORMATION ([MS-FSCC] §2.3.55/57), keyed by FileId.
+    pub integrity: HashMap<[u8; 16], (u16, u32)>,
     /// Outbound frame queue drained by the per-connection writer task. Async
     /// handlers and background tasks (CHANGE_NOTIFY, oplock/lease breaks) clone
     /// this to emit unsolicited frames without blocking the reader.
@@ -183,6 +186,7 @@ impl Smb2Conn {
             lease_keys: HashMap::new(),
             pipes: HashMap::new(),
             searches: HashMap::new(),
+            integrity: HashMap::new(),
             outbound,
             next_async_id: 1,
             async_cancels: HashMap::new(),
@@ -3351,6 +3355,41 @@ pub(crate) async fn ioctl(
             ),
             _ => return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new()),
         },
+        // FSCTL_GET/SET_INTEGRITY_INFORMATION ([MS-FSCC] §2.3.55/57): the POSIX
+        // backend has no real integrity streams, but the per-open checksum
+        // state is tracked so a GET after a SET reflects it.
+        c::fsctl::GET_INTEGRITY_INFORMATION => {
+            if !conn.handle_exists(&req.file_id.0) {
+                return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
+            }
+            let (algo, flags) = conn.integrity.get(&req.file_id.0).copied().unwrap_or((0, 0));
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(
+                    req.file_id,
+                    req.ctl_code,
+                    &c::build_get_integrity_resp(algo, flags),
+                ),
+            )
+        }
+        c::fsctl::SET_INTEGRITY_INFORMATION => {
+            if !conn.handle_exists(&req.file_id.0) {
+                return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
+            }
+            let Some(algo) = c::parse_set_integrity(&req.input) else {
+                return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+            };
+            let flags = req
+                .input
+                .get(4..8)
+                .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+                .unwrap_or(0);
+            conn.integrity.insert(req.file_id.0, (algo, flags));
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(req.file_id, req.ctl_code, &[]),
+            )
+        }
         // FSCTL_PIPE_WAIT ([MS-SMB2] §2.2.31.2): our named pipes are
         // always instantiable, so the wait completes immediately.
         c::fsctl::PIPE_WAIT => (
@@ -3415,6 +3454,7 @@ pub(crate) async fn close(
     };
     conn.searches.remove(&req.file_id.0);
     conn.lease_keys.remove(&req.file_id.0);
+    conn.integrity.remove(&req.file_id.0);
     let meta = vfs.stat(&h.path).await.ok().unwrap_or_default();
     vfs.close(h).await.map_err(vfs_err)?;
     counter!("smb_closes_total").increment(1);

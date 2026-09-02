@@ -1530,6 +1530,10 @@ pub mod fsctl {
     pub const SET_ZERO_DATA: u32 = 0x0009_80C8;
     /// FSCTL_FILE_LEVEL_TRIM ([MS-FSCC] §2.3.73) — deallocate byte ranges.
     pub const FILE_LEVEL_TRIM: u32 = 0x0009_8208;
+    /// FSCTL_GET_INTEGRITY_INFORMATION ([MS-FSCC] §2.3.55).
+    pub const GET_INTEGRITY_INFORMATION: u32 = 0x0009_027C;
+    /// FSCTL_SET_INTEGRITY_INFORMATION ([MS-FSCC] §2.3.57).
+    pub const SET_INTEGRITY_INFORMATION: u32 = 0x0009_C280;
     /// FSCTL_LMR_REQ_RESILIENCY.
     pub const LMR_REQUEST_RESILIENCY: u32 = 0x0014_01D4;
     /// FSCTL_PIPE_TRANSACT ([MS-SMB2] §2.2.31.10 "Transact named pipe"):
@@ -1710,6 +1714,27 @@ pub fn parse_file_level_trim(input: &[u8]) -> Option<(u32, u32)> {
 /// number of ranges processed.
 pub fn build_file_level_trim_resp(num_ranges_processed: u32) -> Vec<u8> {
     num_ranges_processed.to_le_bytes().to_vec()
+}
+
+/// Parse the ChecksumAlgorithm field of an FSCTL_SET_INTEGRITY_INFORMATION
+/// request ([MS-FSCC] §2.3.57): ChecksumAlgorithm(2) Reserved(2) Flags(4).
+pub fn parse_set_integrity(input: &[u8]) -> Option<u16> {
+    (input.len() >= 8).then(|| g16(input, 0))
+}
+
+/// Build an FSCTL_GET_INTEGRITY_INFORMATION reply ([MS-FSCC] §2.3.55):
+/// ChecksumAlgorithm(2) Reserved(2) Flags(4) ChecksumChunkSizeInBytes(4)
+/// ClusterSizeInBytes(4).
+pub fn build_get_integrity_resp(algorithm: u16, flags: u32) -> Vec<u8> {
+    const CHUNK_SIZE: u32 = 512;
+    const CLUSTER_SIZE: u32 = 4096;
+    let mut b = Vec::with_capacity(16);
+    b.extend_from_slice(&algorithm.to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    b.extend_from_slice(&flags.to_le_bytes());
+    b.extend_from_slice(&CHUNK_SIZE.to_le_bytes());
+    b.extend_from_slice(&CLUSTER_SIZE.to_le_bytes());
+    b
 }
 
 // ---------------- Encryption transform header ([MS-SMB2] §2.2.41) ----------------
