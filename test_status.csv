@@ -54,8 +54,8 @@ protocol,SMB2Compression_InvalidDecompressedProtocolId,Compression,pass,51,2026-
 protocol,SMB2Compression_LZ77Huffman_LargeFile,Compression,skip,0,2026-09-01T02:32:37.738410-07:00,a891d2f,LZ77+Huffman (Xpress-Huffman) compress needs a Huffman-table encoder; available Rust crates are decode-only (xpress-huffman). LZ77/LZNT1/Pattern_V1/chained done.
 protocol,SMB2Compression_LZ77_LargeFile,Compression,pass,50,2026-09-01T02:32:37.738410-07:00,314b785,LZ77 (LZXpress/MS-XCA) compress+decompress via xpress_rs crate.
 protocol,SMB2Compression_LZNT1_LargeFile,Compression,pass,51,2026-09-01T02:32:37.738410-07:00,c5fb28a,
-protocol,BVT_CopyOffload,CopyOffload,skip,51,2026-09-01T03:38:56.636792-07:00,c7a1147,Needs FSCTL_OFFLOAD_READ/WRITE (ODX) — not implemented
-protocol,CopyOffload_CopyContentWithinSameFile,CopyOffload,skip,50,2026-09-01T03:38:56.636792-07:00,c7a1147,Needs FSCTL_OFFLOAD_READ/WRITE (ODX) — not implemented
+protocol,BVT_CopyOffload,CopyOffload,pass,317,2026-09-02T00:03:15-07:00,b23b297,Token-based ODX offload copy (FSCTL_OFFLOAD_READ/WRITE) emulated server-side
+protocol,CopyOffload_CopyContentWithinSameFile,CopyOffload,pass,217,2026-09-02T00:03:15-07:00,b23b297,Token-based ODX offload copy (FSCTL_OFFLOAD_READ/WRITE) emulated server-side
 protocol,BVT_CreateClose_CreateAndCloseDirectory,CreateClose,pass,211,2026-08-30T13:34:17.9468932-07:00,b6e8e04,
 protocol,BVT_CreateClose_CreateAndCloseFile,CreateClose,pass,214,2026-08-30T13:34:17.7321805-07:00,b6e8e04,
 protocol,CreateClose_CreateAndCloseDirWithDotDir,CreateClose,pass,215,2026-08-30T13:34:18.8918917-07:00,b6e8e04,
@@ -137,7 +137,7 @@ protocol,DirectoryLeasing_RWGrantedAsR,LeasingExtendedTest,pass,54,2026-09-01T03
 protocol,DirectoryLeasing_RWHGrantedAsRH,LeasingExtendedTest,pass,53,2026-09-01T03:38:56.636792-07:00,c7a1147,
 protocol,BVT_DuplicateExtentsToFile,MS_FSA_Clarification,pass,206,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_FileLevelTrim,MS_FSA_Clarification,pass,52,2026-09-01T09:04:25.327801-07:00,acb3a54,
-protocol,BVT_OffloadReadWrite,MS_FSA_Clarification,skip,51,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs FSCTL_OFFLOAD_READ/WRITE (ODX) — not implemented
+protocol,BVT_OffloadReadWrite,MS_FSA_Clarification,pass,447,2026-09-02T00:03:15-07:00,b23b297,Token-based ODX offload copy (FSCTL_OFFLOAD_READ/WRITE) emulated server-side
 protocol,BVT_SetZeroData,MS_FSA_Clarification,pass,195,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,FileLevelTrim_Negative_NonZeroKeyInRequest,MS_FSA_Clarification,pass,50,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,BVT_PersistentHandles,MS_SMB2_Clarification,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
