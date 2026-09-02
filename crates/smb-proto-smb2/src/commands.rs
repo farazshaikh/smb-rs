@@ -1524,6 +1524,10 @@ pub mod fsctl {
     pub const SRV_COPYCHUNK: u32 = 0x0014_40F2;
     /// FSCTL_SRV_COPYCHUNK_WRITE — server-side copy, write handle.
     pub const SRV_COPYCHUNK_WRITE: u32 = 0x0014_80F2;
+    /// FSCTL_OFFLOAD_READ ([MS-FSCC] §2.3.77) — generate a token for a range.
+    pub const OFFLOAD_READ: u32 = 0x0009_4264;
+    /// FSCTL_OFFLOAD_WRITE ([MS-FSCC] §2.3.79) — write a token-represented range.
+    pub const OFFLOAD_WRITE: u32 = 0x0009_8268;
     /// FSCTL_SET_SPARSE ([MS-FSCC] §2.3.67).
     pub const SET_SPARSE: u32 = 0x0009_00C4;
     /// FSCTL_SET_ZERO_DATA ([MS-FSCC] §2.3.79) — punch a zero range.
@@ -1699,6 +1703,77 @@ pub fn parse_zero_data(input: &[u8]) -> Option<(u64, u64)> {
         return None;
     }
     Some((g64(input, 0), g64(input, 8)))
+}
+
+/// A STORAGE_OFFLOAD_TOKEN ([MS-FSCC] §2.3.80) is 512 bytes: an 8-byte header
+/// (TokenType, Reserved, TokenIdLength — all big-endian) then a 504-byte
+/// TokenId. This server issues data tokens whose TokenId begins with a 16-byte
+/// server-local identifier keying the captured source range.
+pub mod offload {
+    /// Total STORAGE_OFFLOAD_TOKEN size.
+    pub const TOKEN_LEN: usize = 512;
+    /// Byte offset of the TokenId within the token (after the 8-byte header).
+    pub const TOKEN_ID_OFFSET: usize = 8;
+    /// Vendor TokenType for a server-generated data token (non-well-known, so
+    /// distinct from STORAGE_OFFLOAD_TOKEN_TYPE_ZERO_DATA = 0xFFFF0001).
+    pub const TOKEN_TYPE_DATA: u32 = 0x0000_0001;
+    /// FSCTL_OFFLOAD_READ_INPUT size.
+    pub const READ_INPUT_SIZE: u32 = 32;
+    /// FSCTL_OFFLOAD_READ_OUTPUT size (header + token).
+    pub const READ_OUTPUT_SIZE: u32 = 16 + TOKEN_LEN as u32;
+    /// FSCTL_OFFLOAD_WRITE_OUTPUT size.
+    pub const WRITE_OUTPUT_SIZE: u32 = 16;
+}
+
+/// Parse FSCTL_OFFLOAD_READ_INPUT ([MS-FSCC] §2.3.77) into `(FileOffset,
+/// CopyLength)`; the Size/Flags/TokenTimeToLive/Reserved header is ignored.
+pub fn parse_offload_read(input: &[u8]) -> Option<(u64, u64)> {
+    if input.len() < offload::READ_INPUT_SIZE as usize {
+        return None;
+    }
+    Some((g64(input, 16), g64(input, 24)))
+}
+
+/// Build an FSCTL_OFFLOAD_READ_OUTPUT ([MS-FSCC] §2.3.78) carrying the transfer
+/// length and a data token whose TokenId embeds `token_id`.
+pub fn build_offload_read_resp(transfer_length: u64, token_id: &[u8; 16]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(offload::READ_OUTPUT_SIZE as usize);
+    b.extend_from_slice(&offload::READ_OUTPUT_SIZE.to_le_bytes()); // Size
+    b.extend_from_slice(&0u32.to_le_bytes()); // Flags
+    b.extend_from_slice(&transfer_length.to_le_bytes()); // TransferLength
+    // STORAGE_OFFLOAD_TOKEN: big-endian TokenType, Reserved, TokenIdLength.
+    b.extend_from_slice(&offload::TOKEN_TYPE_DATA.to_be_bytes());
+    b.extend_from_slice(&0u16.to_be_bytes()); // Reserved
+    b.extend_from_slice(&(token_id.len() as u16).to_be_bytes()); // TokenIdLength
+    b.extend_from_slice(token_id);
+    b.resize(offload::READ_OUTPUT_SIZE as usize, 0); // pad TokenId to 504 bytes
+    b
+}
+
+/// Parse FSCTL_OFFLOAD_WRITE_INPUT ([MS-FSCC] §2.3.79) into `(FileOffset,
+/// CopyLength, TransferOffset, token_id)`, extracting the 16-byte identifier
+/// from the token this server issued.
+pub fn parse_offload_write(input: &[u8]) -> Option<(u64, u64, u64, [u8; 16])> {
+    let header = 4 + 4 + 8 + 8 + 8; // Size, Flags, FileOffset, CopyLength, TransferOffset
+    if input.len() < header + offload::TOKEN_LEN {
+        return None;
+    }
+    let file_offset = g64(input, 8);
+    let copy_length = g64(input, 16);
+    let transfer_offset = g64(input, 24);
+    let id_at = header + offload::TOKEN_ID_OFFSET;
+    let token_id: [u8; 16] = input[id_at..id_at + 16].try_into().ok()?;
+    Some((file_offset, copy_length, transfer_offset, token_id))
+}
+
+/// Build an FSCTL_OFFLOAD_WRITE_OUTPUT ([MS-FSCC] §2.3.80) reporting the number
+/// of bytes written.
+pub fn build_offload_write_resp(length_written: u64) -> Vec<u8> {
+    let mut b = Vec::with_capacity(offload::WRITE_OUTPUT_SIZE as usize);
+    b.extend_from_slice(&offload::WRITE_OUTPUT_SIZE.to_le_bytes()); // Size
+    b.extend_from_slice(&0u32.to_le_bytes()); // Flags
+    b.extend_from_slice(&length_written.to_le_bytes()); // LengthWritten
+    b
 }
 
 /// Parse an FSCTL_FILE_LEVEL_TRIM request ([MS-FSCC] §2.3.73) into its `Key`

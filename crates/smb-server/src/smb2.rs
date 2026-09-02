@@ -114,6 +114,10 @@ pub struct Smb2Conn {
     /// Server-side-copy resume keys → source FileId ([MS-SMB2] §2.2.32.3);
     /// handed out by FSCTL_SRV_REQUEST_RESUME_KEY and consumed by COPYCHUNK.
     pub resume_keys: HashMap<[u8; 24], [u8; 16]>,
+    /// Offload (ODX) tokens → the source bytes they represent ([MS-FSCC]
+    /// §2.3.77/79); issued by FSCTL_OFFLOAD_READ and consumed by
+    /// FSCTL_OFFLOAD_WRITE, keyed by the 16-byte id embedded in the token.
+    pub offload_tokens: HashMap<[u8; 16], Vec<u8>>,
     /// Durable handles granted on this connection, keyed by FileId, preserved
     /// into the server table when the connection drops ([MS-SMB2] §3.3.1.10).
     pub durable: HashMap<[u8; 16], crate::state::DurableEntry>,
@@ -201,6 +205,7 @@ impl Smb2Conn {
             async_msgids: HashMap::new(),
             async_by_file: HashMap::new(),
             resume_keys: HashMap::new(),
+            offload_tokens: HashMap::new(),
             durable: HashMap::new(),
             compress_algo: None,
             compress_chained: false,
@@ -3442,6 +3447,81 @@ pub(crate) async fn ioctl(
                 }
             }
         }
+        // Offload (ODX) read: capture the requested source range and hand the
+        // client an opaque token that a later OFFLOAD_WRITE copies from
+        // ([MS-FSCC] §2.3.77/78). Emulated by snapshotting the bytes.
+        c::fsctl::OFFLOAD_READ => {
+            let vfs = match share_vfs(server, conn, tid) {
+                Some(v) => v,
+                None => return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new()),
+            };
+            let Some((file_offset, copy_length)) = c::parse_offload_read(&req.input) else {
+                return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+            };
+            let Some(mut open) = conn.handle_take(&req.file_id.0) else {
+                return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
+            };
+            let read = vfs.read(&mut open, file_offset, copy_length as usize).await;
+            conn.handle_insert(req.file_id.0, open);
+            let data = match read {
+                Ok(d) => d,
+                Err(e) => return IoctlReply::Reply(vfs_err(e), Vec::new()),
+            };
+            let transfer_length = data.len() as u64;
+            let id = next_offload_id();
+            conn.offload_tokens.insert(id, data);
+            (
+                Status::SUCCESS,
+                c::build_ioctl_resp(
+                    req.file_id,
+                    req.ctl_code,
+                    &c::build_offload_read_resp(transfer_length, &id),
+                ),
+            )
+        }
+        // Offload (ODX) write: copy the range represented by the token into this
+        // handle ([MS-FSCC] §2.3.79/80). Emulated from the snapshotted bytes.
+        c::fsctl::OFFLOAD_WRITE => {
+            let vfs = match share_vfs(server, conn, tid) {
+                Some(v) => v,
+                None => return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new()),
+            };
+            let Some((file_offset, copy_length, transfer_offset, token_id)) =
+                c::parse_offload_write(&req.input)
+            else {
+                return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new());
+            };
+            let chunk = match conn.offload_tokens.get(&token_id) {
+                Some(data) => {
+                    let start = transfer_offset as usize;
+                    let end = match start.checked_add(copy_length as usize) {
+                        Some(e) if e <= data.len() => e,
+                        _ => return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new()),
+                    };
+                    data[start..end].to_vec()
+                }
+                None => return IoctlReply::Reply(Status::INVALID_PARAMETER, Vec::new()),
+            };
+            let Some(mut open) = conn.handle_take(&req.file_id.0) else {
+                return IoctlReply::Reply(Status::INVALID_HANDLE, Vec::new());
+            };
+            let written = vfs.write(&mut open, file_offset, &chunk, false).await;
+            conn.handle_insert(req.file_id.0, open);
+            match written {
+                Ok(w) => {
+                    counter!("smb_offload_bytes_total").increment(w);
+                    (
+                        Status::SUCCESS,
+                        c::build_ioctl_resp(
+                            req.file_id,
+                            req.ctl_code,
+                            &c::build_offload_write_resp(w),
+                        ),
+                    )
+                }
+                Err(e) => return IoctlReply::Reply(vfs_err(e), Vec::new()),
+            }
+        }
         // Linux files are implicitly sparse; accept the hint.
         c::fsctl::SET_SPARSE => (
             Status::SUCCESS,
@@ -3967,6 +4047,17 @@ pub(crate) fn share_vfs(
 fn next_resume_nonce() -> u64 {
     static N: AtomicU64 = AtomicU64::new(0x5253_554d_4b45_5900);
     N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A fresh 16-byte identifier embedded in an offload (ODX) token, keying the
+/// source bytes captured by FSCTL_OFFLOAD_READ.
+fn next_offload_id() -> [u8; 16] {
+    static N: AtomicU64 = AtomicU64::new(0x4F44_5849_4400_0000);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(&n.to_le_bytes());
+    id[8..].copy_from_slice(&next_resume_nonce().to_le_bytes());
+    id
 }
 
 /// Read the TotalBytesWritten field out of a SRV_COPYCHUNK_RESPONSE body.
