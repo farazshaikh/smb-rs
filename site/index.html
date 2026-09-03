@@ -110,6 +110,17 @@
   table.tests td { padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); }
   table.tests td.name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
   .test-scroll { max-height: 32rem; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .design { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.9rem; }
+  .design-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    background: var(--card);
+  }
+  .design-card h3 { margin: 0 0 0.4rem; font-size: 1rem; }
+  .design-card h3 a { color: var(--accent); text-decoration: none; }
+  .design-card h3 a:hover { text-decoration: underline; }
+  .design-card p { margin: 0; color: var(--muted); font-size: 0.88rem; }
   footer { margin-top: 3rem; text-align: center; color: var(--muted); font-size: 0.85rem; }
   footer a { color: inherit; }
 </style>
@@ -147,6 +158,69 @@
     so each layer stays readable and independently testable. The API docs
     below are generated straight from that workspace's doc comments.
   </p>
+
+  <h2>Design</h2>
+  <div class="design">
+    <div class="design-card">
+      <h3>High performance — async Rust on io_uring</h3>
+      <p>
+        The server runs on a <code>tokio_uring</code> current-thread runtime:
+        networking and file I/O both go through io_uring with owned buffers —
+        no blocking <code>std::fs</code>/<code>std::net</code>, no ad-hoc
+        thread pool. Because io_uring resources are <code>!Send</code>,
+        per-connection state is driven entirely on one thread; cross-task
+        wakeups (async STATUS_PENDING completions, oplock/lease breaks,
+        CHANGE_NOTIFY) travel over <code>mpsc</code> channels to a dedicated
+        writer task.
+      </p>
+    </div>
+    <div class="design-card">
+      <h3><a href="smb_server_vfs/index.html">VFS — trait-based backend support</a></h3>
+      <p>
+        One dialect-neutral <code>Vfs</code> trait separates protocol handling
+        from storage. SMB1 and SMB2 dispatchers translate wire commands into
+        the same neutral operations, so every dialect drives identical backend
+        behavior and stays behaviourally consistent. The bundled
+        <code>smb-server-backend-posix</code> implements it directly against
+        POSIX semantics; a new storage backend is just a new <code>Vfs</code> impl.
+      </p>
+    </div>
+    <div class="design-card">
+      <h3><a href="https://github.com/farazshaikh/smb-server-rs/blob/main/test/README.md">Interop testing — three suites, full SMB1/2/3 coverage</a></h3>
+      <p>
+        <code>unit</code> (in-process Rust tests), <code>system</code> (a Rust
+        harness driving the server through Python's <code>smbprotocol</code>),
+        and <code>protocol</code> (Microsoft's own MS-SMB2 Server Test Suite,
+        vendored as a submodule) all feed the live results above. Coverage
+        spans every dialect from NT LM 0.12 through 3.1.1 plus the advanced
+        feature set — oplocks, leases (v2/v3) with break notifications,
+        durable/persistent handles, an enforced byte-range lock conflict
+        matrix, and SMB3 encryption/compression.
+      </p>
+    </div>
+    <div class="design-card">
+      <h3><a href="smb_server_csp/index.html">CSP — modular crypto service provider</a></h3>
+      <p>
+        One stable API (MD4, HMAC-MD5/SHA256, AES-GCM/CCM, RC4, SHA-256,
+        AES-CMAC/GMAC) behind two interchangeable backends chosen at compile
+        time: maintained RustCrypto crates by default (hardware-accelerated
+        AES-NI where available), or a bundled from-scratch implementation with
+        zero external dependencies. Both must produce byte-identical output
+        against the same test vectors.
+      </p>
+    </div>
+    <div class="design-card">
+      <h3><a href="https://github.com/farazshaikh/smb-server-rs/blob/main/docs/typestate_plan.md">Type-state request lifecycle</a></h3>
+      <p>
+        Each SMB2 command's lifecycle — accepted, pending, completed,
+        unsolicited — is encoded as distinct Rust types instead of a runtime
+        enum plus comments. A request is decoded once into its owning
+        <code>Command</code> handler and resolved to an <code>Outcome</code>;
+        illegal sequences (completing a request twice, replying to one that
+        was never accepted) become compile errors instead of runtime bugs.
+      </p>
+    </div>
+  </div>
 
   <h2>API documentation</h2>
   <div class="crates">
