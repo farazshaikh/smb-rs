@@ -172,10 +172,10 @@ fn main() {
                         let span = tracing::info_span!("conn", peer = %peer);
                         let _g = span.enter();
                         tracing::debug!("client connected");
-                        let transport = Box::new(smb_transport::tcp::TcpTransport::new(
+                        let transport = Box::new(smb_server_transport::tcp::TcpTransport::new(
                             stream,
                             peer.to_string(),
-                        )) as Box<dyn smb_transport::Transport>;
+                        )) as Box<dyn smb_server_transport::Transport>;
                         dispatch::serve_client(srv, transport).await;
                         tracing::debug!("client disconnected");
                     });
@@ -209,7 +209,7 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
         args.ca_shares.iter().map(|s| s.to_lowercase()).collect();
     for (name, root) in shares {
         let lname = name.to_lowercase();
-        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(root.clone()));
+        let vfs: Arc<dyn smb_server_vfs::Vfs> = Arc::new(smb_server_backend_posix::PosixVfs::new(root.clone()));
         let encrypt = encrypt_set.contains(&lname);
         let compress = compress_set.contains(&lname);
         let ca = ca_set.contains(&lname);
@@ -224,7 +224,7 @@ fn build_shares(args: &Args) -> HashMap<String, state::Share> {
         state::Share {
             name: "IPC$".into(),
             root: "/".into(),
-            vfs: Arc::new(smb_backend_posix::PosixVfs::new("/")),
+            vfs: Arc::new(smb_server_backend_posix::PosixVfs::new("/")),
             is_ipc: true,
             encrypt: false,
             compress: false,
@@ -249,19 +249,19 @@ fn build_users(args: &Args) -> HashMap<String, String> {
 
 /// Build the durable-handle store from `--handle-store`. `redb` persists across
 /// a restart (persistent-handle reclaim); anything else is the in-memory store.
-fn build_handle_store(args: &Args) -> Arc<dyn smb_handle_store::HandleStore> {
+fn build_handle_store(args: &Args) -> Arc<dyn smb_server_handle_store::HandleStore> {
     match args.handle_store.as_str() {
-        "redb" => match smb_handle_store::RedbStore::open(&args.handle_store_path) {
+        "redb" => match smb_server_handle_store::RedbStore::open(&args.handle_store_path) {
             Ok(store) => {
                 tracing::info!(path = %args.handle_store_path, "durable handle store: redb");
                 Arc::new(store)
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to open redb handle store; using memory");
-                Arc::new(smb_handle_store::MemStore::new())
+                Arc::new(smb_server_handle_store::MemStore::new())
             }
         },
-        _ => Arc::new(smb_handle_store::MemStore::new()),
+        _ => Arc::new(smb_server_handle_store::MemStore::new()),
     }
 }
 

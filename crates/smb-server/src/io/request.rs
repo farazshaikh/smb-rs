@@ -3,12 +3,12 @@
 //! machinery; later phases add one line per command here.
 
 use metrics::{counter, gauge};
-use smb_proto::types::Status;
-use smb_proto_smb2::commands::{
+use smb_server_proto::types::Status;
+use smb_server_proto_smb2::commands::{
     self as c, ChangeNotifyReq, CloseReq, CreateReq, FlushReq, IoctlReq, LockReq, QueryDirReq,
     QueryInfoReq, ReadReq, SetInfoReq, WriteReq,
 };
-use smb_proto_smb2::session_setup::cmd;
+use smb_server_proto_smb2::session_setup::cmd;
 
 use super::context::{Command, IoContext, Outcome, Resources};
 use super::origin::{Bare, Solicited};
@@ -305,7 +305,7 @@ impl Command for SetInfoCmd {
         // path so the parent directory lease's READ caching can be revoked
         // ([MS-SMB2] §3.3.1.4).
         let rename = SetInfoReq::parse(res.frame)
-            .filter(|r| r.info_type == c::info_type::FILE && r.class == smb_proto_smb2::info::file_class::RENAME)
+            .filter(|r| r.info_type == c::info_type::FILE && r.class == smb_server_proto_smb2::info::file_class::RENAME)
             .and_then(|r| res.conn.with_handle(&r.file_id.0, |h| (r.file_id.0, h.path.clone(), h.is_dir)));
         // Renaming a directory with open handles anywhere in its subtree first
         // revokes HANDLE caching on the affected directory leases, then fails
@@ -370,7 +370,7 @@ impl Command for CreateCmd {
         let Some(vfs) = crate::smb2::share_vfs(res.server, res.conn, ctx.reply.tree_id) else {
             return Outcome::Final(ctx.respond(Status::INVALID_HANDLE, Vec::new()));
         };
-        let signed = smb_proto_smb2::Header2::parse(res.frame)
+        let signed = smb_server_proto_smb2::Header2::parse(res.frame)
             .map(|h| h.is_signed())
             .unwrap_or(false);
         let is_ca = crate::smb2::share_is_ca(res.server, res.conn, ctx.reply.tree_id);
@@ -407,7 +407,7 @@ pub struct LockCmd;
 impl Command for LockCmd {
     type Request = LockReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: LockReq, res: &mut Resources<'_>) -> Outcome {
-        let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) else {
+        let Some(hdr) = smb_server_proto_smb2::Header2::parse(res.frame) else {
             return Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new()));
         };
         match crate::smb2::begin_lock(res.conn, res.server, &hdr, res.frame) {
@@ -428,7 +428,7 @@ pub struct ChangeNotifyCmd;
 impl Command for ChangeNotifyCmd {
     type Request = ChangeNotifyReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: ChangeNotifyReq, res: &mut Resources<'_>) -> Outcome {
-        let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) else {
+        let Some(hdr) = smb_server_proto_smb2::Header2::parse(res.frame) else {
             return Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new()));
         };
         match crate::smb2::begin_change_notify(res.conn, &hdr, res.frame) {
@@ -448,7 +448,7 @@ pub struct CancelCmd;
 impl Command for CancelCmd {
     type Request = CancelReq;
     async fn serve(_ctx: IoContext<Accepted, Bare>, _req: CancelReq, res: &mut Resources<'_>) -> Outcome {
-        if let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) {
+        if let Some(hdr) = smb_server_proto_smb2::Header2::parse(res.frame) {
             crate::smb2::cancel(res.conn, &hdr, res.frame);
         }
         Outcome::Silent
@@ -463,7 +463,7 @@ impl Command for OplockBreakCmd {
     type Request = OplockBreakReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: OplockBreakReq, res: &mut Resources<'_>) -> Outcome {
         let frame = res.frame;
-        let hdr_len = smb_proto_smb2::consts::hdr::LEN;
+        let hdr_len = smb_server_proto_smb2::consts::hdr::LEN;
         let structure_size = u16::from_le_bytes([
             *frame.get(hdr_len).unwrap_or(&0),
             *frame.get(hdr_len + 1).unwrap_or(&0),
@@ -509,7 +509,7 @@ pub struct NegotiateCmd;
 impl Command for NegotiateCmd {
     type Request = NegotiateReq;
     async fn serve(ctx: IoContext<Accepted, Bare>, _req: NegotiateReq, res: &mut Resources<'_>) -> Outcome {
-        let Some(hdr) = smb_proto_smb2::Header2::parse(res.frame) else {
+        let Some(hdr) = smb_server_proto_smb2::Header2::parse(res.frame) else {
             return Outcome::Final(ctx.respond(Status::INVALID_PARAMETER, Vec::new()));
         };
         match crate::smb2::negotiate(res.conn, res.server, &hdr, res.frame) {

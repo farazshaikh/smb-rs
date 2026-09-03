@@ -20,10 +20,10 @@ const DHANDLE_FLAG_PERSISTENT: u32 = 0x0000_0002;
 /// ([MS-SRVS] §2.2.2.4).
 const STYPE_IPC_SPECIAL: u32 = 0x8000_0003;
 
-use smb_vfs::OpenFile;
-use smb_vfs::Vfs;
+use smb_server_vfs::OpenFile;
+use smb_server_vfs::Vfs;
 
-use smb_handle_store::HandleStore;
+use smb_server_handle_store::HandleStore;
 
 /// Milliseconds since the Unix epoch, used for durable-handle deadlines.
 pub fn now_ms() -> u64 {
@@ -835,8 +835,8 @@ pub struct DurableEntry {
 impl DurableEntry {
     /// Project into a store record, computing the absolute deadline from
     /// `now_ms`. Persistent handles get deadline 0 (never swept).
-    pub fn into_record(self, now_ms: u64) -> smb_handle_store::HandleRecord {
-        smb_handle_store::HandleRecord {
+    pub fn into_record(self, now_ms: u64) -> smb_server_handle_store::HandleRecord {
+        smb_server_handle_store::HandleRecord {
             create_guid: self.persistent_id,
             path: self.rel,
             share: String::new(),

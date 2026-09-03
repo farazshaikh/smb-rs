@@ -5,7 +5,7 @@
 //! the previous state becomes unusable — the borrow checker enforces the
 //! request lifecycle. Everything here is static dispatch (see the plan's §12).
 
-use smb_proto::types::Status;
+use smb_server_proto::types::Status;
 
 use super::origin::{Bare, Origin, Solicited, Unsolicited};
 use super::state::{Accepted, Pending};

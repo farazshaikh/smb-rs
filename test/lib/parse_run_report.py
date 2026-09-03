@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse a smb-testsuite RunReport JSON into CSV rows for the system suite.
+"""Parse a smb-server-testsuite RunReport JSON into CSV rows for the system suite.
 
 Emits `name,category,status,duration_ms,note` rows (no header) to stdout,
 one per case in `cases[]` (id -> name, message -> note).

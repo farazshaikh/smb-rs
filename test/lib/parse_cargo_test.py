@@ -4,7 +4,7 @@
 Tracks which test binary ("Running ... (target/.../deps/NAME-hash)" or
 "Doc-tests NAME") each `test <path> ... <outcome>` line belongs to, and emits
 `name,category,status,duration_ms,note` rows (no header) to stdout, where
-`category` is the binary/crate slug (e.g. `smb_proto_smb2`, `conformance`).
+`category` is the binary/crate slug (e.g. `smb_server_proto_smb2`, `conformance`).
 Default cargo test output carries no per-test duration, so duration_ms is 0.
 
 Usage: cargo test --workspace 2>&1 | tee log; parse_cargo_test.py log | update_status.py unit

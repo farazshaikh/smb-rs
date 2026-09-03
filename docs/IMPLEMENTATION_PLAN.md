@@ -16,7 +16,7 @@
 - ✅ Async transport abstraction (`Transport` trait, tokio)
 - ✅ VFS abstraction trait (`Vfs` with async methods)
 - ✅ POSIX backend (`PosixVfs`: path containment, wildcards, case-insensitive)
-- ✅ Crypto service provider (`smb-csp`): RustCrypto crates by default,
+- ✅ Crypto service provider (`smb-server-csp`): RustCrypto crates by default,
   bundled hand-rolled implementations behind `handrolled` feature;
   both pass the same FIPS/RFC/interop vector suite
 
@@ -163,8 +163,8 @@
   encryption); CCM live path untested
 - ⬜ Multichannel support
 
-### Crypto additions — now via `smb-csp` crate
-- Crypto service provider (`crates/smb-csp`) with two compile-time backends:
+### Crypto additions — now via `smb-server-csp` crate
+- Crypto service provider (`crates/smb-server-csp`) with two compile-time backends:
   * `lib` (default): RustCrypto crates (md4/md5/sha2/hmac/des/aes/cmac/rc4),
     hardware-accelerated AES where available
   * `handrolled`: bundled from-scratch implementations (zero external deps)
@@ -448,7 +448,7 @@ regression suite alongside M2.1.
 Close the remaining practical [MS-SMB2] / [MS-FSCC] surface a standalone
 Windows/macOS/Linux client exercises. Prefer existing crates for marshalling
 (`ms-ndr`, `windows-acl`/`sddl` parsing where viable) and crypto (`RustCrypto`
-suites already vendored via `smb-csp`) over hand-rolled codecs.
+suites already vendored via `smb-server-csp`) over hand-rolled codecs.
 
 8. **Metadata/VFS completeness**
    - Security descriptors: QUERY/SET_INFO `SECURITY` ([MS-FSCC] §2.4.6,
@@ -497,7 +497,7 @@ so every fix is measured against Microsoft's own tests.
 15. **Pluggable handle store** — async `HandleStore` trait + `MemStore` +
     `RedbStore` (embedded, durable across restart), wired into the server's
     durable-handle path (`--handle-store mem|redb`). ✅ **COMPLETE**
-    (`smb-handle-store` crate; grant→`put`, DH2C→atomic `take`, sweep).
+    (`smb-server-handle-store` crate; grant→`put`, DH2C→atomic `take`, sweep).
 16. **Replicated backend** — `openraft` (or etcd via `etcd-client`) backend
     behind the same trait for multi-node handle/lock/session state.
 17. **Shared-storage VFS** — a backend both nodes serve identical bytes from,

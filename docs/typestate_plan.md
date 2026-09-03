@@ -1,7 +1,7 @@
 # Typestate Plan: an SMB request/response state machine encoded in the type system
 
 Status: proposal. Target crate(s): `smb-server` (new `io` module), with small
-additions to `smb-proto-smb2`. This plan is **incremental and non-breaking**: the
+additions to `smb-server-proto-smb2`. This plan is **incremental and non-breaking**: the
 current dispatcher (`dispatch::serve_client` → `smb2::process_frame` →
 `process_single`) keeps working and the regression gate (SMB2Basic BVT 27/27 +
 `cargo test --workspace` + smbprotocol conformance 30/30) must stay green after
@@ -155,7 +155,7 @@ pub enum SmbRequest {
     Negotiate(NegotiateReq),
     SessionSetup(SessionSetupReq),
     TreeConnect(TreeConnectReq),
-    Create(CreateReq),                  // already exists in smb-proto-smb2
+    Create(CreateReq),                  // already exists in smb-server-proto-smb2
     Read(ReadReq),  Write(WriteReq),  Close(CloseReq),
     Ioctl(IoctlReq), Lock(LockReq), QueryDir(QueryDirReq),
     QueryInfo(QueryInfoReq), SetInfo(SetInfoReq),

@@ -16,7 +16,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
 COPY src ./src
-RUN cargo build --release -p smb-server -p smb-testsuite
+RUN cargo build --release -p smb-server -p smb-server-testsuite
 
 # ---- runtime stage ----
 FROM debian:bookworm-slim

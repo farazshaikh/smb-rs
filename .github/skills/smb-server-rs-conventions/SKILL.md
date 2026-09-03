@@ -1,6 +1,6 @@
 ---
 name: smb-server-rs-conventions
-description: 'Coding conventions for the smb-server-rs pure-Rust SMB1/SMB2/SMB3 server workspace. USE WHEN writing, reviewing, or refactoring Rust in this repo — especially: implementing a protocol feature faithfully from the [MS-SMB2]/[MS-CIFS] spec PDFs instead of just making a test pass; documenting public items (the workspace denies `missing_docs`); and replacing hardcoded protocol magic numbers / wire offsets / command codes / NT status values with named constants defined in the `smb-proto*` crates. Triggers: "smb-server-rs convention", "implement from spec", "reward hacking", "make the test pass", "MS-SMB2 pdf", "missing docs", "why does this compile without docs", "hardcoded constant", "magic number", "magic byte", "0xFE 0xFD 0xFC", "define constant in protocol", "clippy lint for literals", "disallow literals", "adding a command", "code review smb".'
+description: 'Coding conventions for the smb-server-rs pure-Rust SMB1/SMB2/SMB3 server workspace. USE WHEN writing, reviewing, or refactoring Rust in this repo — especially: implementing a protocol feature faithfully from the [MS-SMB2]/[MS-CIFS] spec PDFs instead of just making a test pass; documenting public items (the workspace denies `missing_docs`); and replacing hardcoded protocol magic numbers / wire offsets / command codes / NT status values with named constants defined in the `smb-server-proto*` crates. Triggers: "smb-server-rs convention", "implement from spec", "reward hacking", "make the test pass", "MS-SMB2 pdf", "missing docs", "why does this compile without docs", "hardcoded constant", "magic number", "magic byte", "0xFE 0xFD 0xFC", "define constant in protocol", "clippy lint for literals", "disallow literals", "adding a command", "code review smb".'
 ---
 
 # smb-server-rs conventions
@@ -61,9 +61,9 @@ protocol crate that owns that wire format and reference it:
 
 | What | Crate / module |
 |------|----------------|
-| SMB2/3 headers, magics, command codes, FSCTLs, contexts | `smb-proto-smb2` (`lib.rs`, `consts`, `commands`, `session_setup::cmd`) |
-| SMB1 headers, command bytes, flags | `smb-proto-smb1` (`consts`) |
-| NT status codes, common wire types | `smb-proto` (`types`) |
+| SMB2/3 headers, magics, command codes, FSCTLs, contexts | `smb-server-proto-smb2` (`lib.rs`, `consts`, `commands`, `session_setup::cmd`) |
+| SMB1 headers, command bytes, flags | `smb-server-proto-smb1` (`consts`) |
+| NT status codes, common wire types | `smb-server-proto` (`types`) |
 
 Example — the dispatch loop used to branch on raw first bytes:
 
@@ -73,8 +73,8 @@ if frame.0[0] == 0xFE || frame.0[0] == 0xFD || frame.0[0] == 0xFC { ... }
 ```
 
 The full 4-byte ProtocolIds already exist as constants
-(`smb_proto_smb2::SMB2_MAGIC`, `commands::TF_MAGIC`, `compress::PROTOCOL_ID`), so
-the fix is named first-byte discriminators in `smb-proto-smb2`:
+(`smb_server_proto_smb2::SMB2_MAGIC`, `commands::TF_MAGIC`, `compress::PROTOCOL_ID`), so
+the fix is named first-byte discriminators in `smb-server-proto-smb2`:
 
 ```rust
 // GOOD — named, self-documenting, single source of truth
@@ -84,7 +84,7 @@ if frame.0[0] == PROTO_ID_SMB2
 ```
 
 When you need a wire value with no constant yet, add the constant (with a `///`
-citing the spec section) next to its peers in the owning `smb-proto*` crate, then
+citing the spec section) next to its peers in the owning `smb-server-proto*` crate, then
 use it — don't inline the literal.
 
 ### On lints for this rule
@@ -98,7 +98,7 @@ lint that does enforce it.
   from the workspace) and is wired via `[workspace.metadata.dylint]` in the root
   `Cargo.toml`. Run it with `cargo dylint --all -- --workspace` (or `-- -p
   <crate>`). It flags every integer literal `> 1` except: const contexts,
-  macro expansions, `#[test]` functions, and the `smb_proto*` crates (which are
+  macro expansions, `#[test]` functions, and the `smb_server_proto*` crates (which are
   the sanctioned home for wire constants).
 - **The whole workspace is at zero.** Keep it there: a new inline literal is a
   lint error, not a style nit.
@@ -106,7 +106,7 @@ lint that does enforce it.
 Two ways to satisfy the lint — pick by the literal's nature:
 
 1. **Name genuine wire constants** (offsets, command/status/FSCTL codes, masks,
-   structure sizes, dialects). Add the constant in the owning `smb-proto*` crate
+   structure sizes, dialects). Add the constant in the owning `smb-server-proto*` crate
    (with a `///` citing the spec section) and reference it. This is the default
    and preferred fix. Also prefer `size_of::<uN>()` / `.len()` for field widths
    and reuse existing helpers (e.g. `FileTime::from_unix`) over re-deriving
@@ -131,7 +131,7 @@ Two ways to satisfy the lint — pick by the literal's nature:
 
 - Use `bash` for all shell commands (never fish).
 - After a change: `cargo build -p smb-server` and `cargo test --workspace` must
-  be green. Note: `cargo check --all-features` intentionally fails on `smb-csp`
+  be green. Note: `cargo check --all-features` intentionally fails on `smb-server-csp`
   (its `lib` and `handrolled` backends are mutually exclusive by a
   `compile_error!` guard) — check the backends separately, not with
   `--all-features`.

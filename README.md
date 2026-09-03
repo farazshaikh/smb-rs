@@ -118,7 +118,7 @@ keeps the summary below and [`test_status.csv`](test_status.csv) in sync.
 
 <!-- TEST_STATUS_START -->
 
-**433 tests · 418 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `e24ab7a`, 2026-09-02)
+**433 tests · 418 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `355a5e6`, 2026-09-02)
 
 | Suite | What it runs | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|---|
@@ -126,7 +126,7 @@ keeps the summary below and [`test_status.csv`](test_status.csv) in sync.
 | **system** | End-to-end interop tests driving a live server through the Python `smbprotocol` client | 34 | 0 | 0 | 34 |
 | **unit** | In-process Rust unit & integration tests (`cargo test --workspace`) | 113 | 0 | 0 | 113 |
 
-Generated from [`test_status.csv`](test_status.csv) by [`test/lib/render_readme_status.py`](test/lib/render_readme_status.py) after a test run. Live view: `smb-test-dashboard` (see [test/README.md](test/README.md)).
+Generated from [`test_status.csv`](test_status.csv) by [`test/lib/render_readme_status.py`](test/lib/render_readme_status.py) after a test run. Live view: `smb-server-test-dashboard` (see [test/README.md](test/README.md)).
 
 <!-- TEST_STATUS_END -->
 
@@ -143,7 +143,7 @@ test/runtest.sh --suite protocol       # needs the .NET SDK; see test/README.md
 test/runtest.sh --setup
 
 # interactive: point cargo test at a running server (skips cleanly if unset)
-SMB_TEST_HOST=127.0.0.1 SMB_TEST_PORT=4450 cargo test -p smb-testsuite
+SMB_TEST_HOST=127.0.0.1 SMB_TEST_PORT=4450 cargo test -p smb-server-testsuite
 
 # containerised build + run (system suite)
 docker build -f test/Dockerfile -t smb-server-rs-test .
@@ -167,7 +167,7 @@ cargo build --release --workspace   # → target/release/rustsmb
 
 ### Crypto backend selection
 
-Cryptography lives in the [`crates/smb-csp`](crates/smb-csp) service-provider
+Cryptography lives in the [`crates/smb-server-csp`](crates/smb-server-csp) service-provider
 crate behind one API surface with two compile-time backends:
 
 | Backend | Build command | Notes |
@@ -176,7 +176,7 @@ crate behind one API surface with two compile-time backends:
 | `handrolled` | `cargo build --release --workspace --no-default-features --features handrolled` | Bundled from-scratch implementations; zero external dependencies |
 
 Both backends must satisfy the same FIPS/RFC/interop vector suite
-(enforced by tests inside `smb-csp`).
+(enforced by tests inside `smb-server-csp`).
 
 ## Running
 
@@ -256,7 +256,7 @@ Windows/macOS: map `\\host\share` in Explorer.
   smb_bytes_read_total         smb_bytes_written_total
   smb_creates_total            smb_closes_total
   smb_tcons_total              smb_logoffs_total
-  smb_auth_total{outcome}      smb_sessions_active
+  smb_server_auth_total{outcome}      smb_sessions_active
   smb_trees_active             smb_frame_duration_us (quantiles)
   ```
 
@@ -264,19 +264,19 @@ Windows/macOS: map `\\host\share` in Explorer.
 
 ```
 crates/
-├── smb-proto/        Shared value types: NTSTATUS, FILETIME, attributes,
+├── smb-server-proto/        Shared value types: NTSTATUS, FILETIME, attributes,
 │                     wire reader/writer
-├── smb-transport/    RFC 1002 NBSS-over-TCP framing
-├── smb-proto-smb1/   SMB1 codecs: header, AndX, TRANS2 find/query/set…
-├── smb-proto-smb2/   SMB2/SMB3 codecs: header, CREATE/READ/WRITE…,
+├── smb-server-transport/    RFC 1002 NBSS-over-TCP framing
+├── smb-server-proto-smb1/   SMB1 codecs: header, AndX, TRANS2 find/query/set…
+├── smb-server-proto-smb2/   SMB2/SMB3 codecs: header, CREATE/READ/WRITE…,
 │                     FSCC info encoders, negotiate contexts
-├── smb-proto-smb3/   Reserved for SMB3-only transforms (encryption)
-├── smb-auth/         NTLMSSP messages, SPNEGO DER wrapping, credential
-│                     verification (delegates primitives to smb-csp)
-├── smb-csp/          Crypto service provider — RustCrypto crates by
+├── smb-server-proto-smb3/   Reserved for SMB3-only transforms (encryption)
+├── smb-server-auth/         NTLMSSP messages, SPNEGO DER wrapping, credential
+│                     verification (delegates primitives to smb-server-csp)
+├── smb-server-csp/          Crypto service provider — RustCrypto crates by
 │                     default, bundled implementations behind a feature
-├── smb-vfs/          Dialect-neutral VFS trait
-├── smb-backend-posix/ POSIX backend: containment, wildcards, case folding
+├── smb-server-vfs/          Dialect-neutral VFS trait
+├── smb-server-backend-posix/ POSIX backend: containment, wildcards, case folding
 └── smb-server/       rustsmb binary: CLI, dispatch loops (SMB1+SMB2),
                        sessions/trees/handles state, observability
 ```

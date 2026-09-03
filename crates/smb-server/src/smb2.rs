@@ -1,7 +1,7 @@
 //! SMB2 protocol loop ([MS-SMB2]).
 //!
 //! Implements the full file-serving command surface on top of the shared
-//! [`Vfs`](smb_vfs::Vfs) abstraction: NEGOTIATE, SESSION_SETUP (both NTLMSSP
+//! [`Vfs`](smb_server_vfs::Vfs) abstraction: NEGOTIATE, SESSION_SETUP (both NTLMSSP
 //! legs), TREE_CONNECT/DISCONNECT, LOGOFF, CREATE, READ, WRITE, CLOSE, FLUSH,
 //! LOCK, QUERY_DIRECTORY, QUERY_INFO and SET_INFO. Frames whose magic is
 //! `\xFESMB` route here from [`crate::dispatch`].
@@ -13,12 +13,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use metrics::{counter, gauge};
 use tokio::sync::{mpsc, oneshot};
 
-use smb_proto::types::Status;
-use smb_proto_smb2::commands as c;
-use smb_proto_smb2::consts::{aead, hdr, hdr_flags};
-use smb_proto_smb2::info;
-use smb_proto_smb2::session_setup as ss;
-use smb_transport::Transport;
+use smb_server_proto::types::Status;
+use smb_server_proto_smb2::commands as c;
+use smb_server_proto_smb2::consts::{aead, hdr, hdr_flags};
+use smb_server_proto_smb2::info;
+use smb_server_proto_smb2::session_setup as ss;
+use smb_server_transport::Transport;
 
 use crate::state::{ServerShared, Share};
 
@@ -194,7 +194,7 @@ impl Smb2Conn {
             guest: false,
             session_key: None,
             signing_key: None,
-            signing_algo: smb_proto_smb2::negotiate::ctx_type::SIGNING_AES128_CMAC,
+            signing_algo: smb_server_proto_smb2::negotiate::ctx_type::SIGNING_AES128_CMAC,
             advertised_caps: 0,
             client_credits: 0,
             preauth_hash: [0u8; 64],
@@ -275,7 +275,7 @@ impl Smb2Conn {
     }
 
     /// Insert an open handle into the session's open table.
-    pub(crate) fn handle_insert(&self, fid: [u8; 16], open: Box<smb_vfs::OpenFile>) {
+    pub(crate) fn handle_insert(&self, fid: [u8; 16], open: Box<smb_server_vfs::OpenFile>) {
         if let Some(s) = self.scope.as_ref() {
             s.borrow_mut().handles.insert(fid, open);
         }
@@ -285,7 +285,7 @@ impl Smb2Conn {
     /// to close a handle and to check one out for an async VFS call (reinsert
     /// with [`Self::handle_insert`] afterwards) so no `RefCell` borrow is ever
     /// held across an `.await`.
-    pub(crate) fn handle_take(&self, fid: &[u8; 16]) -> Option<Box<smb_vfs::OpenFile>> {
+    pub(crate) fn handle_take(&self, fid: &[u8; 16]) -> Option<Box<smb_server_vfs::OpenFile>> {
         self.scope.as_ref()?.borrow_mut().handles.remove(fid)
     }
 
@@ -293,7 +293,7 @@ impl Smb2Conn {
     pub(crate) fn with_handle<R>(
         &self,
         fid: &[u8; 16],
-        f: impl FnOnce(&smb_vfs::OpenFile) -> R,
+        f: impl FnOnce(&smb_server_vfs::OpenFile) -> R,
     ) -> Option<R> {
         Some(f(self.scope.as_ref()?.borrow().handles.get(fid)?))
     }
@@ -302,7 +302,7 @@ impl Smb2Conn {
     pub(crate) fn with_handle_mut<R>(
         &self,
         fid: &[u8; 16],
-        f: impl FnOnce(&mut smb_vfs::OpenFile) -> R,
+        f: impl FnOnce(&mut smb_server_vfs::OpenFile) -> R,
     ) -> Option<R> {
         Some(f(self.scope.as_ref()?.borrow_mut().handles.get_mut(fid)?))
     }
@@ -359,7 +359,7 @@ pub async fn serve_client(
                     _ => break,
                 }
             };
-            if frame.len() < 64 || frame[0..4] != smb_proto_smb2::SMB2_MAGIC {
+            if frame.len() < 64 || frame[0..4] != smb_server_proto_smb2::SMB2_MAGIC {
                 continue;
             }
             if let Some(resp) = process_frame(&server, &mut conn, &frame).await {
@@ -380,18 +380,18 @@ pub async fn serve_client(
 /// dialect marker: builds the SMB2 negotiate response so the client upgrades.
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub fn handle_multiprotocol_negotiate(buf: &[u8], guid: &[u8; 16]) -> Option<Vec<u8>> {
-    let (hdr, _wc_off) = smb_proto_smb1::header::parse_header(buf)?;
+    let (hdr, _wc_off) = smb_server_proto_smb1::header::parse_header(buf)?;
     let _ = hdr;
     // The multi-protocol NEGOTIATE response is MessageId 0 ([MS-SMB2]
     // §3.2.5.2). Offer the wildcard revision when the client listed
     // "SMB 2.???" so it re-negotiates a concrete dialect (up to 3.1.1);
     // otherwise answer the "SMB 2.002"-only case directly.
     let dialect = if buf.windows(5).any(|w| w == b"2.???") {
-        smb_proto_smb2::negotiate::DIALECT_WILDCARD
+        smb_server_proto_smb2::negotiate::DIALECT_WILDCARD
     } else {
-        smb_proto_smb2::negotiate::DIALECT_202
+        smb_server_proto_smb2::negotiate::DIALECT_202
     };
-    let h2 = smb_proto_smb2::Header2 {
+    let h2 = smb_server_proto_smb2::Header2 {
         credit_charge: 0,
         status: 0,
         command: 0,
@@ -406,10 +406,10 @@ pub fn handle_multiprotocol_negotiate(buf: &[u8], guid: &[u8; 16]) -> Option<Vec
     Some(response(
         &h2,
         Status::SUCCESS,
-        smb_proto_smb2::negotiate::build_response(
+        smb_server_proto_smb2::negotiate::build_response(
             dialect,
             guid,
-            smb_proto::types::FileTime::now().0,
+            smb_server_proto::types::FileTime::now().0,
         ),
         0,
     ))
@@ -429,12 +429,12 @@ pub(crate) async fn process_frame(
     let plaintext: Vec<u8>;
     let mut buf = buf;
     let mut request_encrypted = false;
-    if buf.len() >= 4 && buf[..4] == smb_proto_smb2::commands::TF_MAGIC {
+    if buf.len() >= 4 && buf[..4] == smb_server_proto_smb2::commands::TF_MAGIC {
         let pt = decrypt_transform(conn, buf)?;
         // A decrypted payload may itself be a compression transform
         // ([MS-SMB2] §3.1.4.4: the client compresses, then encrypts); expand it.
-        plaintext = if pt.len() >= 4 && pt[..4] == smb_proto_smb2::compress::PROTOCOL_ID {
-            smb_proto_smb2::compress::decompress_message(&pt)?
+        plaintext = if pt.len() >= 4 && pt[..4] == smb_server_proto_smb2::compress::PROTOCOL_ID {
+            smb_server_proto_smb2::compress::decompress_message(&pt)?
         } else {
             pt
         };
@@ -553,9 +553,9 @@ pub(crate) async fn process_frame(
         if let Some(algo) = conn.compress_algo {
             if conn.compress_response {
                 let packed = if conn.compress_chained {
-                    smb_proto_smb2::compress::compress_message_chained(&payload, algo)
+                    smb_server_proto_smb2::compress::compress_message_chained(&payload, algo)
                 } else {
-                    smb_proto_smb2::compress::compress_message(&payload, algo)
+                    smb_server_proto_smb2::compress::compress_message(&payload, algo)
                 };
                 if let Some(packed) = packed {
                     payload = packed;
@@ -573,7 +573,7 @@ pub(crate) async fn process_frame(
 /// ([MS-SMB2] §3.3.5.2.7.2). `None` for commands with no FileId field.
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 fn file_id_body_offset(command: u16) -> Option<usize> {
-    use smb_proto_smb2::session_setup::cmd as c;
+    use smb_server_proto_smb2::session_setup::cmd as c;
     match command {
         c::CLOSE | c::FLUSH | c::LOCK | c::IOCTL | c::QUERY_DIRECTORY | c::CHANGE_NOTIFY => Some(8),
         c::READ | c::WRITE | c::SET_INFO => Some(16),
@@ -584,13 +584,13 @@ fn file_id_body_offset(command: u16) -> Option<usize> {
 
 /// True for the GCM cipher variants ([MS-SMB2] §2.2.3.1.2).
 fn cipher_is_gcm(cipher: u16) -> bool {
-    use smb_proto_smb2::negotiate::ctx_type::{AES128_GCM, AES256_GCM};
+    use smb_server_proto_smb2::negotiate::ctx_type::{AES128_GCM, AES256_GCM};
     matches!(cipher, AES128_GCM | AES256_GCM)
 }
 
 /// True for the AES-256 cipher variants (32-byte keys).
 fn cipher_is_256(cipher: u16) -> bool {
-    use smb_proto_smb2::negotiate::ctx_type::{AES256_CCM, AES256_GCM};
+    use smb_server_proto_smb2::negotiate::ctx_type::{AES256_CCM, AES256_GCM};
     matches!(cipher, AES256_GCM | AES256_CCM)
 }
 
@@ -641,29 +641,29 @@ fn seal_pdu(
     let mut nonce_field = [0u8; 16];
     nonce_field[..iv_size].copy_from_slice(&crate::dispatch::rand_bytes(iv_size));
 
-    let mut tf = smb_proto_smb2::commands::build_transform(session_id, &nonce_field, msg.len());
+    let mut tf = smb_server_proto_smb2::commands::build_transform(session_id, &nonce_field, msg.len());
     // AAD region: everything after the Nonce field ([MS-SMB2] §3.1.4.2).
-    let aad = &tf[smb_proto_smb2::commands::tf_off::NONCE..];
+    let aad = &tf[smb_server_proto_smb2::commands::tf_off::NONCE..];
     let sealed = match (gcm, cipher_is_256(cipher)) {
-        (true, true) => smb_auth::crypto::aes256gcm_seal(
+        (true, true) => smb_server_auth::crypto::aes256gcm_seal(
             &s2c,
             nonce_field[..aead::GCM_NONCE_LEN].try_into().ok()?,
             aad,
             msg,
         ),
-        (true, false) => smb_auth::crypto::aes128gcm_seal(
+        (true, false) => smb_server_auth::crypto::aes128gcm_seal(
             s2c[..16].try_into().ok()?,
             nonce_field[..aead::GCM_NONCE_LEN].try_into().ok()?,
             aad,
             msg,
         ),
-        (false, true) => smb_auth::crypto::aes256ccm_seal(
+        (false, true) => smb_server_auth::crypto::aes256ccm_seal(
             &s2c,
             nonce_field[..aead::CCM_NONCE_LEN].try_into().ok()?,
             aad,
             msg,
         ),
-        (false, false) => smb_auth::crypto::aes128ccm_seal(
+        (false, false) => smb_server_auth::crypto::aes128ccm_seal(
             s2c[..16].try_into().ok()?,
             nonce_field[..aead::CCM_NONCE_LEN].try_into().ok()?,
             aad,
@@ -671,7 +671,7 @@ fn seal_pdu(
         ),
     };
     // Tag lands in the Signature field; ciphertext follows the header.
-    let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
+    let tag_at = smb_server_proto_smb2::commands::tf_off::SIGNATURE;
     tf[tag_at..tag_at + aead::TAG_LEN].copy_from_slice(&sealed[sealed.len() - aead::TAG_LEN..]);
     let mut frame = tf;
     frame.extend_from_slice(&sealed[..sealed.len() - aead::TAG_LEN]);
@@ -687,7 +687,7 @@ fn decrypt_transform(_conn: &mut Smb2Conn, _frame: &[u8]) -> Option<Vec<u8>> {
 }
 #[cfg(not(feature = "handrolled"))]
 fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
-    let tf = match smb_proto_smb2::commands::TransformHdr::parse(frame) {
+    let tf = match smb_server_proto_smb2::commands::TransformHdr::parse(frame) {
         Some(t) => t,
         None => {
             tracing::warn!("transform parse failed");
@@ -712,36 +712,36 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
     let gcm = cipher_is_gcm(cipher);
     let is256 = cipher_is_256(cipher);
     let aad = frame
-        .get(smb_proto_smb2::commands::tf_off::NONCE..smb_proto_smb2::commands::tf_off::HDR_SIZE)?;
+        .get(smb_server_proto_smb2::commands::tf_off::NONCE..smb_server_proto_smb2::commands::tf_off::HDR_SIZE)?;
     let payload =
-        frame.get(smb_proto_smb2::commands::tf_off::HDR_SIZE..tf_off_end(tf.original_len))?;
+        frame.get(smb_server_proto_smb2::commands::tf_off::HDR_SIZE..tf_off_end(tf.original_len))?;
     // The GCM/CCM tag travels in the TF Signature field ([MS-SMB2]
     // §2.2.41), detached from the ciphertext; re-attach it for the AEAD
     // open, which expects ct||tag.
-    let tag_at = smb_proto_smb2::commands::tf_off::SIGNATURE;
+    let tag_at = smb_server_proto_smb2::commands::tf_off::SIGNATURE;
     let mut sealed = payload.to_vec();
     sealed.extend_from_slice(frame.get(tag_at..tag_at + aead::TAG_LEN)?);
-    let nonce = &frame[smb_proto_smb2::commands::tf_off::NONCE..];
+    let nonce = &frame[smb_server_proto_smb2::commands::tf_off::NONCE..];
     let opened = match (gcm, is256) {
-        (true, true) => smb_auth::crypto::aes256gcm_open(
+        (true, true) => smb_server_auth::crypto::aes256gcm_open(
             &c2s,
             nonce.get(..aead::GCM_NONCE_LEN)?.try_into().ok()?,
             aad,
             &sealed,
         ),
-        (true, false) => smb_auth::crypto::aes128gcm_open(
+        (true, false) => smb_server_auth::crypto::aes128gcm_open(
             c2s[..16].try_into().ok()?,
             nonce.get(..aead::GCM_NONCE_LEN)?.try_into().ok()?,
             aad,
             &sealed,
         ),
-        (false, true) => smb_auth::crypto::aes256ccm_open(
+        (false, true) => smb_server_auth::crypto::aes256ccm_open(
             &c2s,
             nonce.get(..aead::CCM_NONCE_LEN)?.try_into().ok()?,
             aad,
             &sealed,
         ),
-        (false, false) => smb_auth::crypto::aes128ccm_open(
+        (false, false) => smb_server_auth::crypto::aes128ccm_open(
             c2s[..16].try_into().ok()?,
             nonce.get(..aead::CCM_NONCE_LEN)?.try_into().ok()?,
             aad,
@@ -762,7 +762,7 @@ fn decrypt_transform(conn: &mut Smb2Conn, frame: &[u8]) -> Option<Vec<u8>> {
 
 /// End offset (relative to frame start) of transform-wrapped payload.
 fn tf_off_end(original_len: usize) -> usize {
-    smb_proto_smb2::commands::tf_off::HDR_SIZE + original_len
+    smb_server_proto_smb2::commands::tf_off::HDR_SIZE + original_len
 }
 
 /// Route a request through the typestate pipeline (io::dispatch) and return the
@@ -778,7 +778,7 @@ enum Routed {
 }
 
 async fn via_typestate(
-    hdr: &smb_proto_smb2::Header2,
+    hdr: &smb_server_proto_smb2::Header2,
     conn: &mut Smb2Conn,
     server: &Arc<ServerShared>,
     buf: &[u8],
@@ -838,7 +838,7 @@ async fn process_single(
     conn: &mut Smb2Conn,
     buf: &[u8],
 ) -> Option<(Vec<u8>, bool)> {
-    let hdr = match smb_proto_smb2::Header2::parse(buf) {
+    let hdr = match smb_server_proto_smb2::Header2::parse(buf) {
         Some(h) => h,
         None => return None,
     };
@@ -865,7 +865,7 @@ async fn process_single(
         let mut joined = Vec::with_capacity(hdr::LEN + buf.len());
         joined.extend_from_slice(&conn.preauth_hash);
         joined.extend_from_slice(buf);
-        conn.preauth_hash = smb_auth::crypto::sha512(&joined);
+        conn.preauth_hash = smb_server_auth::crypto::sha512(&joined);
     }
     let sid = hdr.session_id;
 
@@ -914,7 +914,7 @@ async fn process_single(
     // SET_INFO, or IOCTL whose header ChannelSequence has drifted more than
     // 0x7FFF from the open's fails STATUS_FILE_NOT_AVAILABLE.
     if matches!(hdr.command, ss::cmd::WRITE | ss::cmd::SET_INFO | ss::cmd::IOCTL)
-        && matches!(conn.dialect, Some(d) if d >= smb_proto_smb2::negotiate::DIALECT_300)
+        && matches!(conn.dialect, Some(d) if d >= smb_server_proto_smb2::negotiate::DIALECT_300)
     {
         if let Some(foff) = file_id_body_offset(hdr.command) {
             let abs = hdr::LEN + foff;
@@ -1072,9 +1072,9 @@ async fn process_single(
         let key = conn.session_key.unwrap();
         conn.signing_key = match conn.dialect {
             Some(
-                smb_proto_smb2::negotiate::DIALECT_300 | smb_proto_smb2::negotiate::DIALECT_302,
+                smb_server_proto_smb2::negotiate::DIALECT_300 | smb_server_proto_smb2::negotiate::DIALECT_302,
             ) => {
-                let k = smb_auth::crypto::kdf_counter_mode_hmac_sha256(
+                let k = smb_server_auth::crypto::kdf_counter_mode_hmac_sha256(
                     &key,
                     b"SMB2AESCMAC\0",
                     b"SmbSign\0",
@@ -1082,8 +1082,8 @@ async fn process_single(
                 );
                 Some(k.try_into().unwrap())
             }
-            Some(smb_proto_smb2::negotiate::DIALECT_311) => {
-                let k = smb_auth::crypto::kdf_counter_mode_hmac_sha256(
+            Some(smb_server_proto_smb2::negotiate::DIALECT_311) => {
+                let k = smb_server_auth::crypto::kdf_counter_mode_hmac_sha256(
                     &key,
                     b"SMBSigningKey\0",
                     &conn.preauth_hash,
@@ -1119,18 +1119,18 @@ async fn process_single(
     {
         if let Some(key) = conn.session_key {
             let (c2s_label, s2c_label) = match conn.dialect {
-                Some(smb_proto_smb2::negotiate::DIALECT_311) => (
+                Some(smb_server_proto_smb2::negotiate::DIALECT_311) => (
                     b"SMBC2SCipherKey\0".as_slice(),
                     b"SMBS2CCipherKey\0".as_slice(),
                 ),
                 _ => (b"SMB2AESCCM\0".as_slice(), b"SMB2AESCCM\0".as_slice()),
             };
             let s2c_ctx: &[u8] = match conn.dialect {
-                Some(smb_proto_smb2::negotiate::DIALECT_311) => &conn.preauth_hash,
+                Some(smb_server_proto_smb2::negotiate::DIALECT_311) => &conn.preauth_hash,
                 _ => b"ServerOut\0",
             };
             let c2s_ctx: &[u8] = match conn.dialect {
-                Some(smb_proto_smb2::negotiate::DIALECT_311) => &conn.preauth_hash,
+                Some(smb_server_proto_smb2::negotiate::DIALECT_311) => &conn.preauth_hash,
                 _ => b"ServerIn \0", // trailing space per [MS-SMB2] §3.1.4.1
             };
             // AES-128 derives a 16-byte key; AES-256 derives 32 bytes (the KDF
@@ -1138,7 +1138,7 @@ async fn process_single(
             let klen = cipher_key_len(conn.cipher.unwrap());
             let kdf = |label: &[u8], context: &[u8]| -> [u8; 32] {
                 let derived =
-                    smb_auth::crypto::kdf_counter_mode_hmac_sha256(&key, label, context, klen);
+                    smb_server_auth::crypto::kdf_counter_mode_hmac_sha256(&key, label, context, klen);
                 let mut k = [0u8; 32];
                 k[..klen].copy_from_slice(&derived);
                 k
@@ -1196,11 +1196,11 @@ async fn process_single(
         && !matches!(status, Status::SUCCESS | Status::MORE_PROCESSING_REQUIRED);
     if ss_failed {
         conn.preauth_hash = preauth_before;
-    } else if is_preauth_msg && conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
+    } else if is_preauth_msg && conn.dialect == Some(smb_server_proto_smb2::negotiate::DIALECT_311) {
         let mut joined = Vec::with_capacity(hdr::LEN + resp.len());
         joined.extend_from_slice(&conn.preauth_hash);
         joined.extend_from_slice(&resp);
-        conn.preauth_hash = smb_auth::crypto::sha512(&joined);
+        conn.preauth_hash = smb_server_auth::crypto::sha512(&joined);
     }
 
     // The enabling SESSION_SETUP response itself must travel in the clear;
@@ -1243,11 +1243,11 @@ fn gmac_nonce(msg: &[u8], server_sender: bool) -> [u8; 12] {
 
 #[cfg(feature = "lib")]
 fn sig_gmac(key: &[u8; 16], msg: &[u8], server_sender: bool) -> [u8; 16] {
-    smb_auth::crypto::aes128_gmac(key, &gmac_nonce(msg, server_sender), msg)
+    smb_server_auth::crypto::aes128_gmac(key, &gmac_nonce(msg, server_sender), msg)
 }
 #[cfg(not(feature = "lib"))]
 fn sig_gmac(key: &[u8; 16], msg: &[u8], _server_sender: bool) -> [u8; 16] {
-    let t = smb_auth::crypto::aes128_cmac(key, msg);
+    let t = smb_server_auth::crypto::aes128_cmac(key, msg);
     let mut s = [0u8; 16];
     s.copy_from_slice(&t);
     s
@@ -1263,9 +1263,9 @@ fn message_signature(
     signing_algo: u16,
     server_sender: bool,
 ) -> [u8; 16] {
-    use smb_proto_smb2::negotiate::ctx_type;
+    use smb_server_proto_smb2::negotiate::ctx_type;
     let hmac16 = || {
-        let t = smb_auth::crypto::hmac_sha256(key, msg);
+        let t = smb_server_auth::crypto::hmac_sha256(key, msg);
         let mut s = [0u8; 16];
         s.copy_from_slice(&t[..hdr::SIGNATURE_LEN]);
         s
@@ -1273,9 +1273,9 @@ fn message_signature(
     let is_3x = matches!(
         dialect,
         Some(
-            smb_proto_smb2::negotiate::DIALECT_300
-                | smb_proto_smb2::negotiate::DIALECT_302
-                | smb_proto_smb2::negotiate::DIALECT_311
+            smb_server_proto_smb2::negotiate::DIALECT_300
+                | smb_server_proto_smb2::negotiate::DIALECT_302
+                | smb_server_proto_smb2::negotiate::DIALECT_311
         )
     );
     if !is_3x {
@@ -1285,7 +1285,7 @@ fn message_signature(
         ctx_type::SIGNING_HMAC_SHA256 => hmac16(),
         ctx_type::SIGNING_AES128_GMAC => sig_gmac(key, msg, server_sender),
         _ => {
-            let t = smb_auth::crypto::aes128_cmac(key, msg);
+            let t = smb_server_auth::crypto::aes128_cmac(key, msg);
             let mut s = [0u8; 16];
             s.copy_from_slice(&t);
             s
@@ -1362,7 +1362,7 @@ fn build_async_frame(
     body: &[u8],
 ) -> Vec<u8> {
     let mut f = Vec::with_capacity(hdr::LEN + body.len());
-    f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
+    f.extend_from_slice(&smb_server_proto_smb2::SMB2_MAGIC);
     f.extend_from_slice(&(hdr::LEN as u16).to_le_bytes()); // StructureSize
     f.extend_from_slice(&1u16.to_le_bytes()); // CreditCharge
     f.extend_from_slice(&status.raw().to_le_bytes());
@@ -1413,7 +1413,7 @@ pub(crate) enum AsyncStart {
 pub(crate) fn begin_lock(
     conn: &mut Smb2Conn,
     server: &Arc<ServerShared>,
-    hdr: &smb_proto_smb2::Header2,
+    hdr: &smb_server_proto_smb2::Header2,
     buf: &[u8],
 ) -> AsyncStart {
     let Some(req) = c::LockReq::parse(buf) else {
@@ -1467,7 +1467,7 @@ pub(crate) fn begin_lock(
 /// register the watch, and defer with an interim STATUS_PENDING.
 pub(crate) fn begin_change_notify(
     conn: &mut Smb2Conn,
-    hdr: &smb_proto_smb2::Header2,
+    hdr: &smb_server_proto_smb2::Header2,
     buf: &[u8],
 ) -> AsyncStart {
     let Some(req) = c::ChangeNotifyReq::parse(buf) else {
@@ -1515,7 +1515,7 @@ pub(crate) fn begin_change_notify(
 /// Handle a CANCEL ([MS-SMB2] §3.3.5.16): find the pending op by AsyncId (async
 /// CANCEL) or MessageId (sync CANCEL) and signal it to complete with
 /// STATUS_CANCELLED. CANCEL itself carries no response.
-pub(crate) fn cancel(conn: &mut Smb2Conn, hdr: &smb_proto_smb2::Header2, buf: &[u8]) {
+pub(crate) fn cancel(conn: &mut Smb2Conn, hdr: &smb_server_proto_smb2::Header2, buf: &[u8]) {
     counter!("smb_cancels_total").increment(1);
     let async_id = if hdr.is_async() && buf.len() >= hdr::ASYNC_ID + size_of::<u64>() {
         Some(u64::from_le_bytes(
@@ -1715,7 +1715,7 @@ fn collect_subdirs(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> 
 /// watch mask.
 fn filter_to_mask(filter: u32) -> inotify::WatchMask {
     use inotify::WatchMask as M;
-    use smb_proto_smb2::commands::notify_filter as nf;
+    use smb_server_proto_smb2::commands::notify_filter as nf;
 
     let mut m = M::empty();
     if filter & (nf::FILE_NAME | nf::DIR_NAME) != 0 {
@@ -1741,7 +1741,7 @@ fn filter_to_mask(filter: u32) -> inotify::WatchMask {
 /// ([MS-FSCC] §2.7.1).
 fn mask_to_action(mask: inotify::EventMask) -> u32 {
     use inotify::EventMask as E;
-    use smb_proto_smb2::commands::notify_action as na;
+    use smb_server_proto_smb2::commands::notify_action as na;
 
     if mask.contains(E::CREATE) {
         na::ADDED
@@ -1799,7 +1799,7 @@ pub(crate) enum NegotiateReply {
 pub(crate) fn negotiate(
     conn: &mut Smb2Conn,
     server: &Arc<ServerShared>,
-    hdr: &smb_proto_smb2::Header2,
+    hdr: &smb_server_proto_smb2::Header2,
     buf: &[u8],
 ) -> NegotiateReply {
     let body_start = hdr::LEN;
@@ -1812,7 +1812,7 @@ pub(crate) fn negotiate(
     // Clients probing for SMB2 support send either a header-only NEGOTIATE or one
     // carrying Status = STATUS_INVALID_PARAMETER ([MS-SMB2] §3.3.5.3). Answer
     // both with the wildcard-dialect response so they retry a real negotiation.
-    let parsed = smb_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]));
+    let parsed = smb_server_proto_smb2::negotiate::Request::parse(buf.get(body_start..).unwrap_or(&[]));
     tracing::debug!(
         status = hdr.status,
         parsed_ok = parsed.is_some(),
@@ -1826,7 +1826,7 @@ pub(crate) fn negotiate(
         return NegotiateReply::Reply(Status::INVALID_PARAMETER, probe_negotiate_resp());
     }
     let req = parsed.expect("validated above");
-    let Some(dialect) = smb_proto_smb2::negotiate::pick(&req.dialects) else {
+    let Some(dialect) = smb_server_proto_smb2::negotiate::pick(&req.dialects) else {
         return NegotiateReply::Reply(Status::INVALID_PARAMETER, Vec::new());
     };
     conn.dialect = Some(dialect);
@@ -1842,11 +1842,11 @@ pub(crate) fn negotiate(
     // SMB 3.1.1 negotiate-context validation ([MS-SMB2] §3.3.5.4): exactly one
     // PREAUTH_INTEGRITY context is required, and it must offer a hash algorithm
     // the server supports (SHA-512).
-    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+    if dialect == smb_server_proto_smb2::negotiate::DIALECT_311 {
         let preauth: Vec<_> = req
             .contexts
             .iter()
-            .filter(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::PREAUTH_INTEGRITY)
+            .filter(|c| c.kind == smb_server_proto_smb2::negotiate::ctx_type::PREAUTH_INTEGRITY)
             .collect();
         if preauth.len() != 1 {
             return NegotiateReply::Reply(Status::INVALID_PARAMETER, Vec::new());
@@ -1866,7 +1866,7 @@ pub(crate) fn negotiate(
                     .collect()
             })
             .unwrap_or_default();
-        if !algos.contains(&smb_proto_smb2::negotiate::ctx_type::SHA512) {
+        if !algos.contains(&smb_server_proto_smb2::negotiate::ctx_type::SHA512) {
             return NegotiateReply::Reply(
                 Status::SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP,
                 Vec::new(),
@@ -1877,11 +1877,11 @@ pub(crate) fn negotiate(
     // context must be at least the fixed structure size (8 bytes) and advertise
     // a non-zero CompressionAlgorithmCount, else the negotiate fails with
     // STATUS_INVALID_PARAMETER.
-    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+    if dialect == smb_server_proto_smb2::negotiate::DIALECT_311 {
         if let Some(c) = req
             .contexts
             .iter()
-            .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION)
+            .find(|c| c.kind == smb_server_proto_smb2::negotiate::ctx_type::COMPRESSION)
         {
             let count = c
                 .data
@@ -1899,22 +1899,22 @@ pub(crate) fn negotiate(
     // IsServerToClientNotificationsSupported = TRUE (it can format and send an
     // SMB2_SERVER_TO_CLIENT_NOTIFICATION), so the bit is echoed whenever the
     // client requests it on a 3.1.1 connection.
-    let notifications = dialect == smb_proto_smb2::negotiate::DIALECT_311
-        && conn.client_capabilities & smb_proto_smb2::negotiate::caps::NOTIFICATIONS != 0;
+    let notifications = dialect == smb_server_proto_smb2::negotiate::DIALECT_311
+        && conn.client_capabilities & smb_server_proto_smb2::negotiate::caps::NOTIFICATIONS != 0;
     conn.supports_notifications = notifications;
-    conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
-        smb_proto_smb2::negotiate::caps::LARGE_MTU
-            | smb_proto_smb2::negotiate::caps::MULTI_CHANNEL
-            | smb_proto_smb2::negotiate::caps::LEASING
-            | smb_proto_smb2::negotiate::caps::DIRECTORY_LEASING
-            | smb_proto_smb2::negotiate::caps::PERSISTENT_HANDLES
-    } else if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
-        smb_proto_smb2::negotiate::caps::LARGE_MTU | smb_proto_smb2::negotiate::caps::LEASING
+    conn.advertised_caps = if dialect >= smb_server_proto_smb2::negotiate::DIALECT_300 {
+        smb_server_proto_smb2::negotiate::caps::LARGE_MTU
+            | smb_server_proto_smb2::negotiate::caps::MULTI_CHANNEL
+            | smb_server_proto_smb2::negotiate::caps::LEASING
+            | smb_server_proto_smb2::negotiate::caps::DIRECTORY_LEASING
+            | smb_server_proto_smb2::negotiate::caps::PERSISTENT_HANDLES
+    } else if dialect >= smb_server_proto_smb2::negotiate::DIALECT_210 {
+        smb_server_proto_smb2::negotiate::caps::LARGE_MTU | smb_server_proto_smb2::negotiate::caps::LEASING
     } else {
         0
     };
     conn.advertised_caps |= if notifications {
-        smb_proto_smb2::negotiate::caps::NOTIFICATIONS
+        smb_server_proto_smb2::negotiate::caps::NOTIFICATIONS
     } else {
         0
     };
@@ -1925,7 +1925,7 @@ pub(crate) fn negotiate(
     let client_ciphers: Vec<u16> = req
         .contexts
         .iter()
-        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::ENCRYPTION)
+        .find(|c| c.kind == smb_server_proto_smb2::negotiate::ctx_type::ENCRYPTION)
         .and_then(|c| {
             if c.data.len() >= 2 {
                 let n = u16::from_le_bytes([c.data[0], c.data[1]]) as usize;
@@ -1947,7 +1947,7 @@ pub(crate) fn negotiate(
         let pref = std::env::var("RUSTSMB_CIPHER")
             .unwrap_or_default()
             .to_lowercase();
-        use smb_proto_smb2::negotiate::ctx_type::{AES128_CCM, AES128_GCM, AES256_CCM, AES256_GCM};
+        use smb_server_proto_smb2::negotiate::ctx_type::{AES128_CCM, AES128_GCM, AES256_CCM, AES256_GCM};
         let order = match pref.as_str() {
             "ccm" | "128ccm" => [AES128_CCM, AES256_CCM, AES128_GCM, AES256_GCM],
             "256" | "256gcm" => [AES256_GCM, AES128_GCM, AES256_CCM, AES128_CCM],
@@ -1959,7 +1959,7 @@ pub(crate) fn negotiate(
     // Dialects without negotiate contexts (or clients that did not offer
     // ENCRYPTION_CAPABILITIES) must leave conn.cipher unset — otherwise
     // --encrypt would seal sessions the peer cannot read.
-    if dialect == smb_proto_smb2::negotiate::DIALECT_311 && !client_ciphers.is_empty() {
+    if dialect == smb_server_proto_smb2::negotiate::DIALECT_311 && !client_ciphers.is_empty() {
         conn.cipher = chosen;
     }
     // Compression: intersect the client's advertised algorithms with ours; a
@@ -1967,19 +1967,19 @@ pub(crate) fn negotiate(
     let comp_ctx = req
         .contexts
         .iter()
-        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::COMPRESSION);
+        .find(|c| c.kind == smb_server_proto_smb2::negotiate::ctx_type::COMPRESSION);
     let comp_algos = comp_ctx
         .map(|c| {
-            smb_proto_smb2::compress::negotiate_algos(
-                &smb_proto_smb2::compress::parse_compression_caps(&c.data),
+            smb_server_proto_smb2::compress::negotiate_algos(
+                &smb_server_proto_smb2::compress::parse_compression_caps(&c.data),
             )
         })
         .unwrap_or_default();
-    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+    if dialect == smb_server_proto_smb2::negotiate::DIALECT_311 {
         // Choose the outbound compression algorithm: the first negotiated
         // non-pattern algorithm (Pattern_V1 is a scan applied within chained
         // payloads, not a standalone transform codec).
-        use smb_proto_smb2::compress::algo;
+        use smb_server_proto_smb2::compress::algo;
         conn.compress_algo = comp_algos
             .iter()
             .copied()
@@ -1988,8 +1988,8 @@ pub(crate) fn negotiate(
         // ([MS-SMB2] §2.2.3.1.3 SMB2_COMPRESSION_CAPABILITIES_FLAG_CHAINED).
         conn.compress_chained = conn.compress_algo.is_some()
             && comp_ctx.is_some_and(|c| {
-                smb_proto_smb2::compress::parse_compression_flags(&c.data)
-                    & smb_proto_smb2::compress::CAP_FLAG_CHAINED
+                smb_server_proto_smb2::compress::parse_compression_flags(&c.data)
+                    & smb_server_proto_smb2::compress::CAP_FLAG_CHAINED
                     != 0
             });
     }
@@ -2001,23 +2001,23 @@ pub(crate) fn negotiate(
     let signing_algo = req
         .contexts
         .iter()
-        .find(|c| c.kind == smb_proto_smb2::negotiate::ctx_type::SIGNING)
+        .find(|c| c.kind == smb_server_proto_smb2::negotiate::ctx_type::SIGNING)
         .and_then(|c| {
-            smb_proto_smb2::negotiate::select_signing_algo(
-                &smb_proto_smb2::negotiate::parse_signing_algos(&c.data),
+            smb_server_proto_smb2::negotiate::select_signing_algo(
+                &smb_server_proto_smb2::negotiate::parse_signing_algos(&c.data),
             )
         });
-    if dialect == smb_proto_smb2::negotiate::DIALECT_311 {
+    if dialect == smb_server_proto_smb2::negotiate::DIALECT_311 {
         if let Some(a) = signing_algo {
             conn.signing_algo = a;
         }
     }
     NegotiateReply::Reply(
         Status::SUCCESS,
-        smb_proto_smb2::negotiate::build_response_full(
+        smb_server_proto_smb2::negotiate::build_response_full(
             dialect,
             &server.guid,
-            smb_proto::types::FileTime::now().0,
+            smb_server_proto::types::FileTime::now().0,
             &salt,
             // Echo ENCRYPTION/SIGNING only when the client offered them
             // ([MS-SMB2] §3.3.5.4). With no common cipher, echo ENCRYPTION_NONE
@@ -2054,7 +2054,7 @@ pub(crate) fn session_setup(
     // connection that sets the binding flag is rejected ([MS-SMB2] §3.3.5.5).
     if req.flags & ss::FLAG_BINDING != 0
         && hdr_session != 0
-        && !matches!(conn.dialect, Some(d) if d >= smb_proto_smb2::negotiate::DIALECT_300)
+        && !matches!(conn.dialect, Some(d) if d >= smb_server_proto_smb2::negotiate::DIALECT_300)
     {
         return Err(Status::REQUEST_NOT_ACCEPTED);
     }
@@ -2063,7 +2063,7 @@ pub(crate) fn session_setup(
     // already-established session without the binding flag re-runs the NTLM
     // handshake on that same session id (the client refreshes its credentials).
     let reauth = !binding && hdr_session != 0 && server.sessions.get(hdr_session).is_some();
-    let inner = smb_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
+    let inner = smb_server_auth::ntlm::unwrap_blob(&req.blob).unwrap_or(&[]);
     // A binding channel does a full NTLM exchange; its GSS token must be a
     // well-formed SPNEGO token (negTokenInit 0x60 or negTokenResp 0xA1). A
     // malformed token is rejected with STATUS_INVALID_PARAMETER ([MS-SMB2]
@@ -2073,11 +2073,11 @@ pub(crate) fn session_setup(
     }
     tracing::trace!(
         blob_len = req.blob.len(),
-        msg_type = ?smb_auth::ntlm::msg_type(inner),
+        msg_type = ?smb_server_auth::ntlm::msg_type(inner),
         "session setup token"
     );
-    match smb_auth::ntlm::msg_type(inner) {
-        Some(smb_auth::ntlm::MSG_TYPE1) | None => {
+    match smb_server_auth::ntlm::msg_type(inner) {
+        Some(smb_server_auth::ntlm::MSG_TYPE1) | None => {
             // A client using a raw NTLM security package (no SPNEGO) sends the
             // NTLMSSP signature directly with no negTokenInit/negTokenResp
             // envelope; the response must then also be bare NTLMSSP, or a
@@ -2093,12 +2093,12 @@ pub(crate) fn session_setup(
                 next_session_id()
             };
             let mut t2 =
-                smb_auth::ntlm::build_type2(&conn.challenge, &server.domain, &server.server_name);
+                smb_server_auth::ntlm::build_type2(&conn.challenge, &server.domain, &server.server_name);
             // Grant SIGN|SEAL so clients may negotiate protected sessions
             // ([MS-NLMP] §3.2.5.1); sealing itself rides the SMB3 cipher.
-            let extra = smb_auth::ntlm::NEGOTIATE_SIGN
-                | smb_auth::ntlm::NEGOTIATE_SEAL
-                | smb_auth::ntlm::NEGOTIATE_KEY_EXCH;
+            let extra = smb_server_auth::ntlm::NEGOTIATE_SIGN
+                | smb_server_auth::ntlm::NEGOTIATE_SEAL
+                | smb_server_auth::ntlm::NEGOTIATE_KEY_EXCH;
             let fl_off = 60 - 8; // flags live at type2 offset 52 within msg
             // build_type2 writes flags right after the fixed header; patch
             // via known offset instead of plumbing a parameter:
@@ -2114,7 +2114,7 @@ pub(crate) fn session_setup(
             let wrapped = if conn.raw_ntlm {
                 t2
             } else {
-                smb_auth::ntlm::wrap_negtoken_targ(&t2)
+                smb_server_auth::ntlm::wrap_negtoken_targ(&t2)
             };
             conn.ntlm_targ = Some(wrapped.clone());
             conn.ntlm_blobs = Some((req.blob.clone(), Vec::new()));
@@ -2123,15 +2123,15 @@ pub(crate) fn session_setup(
                 ss::build_response(0, &wrapped),
             ))
         }
-        Some(smb_auth::ntlm::MSG_TYPE3) => {
+        Some(smb_server_auth::ntlm::MSG_TYPE3) => {
             if let Some(blobs) = &mut conn.ntlm_blobs {
                 blobs.1 = req.blob.clone();
             }
-            if smb_auth::ntlm::parse_type3(inner).is_none() {
+            if smb_server_auth::ntlm::parse_type3(inner).is_none() {
                 tracing::warn!("session setup: malformed NTLMSSP type3");
                 return Err(Status::INVALID_PARAMETER);
             }
-            let t3 = smb_auth::ntlm::parse_type3(inner).unwrap();
+            let t3 = smb_server_auth::ntlm::parse_type3(inner).unwrap();
             let out = crate::auth::authenticate_ntlmssp(
                 &server.users,
                 server.allow_guest,
@@ -2139,10 +2139,10 @@ pub(crate) fn session_setup(
                 &t3,
             );
             if !out.ok {
-                counter!("smb_auth_total", "outcome" => "fail").increment(1);
+                counter!("smb_server_auth_total", "outcome" => "fail").increment(1);
                 return Err(Status::LOGON_FAILURE);
             }
-            counter!("smb_auth_total", "outcome" => "ok").increment(1);
+            counter!("smb_server_auth_total", "outcome" => "ok").increment(1);
             gauge!("smb_sessions_active").increment(1.0);
             tracing::info!(user = %out.user, guest = out.guest,
                 signed = out.session_key.is_some(), "session established");
@@ -2170,7 +2170,7 @@ pub(crate) fn session_setup(
             // table) and guest/anonymous sessions.
             if let Some(dialect) = conn
                 .dialect
-                .filter(|&d| d != smb_proto_smb2::negotiate::DIALECT_202)
+                .filter(|&d| d != smb_server_proto_smb2::negotiate::DIALECT_202)
             {
                 use std::sync::LazyLock;
                 static CLIENT_DIALECTS: LazyLock<
@@ -2299,7 +2299,7 @@ pub(crate) fn session_setup(
                 // after auth, and the accept-complete MIC is the first
                 // SEND (ntlmssp_make_packet_signature: sending.seq_num++).
                 let mic =
-                    smb_auth::crypto::ntlm_mech_list_mic(&key, true, key_exch, 0, &mech_types);
+                    smb_server_auth::crypto::ntlm_mech_list_mic(&key, true, key_exch, 0, &mech_types);
                 #[cfg(not(feature = "lib"))]
                 let mic = [0u8; 16];
                 tracing::debug!(
@@ -2310,9 +2310,9 @@ pub(crate) fn session_setup(
                     mic = %hex_str(&mic),
                     "mechListMIC inputs"
                 );
-                smb_auth::ntlm::wrap_accept_complete_with_mic(&mic)
+                smb_server_auth::ntlm::wrap_accept_complete_with_mic(&mic)
             } else {
-                smb_auth::ntlm::wrap_accept_complete()
+                smb_server_auth::ntlm::wrap_accept_complete()
             };
             Ok((Status::SUCCESS, ss::build_response(flags, &wrapped)))
         }
@@ -2357,7 +2357,7 @@ pub(crate) fn tree_connect(
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn create(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     server: &Arc<ServerShared>,
     req_signed: bool,
     is_ca: bool,
@@ -2425,7 +2425,7 @@ pub(crate) async fn create(
         // Traversal hit a symlink: build the Symbolic Link Error Response from
         // the target and unparsed path ([MS-SMB2] §2.2.2.2.1) for the caller to
         // frame with STATUS_STOPPED_ON_SYMLINK.
-        Err(smb_vfs::VfsError::StoppedOnSymlink {
+        Err(smb_server_vfs::VfsError::StoppedOnSymlink {
             target,
             unparsed_len,
             relative,
@@ -2454,7 +2454,7 @@ pub(crate) async fn create(
     // open (or is rejected when the existing open's version is newer/equal).
     // Durable reconnect is handled earlier and skips this path.
     if let Some(app_id) = req.app_instance_id {
-        let is_311 = conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311);
+        let is_311 = conn.dialect == Some(smb_server_proto_smb2::negotiate::DIALECT_311);
         match server.app_instances.resolve(
             app_id,
             &path,
@@ -2562,7 +2562,7 @@ pub(crate) async fn create(
     let dir_leasing = is_dir
         && conn
             .dialect
-            .map(|d| d >= smb_proto_smb2::negotiate::DIALECT_300)
+            .map(|d| d >= smb_server_proto_smb2::negotiate::DIALECT_300)
             .unwrap_or(false);
     let granted = if lease_context && (!is_dir || dir_leasing) {
         if let Some(lr) = req.lease {
@@ -2669,7 +2669,7 @@ fn durable_reconnect_ids(d: &Option<c::DurableReq>) -> Option<([u8; 16], Option<
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 async fn durable_reconnect(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     server: &Arc<ServerShared>,
     req: &c::CreateReq,
     id: [u8; 16],
@@ -3200,7 +3200,7 @@ fn send_oplock_break(holder: &crate::state::OplockHolder, level: u8) {
 /// sync header). Returned unsigned and unsealed.
 fn build_break_frame(body: &[u8]) -> Vec<u8> {
     let mut f = Vec::with_capacity(hdr::LEN + body.len());
-    f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
+    f.extend_from_slice(&smb_server_proto_smb2::SMB2_MAGIC);
     f.extend_from_slice(&(hdr::LEN as u16).to_le_bytes()); // StructureSize
     f.extend_from_slice(&0u16.to_le_bytes()); // CreditCharge
     f.extend_from_slice(&0u32.to_le_bytes()); // Status
@@ -3237,7 +3237,7 @@ fn finalize_break(crypto: &crate::state::BreakCrypto, frame: Vec<u8>) -> Vec<u8>
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn read(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     server: &Arc<ServerShared>,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
@@ -3273,7 +3273,7 @@ pub(crate) async fn read(
 
 pub(crate) async fn write(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     server: &Arc<ServerShared>,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
@@ -3349,7 +3349,7 @@ pub(crate) async fn ioctl(
         c::fsctl::VALIDATE_NEGOTIATE_INFO => {
             let input = &req.input;
             let terminate = 'v: {
-                if conn.dialect == Some(smb_proto_smb2::negotiate::DIALECT_311) {
+                if conn.dialect == Some(smb_server_proto_smb2::negotiate::DIALECT_311) {
                     break 'v true;
                 }
                 if input.len() < 24 || (req.max_output as usize) < 24 {
@@ -3392,9 +3392,9 @@ pub(crate) async fn ioctl(
             // ([MS-SMB2] §3.3.5.15).
             out.extend_from_slice(&conn.advertised_caps.to_le_bytes());
             out.extend_from_slice(&server.guid);
-            let sec_mode = smb_proto_smb2::negotiate::SIGNING_ENABLED
+            let sec_mode = smb_server_proto_smb2::negotiate::SIGNING_ENABLED
                 | if server.require_signing {
-                    smb_proto_smb2::negotiate::SIGNING_REQUIRED
+                    smb_server_proto_smb2::negotiate::SIGNING_REQUIRED
                 } else {
                     0
                 };
@@ -3402,7 +3402,7 @@ pub(crate) async fn ioctl(
             out.extend_from_slice(
                 &conn
                     .dialect
-                    .unwrap_or(smb_proto_smb2::negotiate::DIALECT_210)
+                    .unwrap_or(smb_server_proto_smb2::negotiate::DIALECT_210)
                     .to_le_bytes(),
             );
             (
@@ -3691,7 +3691,7 @@ pub(crate) async fn ioctl(
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn close(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     buf: &[u8],
 ) -> Result<Vec<u8>, Status> {
     let req = c::CloseReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
@@ -3710,7 +3710,7 @@ pub(crate) async fn close(
         // A delete-on-close on a directory that is not empty at close time
         // abandons the delete and still completes the CLOSE successfully
         // ([MS-FSA] §2.1.5.4); the object simply remains.
-        Err(smb_vfs::VfsError::DirectoryNotEmpty) => {}
+        Err(smb_server_vfs::VfsError::DirectoryNotEmpty) => {}
         Err(e) => return Err(vfs_err(e)),
     }
     counter!("smb_closes_total").increment(1);
@@ -3887,7 +3887,7 @@ pub(crate) fn pipe_close(conn: &mut Smb2Conn, buf: &[u8]) -> bool {
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) async fn query_directory(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     buf: &[u8],
 ) -> Result<Option<Vec<u8>>, Status> {
     let req = c::QueryDirReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
@@ -3979,7 +3979,7 @@ pub(crate) async fn query_directory(
 
 pub(crate) async fn query_info(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     buf: &[u8],
 ) -> Result<Option<Vec<u8>>, Status> {
     let req = c::QueryInfoReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
@@ -4042,7 +4042,7 @@ pub(crate) async fn query_info(
 
 pub(crate) async fn set_info(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     buf: &[u8],
 ) -> Result<(), Status> {
     let req = c::SetInfoReq::parse(buf).ok_or(Status::INVALID_PARAMETER)?;
@@ -4097,7 +4097,7 @@ pub(crate) fn share_vfs(
     server: &Arc<ServerShared>,
     conn: &Smb2Conn,
     tid: u32,
-) -> Option<Arc<dyn smb_vfs::Vfs>> {
+) -> Option<Arc<dyn smb_server_vfs::Vfs>> {
     conn.tree_name(tid)
         .and_then(|n| server.shares.get(&n))
         .map(|s| s.vfs.clone())
@@ -4135,10 +4135,10 @@ fn copychunk_total(resp: &[u8]) -> u32 {
 /// server limits on a limits violation ([MS-SMB2] §3.3.5.15.6).
 async fn do_copychunk(
     conn: &mut Smb2Conn,
-    vfs: Arc<dyn smb_vfs::Vfs>,
+    vfs: Arc<dyn smb_server_vfs::Vfs>,
     req: &c::IoctlReq,
 ) -> Result<Vec<u8>, (Status, Vec<u8>)> {
-    use smb_proto_smb2::commands::copychunk_limits as lim;
+    use smb_server_proto_smb2::commands::copychunk_limits as lim;
     let cc = c::CopyChunkCopy::parse(&req.input).ok_or((Status::INVALID_PARAMETER, Vec::new()))?;
 
     let total: u64 = cc.chunks.iter().map(|k| k.length as u64).sum();
@@ -4179,8 +4179,8 @@ async fn do_copychunk(
     Ok(c::build_copychunk_resp(chunks_written, 0, total_written))
 }
 
-pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
-    use smb_vfs::VfsError as E;
+pub(crate) fn vfs_err(e: smb_server_vfs::VfsError) -> Status {
+    use smb_server_vfs::VfsError as E;
     match e {
         E::NotFound => Status::OBJECT_PATH_NOT_FOUND,
         E::AlreadyExists => Status::OBJECT_NAME_COLLISION,
@@ -4211,7 +4211,7 @@ pub(crate) fn error_resp() -> Vec<u8> {
 /// and stamping the effective session id ([MS-SMB2] §3.3.4.1).
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SMB2 wire serialization
 pub(crate) fn response(
-    req: &smb_proto_smb2::Header2,
+    req: &smb_server_proto_smb2::Header2,
     status: Status,
     body: Vec<u8>,
     session_id: u64,
@@ -4224,7 +4224,7 @@ pub(crate) fn response(
         body
     };
     let mut f = Vec::with_capacity(64 + body.len());
-    f.extend_from_slice(&smb_proto_smb2::SMB2_MAGIC);
+    f.extend_from_slice(&smb_server_proto_smb2::SMB2_MAGIC);
     f.extend_from_slice(&64u16.to_le_bytes()); // StructureSize
     f.extend_from_slice(&req.credit_charge.to_le_bytes()); // CreditCharge echo
     f.extend_from_slice(&status.raw().to_le_bytes());
@@ -4261,7 +4261,7 @@ mod async_notify_tests {
             Status::PENDING,
             &[0u8; 8],
         );
-        assert_eq!(&f[0..4], &smb_proto_smb2::SMB2_MAGIC);
+        assert_eq!(&f[0..4], &smb_server_proto_smb2::SMB2_MAGIC);
         let flags = u32::from_le_bytes(f[16..20].try_into().unwrap());
         assert_eq!(flags & 0x2, 0x2, "ASYNC_COMMAND set");
         assert_eq!(flags & 0x1, 0x1, "SERVER_TO_REDIR set");
@@ -4300,7 +4300,7 @@ mod async_notify_tests {
                 watch_one_event(
                     &path,
                     false,
-                    smb_proto_smb2::commands::notify_filter::FILE_NAME,
+                    smb_server_proto_smb2::commands::notify_filter::FILE_NAME,
                     &mut rx,
                 )
                 .await
@@ -4310,7 +4310,7 @@ mod async_notify_tests {
 
             let events = watch.await.unwrap().expect("event fired");
             assert_eq!(events.len(), 1);
-            assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
+            assert_eq!(events[0].0, smb_server_proto_smb2::commands::notify_action::ADDED);
             assert_eq!(events[0].1, "created.txt");
             std::fs::remove_dir_all(&dir).ok();
         });
@@ -4332,7 +4332,7 @@ mod async_notify_tests {
                 watch_one_event(
                     &path,
                     true,
-                    smb_proto_smb2::commands::notify_filter::FILE_NAME,
+                    smb_server_proto_smb2::commands::notify_filter::FILE_NAME,
                     &mut rx,
                 )
                 .await
@@ -4341,7 +4341,7 @@ mod async_notify_tests {
             std::fs::write(sub.join("deep.txt"), b"hi").unwrap();
 
             let events = watch.await.unwrap().expect("subdir event fired");
-            assert_eq!(events[0].0, smb_proto_smb2::commands::notify_action::ADDED);
+            assert_eq!(events[0].0, smb_server_proto_smb2::commands::notify_action::ADDED);
             assert_eq!(
                 events[0].1, "nested\\deep.txt",
                 "named relative to watch root"
@@ -4364,7 +4364,7 @@ mod async_notify_tests {
                 watch_one_event(
                     &path,
                     false,
-                    smb_proto_smb2::commands::notify_filter::FILE_NAME,
+                    smb_server_proto_smb2::commands::notify_filter::FILE_NAME,
                     &mut rx,
                 )
                 .await
@@ -4384,8 +4384,8 @@ mod async_notify_tests {
 mod fsctl_tests {
     use super::*;
 
-    fn conn_with_vfs(dir: &std::path::Path) -> (Smb2Conn, Arc<dyn smb_vfs::Vfs>) {
-        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+    fn conn_with_vfs(dir: &std::path::Path) -> (Smb2Conn, Arc<dyn smb_server_vfs::Vfs>) {
+        let vfs: Arc<dyn smb_server_vfs::Vfs> = Arc::new(smb_server_backend_posix::PosixVfs::new(dir));
         let (tx, _rx) = mpsc::channel(8);
         (Smb2Conn::new([0u8; 8], tx), vfs)
     }
@@ -4453,7 +4453,7 @@ mod fsctl_tests {
     #[test]
     fn copychunk_rejects_oversized_request() {
         tokio_uring::start(async {
-            use smb_proto_smb2::commands::copychunk_limits as lim;
+            use smb_server_proto_smb2::commands::copychunk_limits as lim;
             let dir = std::env::temp_dir().join(format!("rustsmb_cc_lim_{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("f"), b"x").unwrap();
@@ -4529,7 +4529,7 @@ mod oplock_tests {
 
     fn server_with_share(dir: &std::path::Path) -> Arc<ServerShared> {
         use crate::state::*;
-        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+        let vfs: Arc<dyn smb_server_vfs::Vfs> = Arc::new(smb_server_backend_posix::PosixVfs::new(dir));
         let mut shares = HashMap::new();
         shares.insert(
             "public".to_string(),
@@ -4556,7 +4556,7 @@ mod oplock_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
-            durables: Arc::new(smb_handle_store::MemStore::new()),
+            durables: Arc::new(smb_server_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
             app_instances: Arc::new(AppInstanceTable::new()),
         })
@@ -4648,7 +4648,7 @@ mod lease_tests {
     use std::collections::HashMap;
 
     fn server_with_share(dir: &std::path::Path) -> Arc<ServerShared> {
-        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+        let vfs: Arc<dyn smb_server_vfs::Vfs> = Arc::new(smb_server_backend_posix::PosixVfs::new(dir));
         let mut shares = HashMap::new();
         shares.insert(
             "public".to_string(),
@@ -4675,7 +4675,7 @@ mod lease_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
-            durables: Arc::new(smb_handle_store::MemStore::new()),
+            durables: Arc::new(smb_server_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
             app_instances: Arc::new(AppInstanceTable::new()),
         })
@@ -4921,7 +4921,7 @@ mod security_tests {
             let dir = std::env::temp_dir().join(format!("rustsmb_sec_{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("sec.bin"), b"data").unwrap();
-            let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(&dir));
+            let vfs: Arc<dyn smb_server_vfs::Vfs> = Arc::new(smb_server_backend_posix::PosixVfs::new(&dir));
             let (tx, _rx) = mpsc::channel(8);
             let mut conn = Smb2Conn::new([0u8; 8], tx);
             let (open, _m, _a) = vfs
@@ -4993,7 +4993,7 @@ mod security_tests {
             let dir = std::env::temp_dir().join(format!("rustsmb_sec2_{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("s.bin"), b"x").unwrap();
-            let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(&dir));
+            let vfs: Arc<dyn smb_server_vfs::Vfs> = Arc::new(smb_server_backend_posix::PosixVfs::new(&dir));
             let (tx, _rx) = mpsc::channel(8);
             let mut conn = Smb2Conn::new([0u8; 8], tx);
             let (open, _m, _a) = vfs
@@ -5025,7 +5025,7 @@ mod durable_tests {
     use std::collections::HashMap;
 
     fn server_with_share(dir: &std::path::Path) -> Arc<ServerShared> {
-        let vfs: Arc<dyn smb_vfs::Vfs> = Arc::new(smb_backend_posix::PosixVfs::new(dir));
+        let vfs: Arc<dyn smb_server_vfs::Vfs> = Arc::new(smb_server_backend_posix::PosixVfs::new(dir));
         let mut shares = HashMap::new();
         shares.insert(
             "public".to_string(),
@@ -5052,7 +5052,7 @@ mod durable_tests {
             share_modes: Arc::new(ShareModeTable::new()),
             oplocks: Arc::new(OplockTable::new()),
             leases: Arc::new(LeaseTable::new()),
-            durables: Arc::new(smb_handle_store::MemStore::new()),
+            durables: Arc::new(smb_server_handle_store::MemStore::new()),
             sessions: Arc::new(SessionTable::new()),
             app_instances: Arc::new(AppInstanceTable::new()),
         })
@@ -5235,10 +5235,10 @@ mod signing_tests {
     #[test]
     fn sign_then_verify_round_trips_and_detects_tamper() {
         let key = [0x42u8; 16];
-        let dialect = Some(smb_proto_smb2::negotiate::DIALECT_311);
-        let algo = smb_proto_smb2::negotiate::ctx_type::SIGNING_AES128_CMAC;
+        let dialect = Some(smb_server_proto_smb2::negotiate::DIALECT_311);
+        let algo = smb_server_proto_smb2::negotiate::ctx_type::SIGNING_AES128_CMAC;
         let mut pdu = vec![0u8; 96];
-        pdu[0..4].copy_from_slice(&smb_proto_smb2::SMB2_MAGIC);
+        pdu[0..4].copy_from_slice(&smb_server_proto_smb2::SMB2_MAGIC);
         for (i, b) in pdu[64..].iter_mut().enumerate() {
             *b = i as u8; // arbitrary body bytes
         }

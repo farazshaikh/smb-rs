@@ -3,7 +3,7 @@
 //! produces. Every response — solicited, interim, or unsolicited — is serialized
 //! through one place so signing/sealing lives in a single site.
 
-use smb_proto::types::Status;
+use smb_server_proto::types::Status;
 
 /// Decode one single-command SMB2 frame into a typed request. Implemented per
 /// command; dispatched statically by [`SmbRequest::parse`](super::SmbRequest).

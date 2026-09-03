@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render a snapshot of test_status.csv into README.md, between the
-<!-- TEST_STATUS_START/END --> markers, mirroring what smb-test-dashboard
+<!-- TEST_STATUS_START/END --> markers, mirroring what smb-server-test-dashboard
 serves live. Run standalone or via test/runtest.sh after any suite run.
 """
 import csv
@@ -84,7 +84,7 @@ def render(by_suite: dict, commit: str, now: str) -> str:
     lines.append(
         "Generated from [`test_status.csv`](test_status.csv) by "
         "[`test/lib/render_readme_status.py`](test/lib/render_readme_status.py) "
-        "after a test run. Live view: `smb-test-dashboard` (see "
+        "after a test run. Live view: `smb-server-test-dashboard` (see "
         "[test/README.md](test/README.md))."
     )
     lines.append("")

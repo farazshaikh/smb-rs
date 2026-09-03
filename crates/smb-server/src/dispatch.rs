@@ -6,13 +6,13 @@
 
 use std::sync::Arc;
 
-use smb_proto::types::Status;
-use smb_proto_smb1::consts;
-use smb_proto_smb1::header::{HDR_LEN, Header, RespBody, build_response, parse_header};
+use smb_server_proto::types::Status;
+use smb_server_proto_smb1::consts;
+use smb_server_proto_smb1::header::{HDR_LEN, Header, RespBody, build_response, parse_header};
 
-use smb_proto_smb1::consts::flags2;
-use smb_proto_smb2::{PROTO_ID_COMPRESSED, PROTO_ID_ENCRYPTED, PROTO_ID_SMB2};
-use smb_transport::{FrameSink, Transport};
+use smb_server_proto_smb1::consts::flags2;
+use smb_server_proto_smb2::{PROTO_ID_COMPRESSED, PROTO_ID_ENCRYPTED, PROTO_ID_SMB2};
+use smb_server_transport::{FrameSink, Transport};
 
 use metrics::{counter, histogram};
 use tokio::sync::mpsc;
@@ -115,7 +115,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
             }) else {
                 break;
             };
-            if frame.0.len() < smb_proto_smb2::SMB2_MAGIC.len() {
+            if frame.0.len() < smb_server_proto_smb2::SMB2_MAGIC.len() {
                 continue;
             }
 
@@ -150,7 +150,7 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                 // ([MS-SMB2] §3.3.5.2.13).
                 let decompressed;
                 let msg: &[u8] = if frame.0[0] == PROTO_ID_COMPRESSED {
-                    match smb_proto_smb2::compress::decompress_message(&frame.0) {
+                    match smb_server_proto_smb2::compress::decompress_message(&frame.0) {
                         Some(d) if d.first() == Some(&PROTO_ID_SMB2) => {
                             decompressed = d;
                             &decompressed
@@ -172,9 +172,9 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                             && resp.first() != Some(&PROTO_ID_ENCRYPTED)
                         {
                             let packed = if c2.compress_chained {
-                                smb_proto_smb2::compress::compress_message_chained(&resp, algo)
+                                smb_server_proto_smb2::compress::compress_message_chained(&resp, algo)
                             } else {
-                                smb_proto_smb2::compress::compress_message(&resp, algo)
+                                smb_server_proto_smb2::compress::compress_message(&resp, algo)
                             };
                             if let Some(packed) = packed {
                                 resp = packed;
@@ -292,8 +292,8 @@ pub(crate) async fn process_frame(
     if hdr.command == consts::COM_NEGOTIATE
         && !conn.upgraded_smb2
         && (buf
-            .windows(smb_proto_smb2::SMB2_MAGIC.len())
-            .any(|w| w == smb_proto_smb2::SMB2_MAGIC)
+            .windows(smb_server_proto_smb2::SMB2_MAGIC.len())
+            .any(|w| w == smb_server_proto_smb2::SMB2_MAGIC)
             || buf.windows(b"SMB 2.".len()).any(|w| w == b"SMB 2."))
     {
         if let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {

@@ -76,7 +76,7 @@ encryption) is the remaining work.
   signed responses whenever the request carried SMB2_FLAGS_SIGNED.
 
 ## ADDENDUM — post-SMB3 work (same session)
-1. smb-csp crate: crypto service provider; default backend = RustCrypto
+1. smb-server-csp crate: crypto service provider; default backend = RustCrypto
    crates (md4/md5/sha2/hmac/des/aes/cmac/rc4), handrolled kept behind
    `--features handrolled` (feature forwarding server->auth->csp).
    Benchmarks: bundled AES-CMAC 45 MB/s vs 1650 MB/s w/ AES-NI -> crates

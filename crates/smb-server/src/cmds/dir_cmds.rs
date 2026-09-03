@@ -1,16 +1,16 @@
 //! Legacy path command handlers ([MS-CIFS] core/LANMAN set).
 
-use smb_proto::types::Status;
-use smb_proto_smb1::consts;
-use smb_proto_smb1::header::RespBody;
-use smb_proto_smb1::legacy as legacy_codec;
-use smb_vfs::SetOp;
+use smb_server_proto::types::Status;
+use smb_server_proto_smb1::consts;
+use smb_server_proto_smb1::header::RespBody;
+use smb_server_proto_smb1::legacy as legacy_codec;
+use smb_server_vfs::SetOp;
 
 use crate::cmds::{IoCtx, share_vfs};
 use crate::dispatch::ReqView;
 
 fn read_path(req: &ReqView<'_>) -> String {
-    let mut rd = smb_proto::buf::Reader::new(req.data, 0);
+    let mut rd = smb_server_proto::buf::Reader::new(req.data, 0);
     if !req.data.is_empty() && req.data[0] == consts::BUFFER_FORMAT_DATA {
         rd.skip(1);
     }
@@ -19,7 +19,7 @@ fn read_path(req: &ReqView<'_>) -> String {
 
 fn read_two_paths(req: &ReqView<'_>) -> (String, String) {
     let data = req.data;
-    let mut rd = smb_proto::buf::Reader::new(data, 0);
+    let mut rd = smb_server_proto::buf::Reader::new(data, 0);
     let base = req.bc_off_abs + consts::BYTE_COUNT_LEN;
     if !data.is_empty() && data[0] == consts::BUFFER_FORMAT_DATA {
         rd.skip(1);
@@ -145,7 +145,7 @@ pub async fn query_info_legacy(
     let vfs = share_vfs(io, req.hdr.tid);
     let path = read_path(req);
     let m = vfs.stat(&path).await.map_err(vfs_err)?;
-    let (secs, _) = smb_proto::types::FileTime(m.times[2].0).to_unix();
+    let (secs, _) = smb_server_proto::types::FileTime(m.times[2].0).to_unix();
 
     // DOS date/time packing ([MS-DTYP] §2.3.4/5).
     let secs = secs.max(0);
@@ -160,7 +160,7 @@ pub async fn query_info_legacy(
 
     let attrs = if m.is_dir {
         0x10u16
-    } else if m.attrs.0 & smb_proto::types::AttrFlags::READONLY != 0 {
+    } else if m.attrs.0 & smb_server_proto::types::AttrFlags::READONLY != 0 {
         0x21u16
     } else {
         0x20u16
@@ -191,7 +191,7 @@ pub async fn set_info_legacy(
     if w.len() >= 6 {
         let utime = u32::from_le_bytes([w[2], w[3], w[4], w[5]]);
         if utime != 0 && utime != u32::MAX {
-            let ft = smb_proto::types::FileTime((utime as u64 + 11_644_473_600) * 10_000_000);
+            let ft = smb_server_proto::types::FileTime((utime as u64 + 11_644_473_600) * 10_000_000);
             vfs.set_info_path(
                 &path,
                 &SetOp::Basic {
@@ -231,8 +231,8 @@ pub(crate) fn join_rel(base: &str, name: &str) -> String {
     }
 }
 
-pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
-    use smb_vfs::VfsError as E;
+pub(crate) fn vfs_err(e: smb_server_vfs::VfsError) -> Status {
+    use smb_server_vfs::VfsError as E;
     match e {
         E::NotFound => Status::OBJECT_PATH_NOT_FOUND,
         E::AlreadyExists => Status::OBJECT_NAME_COLLISION,

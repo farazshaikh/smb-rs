@@ -1,8 +1,8 @@
 //! Credential verification against the configured user database using the
 //! NTLM family of schemes ([MS-NLMP] §3.3).
 
-use smb_auth::crypto::{hmac_md5, md4, nt_hash, ntlmv1_response, rc4};
-use smb_auth::ntlm::Type3;
+use smb_server_auth::crypto::{hmac_md5, md4, nt_hash, ntlmv1_response, rc4};
+use smb_server_auth::ntlm::Type3;
 use std::collections::HashMap;
 
 /// Outcome of credential verification.
@@ -45,7 +45,7 @@ pub fn authenticate_ntlmssp(
 
     // Anonymous / null session.
     if t3.ntlm_response.is_empty() && t3.lm_response.is_empty()
-        || t3.flags & smb_auth::ntlm::NEGOTIATE_ANONYMOUS != 0
+        || t3.flags & smb_server_auth::ntlm::NEGOTIATE_ANONYMOUS != 0
     {
         return AuthOutcome { ok: true, guest: true, user: "nobody".into(), session_key: NO_KEY };
     }
@@ -120,7 +120,7 @@ fn derive_session_key(
     proof: &[u8],
     t3: &Type3,
 ) -> Option<[u8; 16]> {
-    use smb_auth::crypto::{hmac_md5, rc4};
+    use smb_server_auth::crypto::{hmac_md5, rc4};
 
     let ntv2 = hmac_md5(nthash, identity_utf16le);
     let key_exchange_key = hmac_md5(&ntv2, proof);

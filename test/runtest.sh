@@ -71,7 +71,7 @@ setup_unit() {
 
 setup_system() {
     log "system: building server + testsuite"
-    cargo build -p smb-server -p smb-testsuite
+    cargo build -p smb-server -p smb-server-testsuite
     "$PYTHON" -c "import smbprotocol" 2>/dev/null \
         || { log "system: installing smbprotocol"; "$PYTHON" -m pip install --user smbprotocol; }
 }

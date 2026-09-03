@@ -1,13 +1,13 @@
 //! File command handlers: NT_CREATE_ANDX, READ/WRITE_ANDX, CLOSE, FLUSH,
 //! SEEK, LOCKING_ANDX and QUERY_INFORMATION_DISK.
 
-use smb_proto::types::Status;
-use smb_proto_smb1::consts;
-use smb_proto_smb1::create as create_codec;
-use smb_proto_smb1::header::RespBody;
-use smb_proto_smb1::misc;
-use smb_proto_smb1::rw::{self, ReadReq, WriteReq};
-use smb_vfs::{OpenFile, SetOp};
+use smb_server_proto::types::Status;
+use smb_server_proto_smb1::consts;
+use smb_server_proto_smb1::create as create_codec;
+use smb_server_proto_smb1::header::RespBody;
+use smb_server_proto_smb1::misc;
+use smb_server_proto_smb1::rw::{self, ReadReq, WriteReq};
+use smb_server_vfs::{OpenFile, SetOp};
 
 use crate::cmds::{IoCtx, share_vfs};
 use crate::dispatch::ReqView;
@@ -54,7 +54,7 @@ pub async fn nt_create(
         req.words,
         req.data,
         req.unicode(),
-        req.bc_off_abs + smb_proto_smb1::consts::WORD_LEN,
+        req.bc_off_abs + smb_server_proto_smb1::consts::WORD_LEN,
     )
     .map_err(|_| Status::INVALID_PARAMETER)?;
 
@@ -70,11 +70,11 @@ pub async fn nt_create(
     let rel = join_rel(&base_rel, &creq.name);
 
     let want_dir =
-        creq.create_options & smb_proto_smb1::consts::create_options::FILE_DIRECTORY_FILE != 0;
+        creq.create_options & smb_server_proto_smb1::consts::create_options::FILE_DIRECTORY_FILE != 0;
     let no_dir =
-        creq.create_options & smb_proto_smb1::consts::create_options::FILE_NON_DIRECTORY_FILE != 0;
+        creq.create_options & smb_server_proto_smb1::consts::create_options::FILE_NON_DIRECTORY_FILE != 0;
     let delete_on_close =
-        creq.create_options & smb_proto_smb1::consts::create_options::FILE_DELETE_ON_CLOSE != 0;
+        creq.create_options & smb_server_proto_smb1::consts::create_options::FILE_DELETE_ON_CLOSE != 0;
 
     let vfs = share_vfs(io, req.hdr.tid);
     let (mut open, meta, action) = vfs
@@ -192,7 +192,7 @@ pub async fn close(
     };
     if cr.mtime != 0 && cr.mtime != u32::MAX {
         // Legacy UTIME field: seconds since 1970 in the low word.
-        let ft = smb_proto::types::FileTime::from_unix(cr.mtime as i64, 0);
+        let ft = smb_server_proto::types::FileTime::from_unix(cr.mtime as i64, 0);
         let _ = vfs
             .set_info_open(
                 &mut h,
@@ -259,7 +259,7 @@ pub async fn locking(
     let cmd = req.hdr.command;
     bodies.push(RespBody::new(
         cmd,
-        vec![smb_proto_smb1::consts::ANDX_NONE, 0, 0, 0],
+        vec![smb_server_proto_smb1::consts::ANDX_NONE, 0, 0, 0],
         Vec::new(),
     ));
     Ok(Status::SUCCESS)
@@ -267,8 +267,8 @@ pub async fn locking(
 
 // ---- helpers ----
 
-pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
-    use smb_vfs::VfsError as E;
+pub(crate) fn vfs_err(e: smb_server_vfs::VfsError) -> Status {
+    use smb_server_vfs::VfsError as E;
     match e {
         E::NotFound => Status::OBJECT_PATH_NOT_FOUND,
         E::AlreadyExists => Status::OBJECT_NAME_COLLISION,

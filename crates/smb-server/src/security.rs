@@ -3,8 +3,8 @@
 //! `SID` blobs is delegated to `win-sd` rather than hand-rolled here.
 //!
 //! The POSIX backend cannot express NT ACLs natively, so descriptors are
-//! stored verbatim (see [`smb_vfs::Vfs::get_security`] /
-//! [`smb_vfs::Vfs::set_security`]). When a file has no stored descriptor a
+//! stored verbatim (see [`smb_server_vfs::Vfs::get_security`] /
+//! [`smb_server_vfs::Vfs::set_security`]). When a file has no stored descriptor a
 //! permissive default is synthesised so clients always see a valid
 //! owner/group/DACL.
 

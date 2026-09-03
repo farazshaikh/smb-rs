@@ -5,9 +5,9 @@ pub mod file_cmds;
 pub mod session;
 pub mod trans2_cmds;
 
-use smb_proto::types::Status;
-use smb_proto_smb1::consts;
-use smb_proto_smb1::header::{Header, RespBody};
+use smb_server_proto::types::Status;
+use smb_server_proto_smb1::consts;
+use smb_server_proto_smb1::header::{Header, RespBody};
 
 pub use crate::dispatch::IoCtx;
 use crate::dispatch::{IoContext, ReqView};
@@ -114,34 +114,34 @@ pub use crate::cmds::dir_cmds::split_pattern_pub as split_pattern;
 
 /// DOS wildcard match.
 pub fn wildcard(name: &str, pat: &str) -> bool {
-    smb_backend_posix::wildcard_match(name, pat)
+    smb_server_backend_posix::wildcard_match(name, pat)
 }
 
 /// Resolve the VFS for the request's tree; IPC$ yields a stub that rejects.
 /// Clone the VFS handle for the request's tree (Arc so handlers can hold it
     /// across mutable connection access).
-    pub fn share_vfs(io: &IoContext<'_>, tid: u16) -> std::sync::Arc<dyn smb_vfs::Vfs> {
-        static IPC: std::sync::OnceLock<smb_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
+    pub fn share_vfs(io: &IoContext<'_>, tid: u16) -> std::sync::Arc<dyn smb_server_vfs::Vfs> {
+        static IPC: std::sync::OnceLock<smb_server_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
         match io.conn.trees.get(&tid).and_then(|n| io.server.shares.get(n)) {
             Some(share) => share.vfs.clone(),
-            None => std::sync::Arc::new(IPC.get_or_init(smb_vfs_stub::IpcVfs::default).clone())
-                as std::sync::Arc<dyn smb_vfs::Vfs>,
+            None => std::sync::Arc::new(IPC.get_or_init(smb_server_vfs_stub::IpcVfs::default).clone())
+                as std::sync::Arc<dyn smb_server_vfs::Vfs>,
         }
     }
 
-fn share_vfs_any(_io: &IoContext) -> &'static dyn smb_vfs::Vfs {
-    static IPC: std::sync::OnceLock<smb_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
-    IPC.get_or_init(smb_vfs_stub::IpcVfs::default) as &dyn smb_vfs::Vfs
+fn share_vfs_any(_io: &IoContext) -> &'static dyn smb_server_vfs::Vfs {
+    static IPC: std::sync::OnceLock<smb_server_vfs_stub::IpcVfs> = std::sync::OnceLock::new();
+    IPC.get_or_init(smb_server_vfs_stub::IpcVfs::default) as &dyn smb_server_vfs::Vfs
 }
 
 /// Stub namespace so `share_vfs` can always return something.
-mod smb_vfs_stub {
+mod smb_server_vfs_stub {
     /// Rejecting backend used for unknown trees.
     #[derive(Debug, Default, Clone)]
     pub struct IpcVfs;
 
     #[async_trait::async_trait(?Send)]
-    impl smb_vfs::Vfs for IpcVfs {
+    impl smb_server_vfs::Vfs for IpcVfs {
         async fn create(
             &self,
             _: &str,
@@ -150,83 +150,83 @@ mod smb_vfs_stub {
             _: u32,
             _: u32,
             _: u32,
-        ) -> smb_vfs::VfsResult<(Box<smb_vfs::OpenFile>, smb_vfs::FileMeta, u32)> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        ) -> smb_server_vfs::VfsResult<(Box<smb_server_vfs::OpenFile>, smb_server_vfs::FileMeta, u32)> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
         async fn read(
             &self,
-            _: &mut smb_vfs::OpenFile,
+            _: &mut smb_server_vfs::OpenFile,
             _: u64,
             _: usize,
-        ) -> smb_vfs::VfsResult<Vec<u8>> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        ) -> smb_server_vfs::VfsResult<Vec<u8>> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
         async fn write(
             &self,
-            _: &mut smb_vfs::OpenFile,
+            _: &mut smb_server_vfs::OpenFile,
             _: u64,
             _: &[u8],
             _: bool,
-        ) -> smb_vfs::VfsResult<u64> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        ) -> smb_server_vfs::VfsResult<u64> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
         async fn seek(
             &self,
-            _: &mut smb_vfs::OpenFile,
+            _: &mut smb_server_vfs::OpenFile,
             _: u16,
             _: i64,
-        ) -> smb_vfs::VfsResult<u64> {
-            Err(smb_vfs::VfsError::NotSupported)
+        ) -> smb_server_vfs::VfsResult<u64> {
+            Err(smb_server_vfs::VfsError::NotSupported)
         }
-        async fn flush(&self, _: &mut smb_vfs::OpenFile) -> smb_vfs::VfsResult<()> {
+        async fn flush(&self, _: &mut smb_server_vfs::OpenFile) -> smb_server_vfs::VfsResult<()> {
             Ok(())
         }
-        async fn flush_all(&self) -> smb_vfs::VfsResult<()> {
+        async fn flush_all(&self) -> smb_server_vfs::VfsResult<()> {
             Ok(())
         }
-        async fn close(&self, _: Box<smb_vfs::OpenFile>) -> smb_vfs::VfsResult<()> {
+        async fn close(&self, _: Box<smb_server_vfs::OpenFile>) -> smb_server_vfs::VfsResult<()> {
             Ok(())
         }
-        async fn mkdir(&self, _: &str) -> smb_vfs::VfsResult<()> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        async fn mkdir(&self, _: &str) -> smb_server_vfs::VfsResult<()> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
-        async fn rmdir(&self, _: &str) -> smb_vfs::VfsResult<()> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        async fn rmdir(&self, _: &str) -> smb_server_vfs::VfsResult<()> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
-        async fn check_dir(&self, _: &str) -> smb_vfs::VfsResult<()> {
-            Err(smb_vfs::VfsError::NotFound)
+        async fn check_dir(&self, _: &str) -> smb_server_vfs::VfsResult<()> {
+            Err(smb_server_vfs::VfsError::NotFound)
         }
-        async fn unlink(&self, _: &str) -> smb_vfs::VfsResult<()> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        async fn unlink(&self, _: &str) -> smb_server_vfs::VfsResult<()> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
-        async fn delete_pattern(&self, _: &str, _: &str) -> smb_vfs::VfsResult<bool> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        async fn delete_pattern(&self, _: &str, _: &str) -> smb_server_vfs::VfsResult<bool> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
-        async fn rename(&self, _: &str, _: &str) -> smb_vfs::VfsResult<()> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        async fn rename(&self, _: &str, _: &str) -> smb_server_vfs::VfsResult<()> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
-        async fn list(&self, _: &str) -> smb_vfs::VfsResult<Vec<smb_vfs::Entry>> {
-            Err(smb_vfs::VfsError::AccessDenied)
+        async fn list(&self, _: &str) -> smb_server_vfs::VfsResult<Vec<smb_server_vfs::Entry>> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
-        async fn stat(&self, _: &str) -> smb_vfs::VfsResult<smb_vfs::FileMeta> {
-            Err(smb_vfs::VfsError::NotFound)
+        async fn stat(&self, _: &str) -> smb_server_vfs::VfsResult<smb_server_vfs::FileMeta> {
+            Err(smb_server_vfs::VfsError::NotFound)
         }
         async fn set_info_open(
             &self,
-            _: &mut smb_vfs::OpenFile,
-            _: &smb_vfs::SetOp,
-        ) -> smb_vfs::VfsResult<()> {
-            Err(smb_vfs::VfsError::AccessDenied)
+            _: &mut smb_server_vfs::OpenFile,
+            _: &smb_server_vfs::SetOp,
+        ) -> smb_server_vfs::VfsResult<()> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
         async fn set_info_path(
             &self,
             _: &str,
-            _: &smb_vfs::SetOp,
-        ) -> smb_vfs::VfsResult<()> {
-            Err(smb_vfs::VfsError::AccessDenied)
+            _: &smb_server_vfs::SetOp,
+        ) -> smb_server_vfs::VfsResult<()> {
+            Err(smb_server_vfs::VfsError::AccessDenied)
         }
-        async fn query_disk(&self) -> smb_vfs::VfsResult<(u32, u32, u16, u16)> {
-            Err(smb_vfs::VfsError::NotSupported)
+        async fn query_disk(&self) -> smb_server_vfs::VfsResult<(u32, u32, u16, u16)> {
+            Err(smb_server_vfs::VfsError::NotSupported)
         }
     }
 }

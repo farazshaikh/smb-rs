@@ -1,0 +1,16 @@
+[package]
+name = "smb-server-proto-smb2"
+description = "SMB2 wire structures ([MS-SMB2]) — pass 2 scaffold"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+readme = "README.md"
+
+[dependencies]
+smb-server-proto = { path = "../smb-server-proto" }
+smb-server-vfs = { path = "../smb-server-vfs" }
+lznt1 = { workspace = true }
+xpress_rs = { workspace = true }
+
+[lints]
+workspace = true

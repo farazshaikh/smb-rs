@@ -1,13 +1,13 @@
-//! `Decode` adapters over the existing `smb-proto-smb2` request parsers. Each is
+//! `Decode` adapters over the existing `smb-server-proto-smb2` request parsers. Each is
 //! a thin, zero-copy bridge: the frame is borrowed and the parser's `None`
 //! (malformed) becomes `STATUS_INVALID_PARAMETER`.
 
-use smb_proto::types::Status;
-use smb_proto_smb2::commands::{
+use smb_server_proto::types::Status;
+use smb_server_proto_smb2::commands::{
     ChangeNotifyReq, CloseReq, CreateReq, FlushReq, IoctlReq, LockReq, QueryDirReq, QueryInfoReq,
     ReadReq, SetInfoReq, WriteReq,
 };
-use smb_proto_smb2::session_setup::cmd;
+use smb_server_proto_smb2::session_setup::cmd;
 
 use super::wire::Decode;
 

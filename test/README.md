@@ -53,7 +53,7 @@ test/
     ├── history.csv          one row per (run, case)
     └── runs/<run_id>.json   full per-run report
 
-crates/smb-testsuite/        the Rust harness
+crates/smb-server-testsuite/        the Rust harness
 ├── src/lib.rs               endpoint, driver wrapper, case model, runner
 ├── src/cases.rs             the case registry (the test plan, in code)
 ├── src/recorder.rs          JSON/CSV persistence + aggregate
@@ -76,7 +76,7 @@ unset, so `cargo test --workspace` stays green without one):
 SMB_TEST_HOST=127.0.0.1 SMB_TEST_PORT=4450 \
 SMB_TEST_USER=faraz SMB_TEST_PASS=pass SMB_TEST_SHARE=public \
 SMB_TEST_PYTHON=/path/to/python-with-smbprotocol \
-cargo test -p smb-testsuite
+cargo test -p smb-server-testsuite
 ```
 
 ### Automated — `smb-testrunner`
@@ -84,7 +84,7 @@ cargo test -p smb-testsuite
 Starts the server itself, runs every case, and records a run under `test/data/`:
 
 ```sh
-cargo build -p smb-server -p smb-testsuite
+cargo build -p smb-server -p smb-server-testsuite
 ./target/debug/smb-testrunner --start-server --port 4450 --record \
     --python /path/to/python-with-smbprotocol
 ./target/debug/smb-testrunner --list           # list cases
@@ -146,5 +146,5 @@ case exists; `planned` = catalogued for a future harness iteration.
 | SetInfo security | MS-FSCC §2.4.6 | set SD | planned |
 | Signing policy | §3.3.5.2.3 | require-signing enforcement | planned |
 
-Adding a case is a single entry in `crates/smb-testsuite/src/cases.rs`; the
+Adding a case is a single entry in `crates/smb-server-testsuite/src/cases.rs`; the
 runner, `cargo test`, recorder, and UI pick it up automatically.

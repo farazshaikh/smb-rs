@@ -20,19 +20,19 @@ workspace = true
 resolver = "2"
 exclude = ["lints"]
 members = [
-    "crates/smb-proto",
-    "crates/smb-proto-smb2",
-    "crates/smb-proto-smb3",
-    "crates/smb-proto-smb1",
-    "crates/smb-transport",
-    "crates/smb-vfs",
-    "crates/smb-backend-posix",
-    "crates/smb-auth",
-    "crates/smb-csp",
+    "crates/smb-server-proto",
+    "crates/smb-server-proto-smb2",
+    "crates/smb-server-proto-smb3",
+    "crates/smb-server-proto-smb1",
+    "crates/smb-server-transport",
+    "crates/smb-server-vfs",
+    "crates/smb-server-backend-posix",
+    "crates/smb-server-auth",
+    "crates/smb-server-csp",
     "crates/smb-server",
-    "crates/smb-handle-store",
-    "crates/smb-testsuite",
-    "crates/smb-test-dashboard",
+    "crates/smb-server-handle-store",
+    "crates/smb-server-testsuite",
+    "crates/smb-server-test-dashboard",
 ]
 
 [workspace.package]
@@ -49,7 +49,7 @@ missing_docs = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dylint_lib, values(any()))"] }
 
 # Custom dylint lints (run via `cargo dylint --all`). The no_magic_numbers lint
-# flags integer literals that should be named constants in the smb-proto* crates.
+# flags integer literals that should be named constants in the smb-server-proto* crates.
 [workspace.metadata.dylint]
 libraries = [
     { path = "lints/no_magic_numbers" },

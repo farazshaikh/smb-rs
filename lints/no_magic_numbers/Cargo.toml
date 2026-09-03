@@ -2,7 +2,7 @@
 name = "no_magic_numbers"
 version = "0.1.0"
 authors = ["smb-server-rs"]
-description = "Dylint lint: flag magic-number integer literals that should be named constants in the smb-proto* crates"
+description = "Dylint lint: flag magic-number integer literals that should be named constants in the smb-server-proto* crates"
 edition = "2024"
 publish = false
 

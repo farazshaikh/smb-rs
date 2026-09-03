@@ -21,7 +21,7 @@ dylint_linting::declare_late_lint! {
     /// ### Why is this bad?
     /// In this workspace every wire-level value (protocol magic, command code,
     /// NT status, structure size, field offset, FSCTL code, flag bit, dialect)
-    /// must be a named constant defined in the owning `smb-proto*` crate and
+    /// must be a named constant defined in the owning `smb-server-proto*` crate and
     /// referenced by name, so the meaning is self-documenting and lives in one
     /// place. A raw literal in the server logic hides intent and duplicates a
     /// value the protocol layer already names.
@@ -40,7 +40,7 @@ dylint_linting::declare_late_lint! {
     /// ```
     pub NO_MAGIC_NUMBERS,
     Warn,
-    "integer literal that should be a named constant defined in an smb-proto* crate"
+    "integer literal that should be a named constant defined in an smb-server-proto* crate"
 }
 
 impl<'tcx> LateLintPass<'tcx> for NoMagicNumbers {
@@ -69,13 +69,13 @@ impl<'tcx> LateLintPass<'tcx> for NoMagicNumbers {
         if is_in_test_function(cx.tcx, expr.hir_id) {
             return;
         }
-        // The smb-proto* crates DEFINE the wire constants; literals are expected
+        // The smb-server-proto* crates DEFINE the wire constants; literals are expected
         // there. Consumer crates must reference the named constants instead.
         if cx
             .tcx
             .crate_name(LOCAL_CRATE)
             .as_str()
-            .starts_with("smb_proto")
+            .starts_with("smb_server_proto")
         {
             return;
         }
@@ -85,7 +85,7 @@ impl<'tcx> LateLintPass<'tcx> for NoMagicNumbers {
             expr.span,
             "magic number: use a named constant",
             None,
-            "define this value as a named constant in the owning smb-proto* crate and reference it by name",
+            "define this value as a named constant in the owning smb-server-proto* crate and reference it by name",
         );
     }
 }

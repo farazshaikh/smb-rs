@@ -1,18 +1,18 @@
 //! Negotiate / session setup / tree connect / echo handlers.
 
-use smb_proto::types::{FileTime, Status};
-use smb_proto_smb1::consts::{self, caps, flags2};
-use smb_proto_smb1::header::RespBody;
-use smb_proto_smb1::negotiate;
-use smb_proto_smb1::session_setup as ss;
-use smb_proto_smb1::tree_connect as tc;
+use smb_server_proto::types::{FileTime, Status};
+use smb_server_proto_smb1::consts::{self, caps, flags2};
+use smb_server_proto_smb1::header::RespBody;
+use smb_server_proto_smb1::negotiate;
+use smb_server_proto_smb1::session_setup as ss;
+use smb_server_proto_smb1::tree_connect as tc;
 
 use crate::auth::authenticate_ntlmssp;
 use crate::dispatch::{IoCtx, IoContext, ReqView};
 use crate::state::{next_tid, next_uid, Session};
 
 fn crate_ext_sec() -> u32 {
-    smb_proto_smb1::consts::caps::CAP_EXTENDED_SECURITY
+    smb_server_proto_smb1::consts::caps::CAP_EXTENDED_SECURITY
 }
 
 /// Our negotiated capability set.
@@ -75,22 +75,22 @@ pub fn setup(
     };
 
     let parsed_nt = blob.clone();
-    let inner = smb_auth::ntlm::unwrap_blob(&parsed_nt).unwrap_or(&[]);
-    match smb_auth::ntlm::msg_type(inner) {
-        Some(smb_auth::ntlm::MSG_TYPE1) | Some(smb_auth::ntlm::MSG_TYPE2) | None => {
+    let inner = smb_server_auth::ntlm::unwrap_blob(&parsed_nt).unwrap_or(&[]);
+    match smb_server_auth::ntlm::msg_type(inner) {
+        Some(smb_server_auth::ntlm::MSG_TYPE1) | Some(smb_server_auth::ntlm::MSG_TYPE2) | None => {
             // Leg 1 — issue the CHALLENGE.
             let uid = if conn.uid != 0 { conn.uid } else { next_uid() };
             conn.uid = uid;
             conn.auth_pending = true;
-            conn.spnego = smb_auth::ntlm::is_spnego(&parsed_nt);
+            conn.spnego = smb_server_auth::ntlm::is_spnego(&parsed_nt);
 
-            let t2 = smb_auth::ntlm::build_type2(
+            let t2 = smb_server_auth::ntlm::build_type2(
                 &conn.challenge,
                 &io.server.domain,
                 &io.server.server_name,
             );
             let out_blob = if conn.spnego {
-                smb_auth::ntlm::wrap_negtoken_targ(&t2)
+                smb_server_auth::ntlm::wrap_negtoken_targ(&t2)
             } else {
                 t2.clone()
             };
@@ -100,9 +100,9 @@ pub fn setup(
             *bodies = vec![b];
             Ok(Status::MORE_PROCESSING_REQUIRED)
         }
-        Some(smb_auth::ntlm::MSG_TYPE3) => {
+        Some(smb_server_auth::ntlm::MSG_TYPE3) => {
             // Leg 2 — verify the AUTHENTICATE message.
-            let t3 = smb_auth::ntlm::parse_type3(inner).ok_or(Status::LOGON_FAILURE)?;
+            let t3 = smb_server_auth::ntlm::parse_type3(inner).ok_or(Status::LOGON_FAILURE)?;
             let _ = &_legacy;
             let out =
                 authenticate_ntlmssp(&io.server.users, io.server.allow_guest, &conn.challenge, &t3);
@@ -120,7 +120,7 @@ pub fn setup(
 
             let action: u16 = if out.guest { 0x0001 } else { 0x0000 };
             let fin = if conn.spnego {
-                smb_auth::ntlm::wrap_accept_complete()
+                smb_server_auth::ntlm::wrap_accept_complete()
             } else {
                 Vec::new()
             };

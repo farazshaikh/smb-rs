@@ -1,0 +1,17 @@
+[package]
+name = "smb-server-backend-posix"
+description = "Default POSIX async-fs storage backend for the smb-server-rs virtual filesystem"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+readme = "README.md"
+
+[dependencies]
+async-trait.workspace = true
+tokio-uring.workspace = true
+xattr.workspace = true
+smb-server-proto = { path = "../smb-server-proto" }
+smb-server-vfs = { path = "../smb-server-vfs" }
+
+[lints]
+workspace = true

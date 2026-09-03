@@ -1,0 +1,13 @@
+[package]
+name = "smb-server-proto-smb3"
+description = "SMB3 additions over SMB2 (encryption, pre-auth integrity) ([MS-SMB2]) — pass 2 scaffold"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+readme = "README.md"
+
+[dependencies]
+smb-server-proto = { path = "../smb-server-proto" }
+
+[lints]
+workspace = true

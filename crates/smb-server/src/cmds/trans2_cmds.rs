@@ -1,10 +1,10 @@
 //! TRANSACTION2 subcommand dispatch ([MS-SMB] §2.2.6).
 
-use smb_proto::types::Status;
-use smb_proto_smb1::consts;
-use smb_proto_smb1::header::RespBody;
-use smb_proto_smb1::query;
-use smb_proto_smb1::trans2 as t2;
+use smb_server_proto::types::Status;
+use smb_server_proto_smb1::consts;
+use smb_server_proto_smb1::header::RespBody;
+use smb_server_proto_smb1::query;
+use smb_server_proto_smb1::trans2 as t2;
 
 use crate::cmds::{IoCtx, share_vfs};
 use crate::dispatch::ReqView;
@@ -72,7 +72,7 @@ async fn find_first2(
 
     // Fixed params: SearchAttributes(2) SearchCount(2) OpenFlags(2)
     // InformationLevel(2) SearchStorageType(4) = 12 bytes; name follows.
-    let mut rd = smb_proto::buf::Reader::new(&t.params, 12);
+    let mut rd = smb_server_proto::buf::Reader::new(&t.params, 12);
     let pattern = rd.zstring(t.unicode, t.param_base);
     tracing::trace!(level = format!("{:#06x}", level), pattern = %pattern, "find_first2");
 
@@ -84,9 +84,9 @@ async fn find_first2(
     if !pattern.contains('*') && !pattern.contains('?') {
         if let Ok(m) = vfs.stat(pattern.trim_start_matches(['\\', '/'])).await {
             let name = pattern.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-            let entry = smb_proto_smb1::find::FindEntry {
+            let entry = smb_server_proto_smb1::find::FindEntry {
                 name,
-                meta: smb_proto_smb1::query::QueryMeta {
+                meta: smb_server_proto_smb1::query::QueryMeta {
                     times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
                     attrs: m.attrs,
                     eof: m.eof,
@@ -94,7 +94,7 @@ async fn find_first2(
                     is_dir: m.is_dir,
                 },
             };
-            let (data_buf, last) = smb_proto_smb1::find::encode_entries(
+            let (data_buf, last) = smb_server_proto_smb1::find::encode_entries(
                 std::slice::from_ref(&entry),
                 level,
                 t.unicode,
@@ -104,7 +104,7 @@ async fn find_first2(
     }
 
     let entries = vfs.list(&dir_rel).await.map_err(vfs_err)?;
-    let matched: Vec<smb_vfs::Entry> = entries
+    let matched: Vec<smb_server_vfs::Entry> = entries
         .into_iter()
         .filter(|e| crate::cmds::wildcard(&e.name.to_lowercase(), &fname_pat.to_lowercase()))
         .collect();
@@ -121,11 +121,11 @@ async fn find_first2(
         },
     );
 
-    let find_entries: Vec<smb_proto_smb1::find::FindEntry> = matched
+    let find_entries: Vec<smb_server_proto_smb1::find::FindEntry> = matched
         .into_iter()
-        .map(|e| smb_proto_smb1::find::FindEntry {
+        .map(|e| smb_server_proto_smb1::find::FindEntry {
             name: e.name,
-            meta: smb_proto_smb1::query::QueryMeta {
+            meta: smb_server_proto_smb1::query::QueryMeta {
                 times: [
                     e.meta.times[0].0,
                     e.meta.times[1].0,
@@ -140,7 +140,7 @@ async fn find_first2(
         })
         .collect();
     let (data_buf, last_off) =
-        smb_proto_smb1::find::encode_entries(&find_entries, level, t.unicode);
+        smb_server_proto_smb1::find::encode_entries(&find_entries, level, t.unicode);
     Ok(find_params(
         sid_v,
         returned.len() as u16,
@@ -183,7 +183,7 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
         return Err(Status::INVALID_HANDLE);
     };
     let vfs = share_vfs(io, tid_placeholder());
-    let mut out: Vec<smb_proto_smb1::find::FindEntry> = Vec::new();
+    let mut out: Vec<smb_server_proto_smb1::find::FindEntry> = Vec::new();
     while out.len() < 64 {
         let Some(name) = ctx.queue.next() else { break };
         let m = match vfs
@@ -193,9 +193,9 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
             Ok(m) => m,
             Err(_) => continue,
         };
-        out.push(smb_proto_smb1::find::FindEntry {
+        out.push(smb_server_proto_smb1::find::FindEntry {
             name,
-            meta: smb_proto_smb1::query::QueryMeta {
+            meta: smb_server_proto_smb1::query::QueryMeta {
                 times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
                 attrs: m.attrs,
                 eof: m.eof,
@@ -218,7 +218,7 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
         false
     };
     let _ = eos_final;
-    let (data_buf, last_off) = smb_proto_smb1::find::encode_entries(&out, lvl, t.unicode);
+    let (data_buf, last_off) = smb_server_proto_smb1::find::encode_entries(&out, lvl, t.unicode);
     let has_more = !io.conn.searches.contains_key(&sid_v);
     let _ = has_more;
     Ok(find_params(
@@ -239,10 +239,10 @@ fn query_fs(io: &IoCtx<'_>, tid: u16, t: &t2::Trans2Req) -> Result<(Vec<u8>, Vec
     }
     let level = u16::from_le_bytes([t.params[0], t.params[1]]);
     share_vfs(io, tid); // tree must exist
-    let mut d = smb_proto::buf::Writer::new(0);
+    let mut d = smb_server_proto::buf::Writer::new(0);
     match level {
         0x102 => {
-            d.push_u64(smb_proto::types::FileTime::now().0);
+            d.push_u64(smb_server_proto::types::FileTime::now().0);
             d.push_u32(0x1234_5678);
             const LABEL: &str = "RUSTSMB";
             d.push_u32((LABEL.len() * 2) as u32);
@@ -287,7 +287,7 @@ async fn query_path(
     let level = u16::from_le_bytes([t.params[0], t.params[1]]);
     let vfs = share_vfs(io, tid);
 
-    let mut rd = smb_proto::buf::Reader::new(&t.params, 2);
+    let mut rd = smb_server_proto::buf::Reader::new(&t.params, 2);
     let name = rd.zstring(t.unicode, t.param_base);
     if name.is_empty() {
         return Err(Status::INVALID_PARAMETER);
@@ -318,7 +318,7 @@ pub(crate) async fn query_file(
     let name = h.path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
     let vfs = share_vfs(io, tid);
     let m = vfs.stat(&h.path).await.unwrap_or_default();
-    let qm = smb_proto_smb1::query::QueryMeta {
+    let qm = smb_server_proto_smb1::query::QueryMeta {
         times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
         attrs: m.attrs,
         eof: m.eof,
@@ -362,7 +362,7 @@ async fn set_path(
         return Err(Status::INVALID_PARAMETER);
     }
     let level = u16::from_le_bytes([t.params[0], t.params[1]]);
-    let mut rd = smb_proto::buf::Reader::new(&t.params, 2);
+    let mut rd = smb_server_proto::buf::Reader::new(&t.params, 2);
     let name = rd.zstring(t.unicode, t.param_base);
     if name.is_empty() {
         return Err(Status::INVALID_PARAMETER);
@@ -375,7 +375,7 @@ async fn set_path(
 
 /// Translate wire set-levels onto neutral [`SetOp`] values.
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // info-level SetInfo decode ([MS-FSCC])
-fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_vfs::SetOp, Status> {
+fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_server_vfs::SetOp, Status> {
     let r64 = |i: usize| -> u64 {
         data.get(i..i + 8)
             .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
@@ -385,15 +385,15 @@ fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_vfs::SetOp, Status> {
         0x101 | 0x1004 => {
             let access = r64(8);
             let ft = r64(16);
-            let sel = |v: u64| (v != 0 && v != u64::MAX).then_some(smb_proto::types::FileTime(v));
-            Ok(smb_vfs::SetOp::Basic {
+            let sel = |v: u64| (v != 0 && v != u64::MAX).then_some(smb_server_proto::types::FileTime(v));
+            Ok(smb_server_vfs::SetOp::Basic {
                 access: sel(access),
                 write: sel(ft),
             })
         }
-        0x103 | 0x100B => Ok(smb_vfs::SetOp::Allocation(r64(0))),
-        0x104 | 0x100C => Ok(smb_vfs::SetOp::EndOfFile(r64(0))),
-        0x102 | 0x100D => Ok(smb_vfs::SetOp::Disposition {
+        0x103 | 0x100B => Ok(smb_server_vfs::SetOp::Allocation(r64(0))),
+        0x104 | 0x100C => Ok(smb_server_vfs::SetOp::EndOfFile(r64(0))),
+        0x102 | 0x100D => Ok(smb_server_vfs::SetOp::Disposition {
             delete: data.first().copied().unwrap_or(0) != 0,
         }),
         _ => Err(Status::INVALID_PARAMETER),
@@ -413,8 +413,8 @@ fn share_name<'a>(io: &'a IoCtx<'_>, tid: u16) -> Result<&'a str, Status> {
 fn tid_placeholder() -> u16 {
     0
 }
-fn vfs_err(e: smb_vfs::VfsError) -> Status {
-    use smb_vfs::VfsError as E;
+fn vfs_err(e: smb_server_vfs::VfsError) -> Status {
+    use smb_server_vfs::VfsError as E;
     match e {
         E::NotFound => Status::OBJECT_PATH_NOT_FOUND,
         E::AlreadyExists => Status::OBJECT_NAME_COLLISION,
@@ -429,8 +429,8 @@ fn vfs_err(e: smb_vfs::VfsError) -> Status {
 
 /// Convert storage metadata into the neutral query-payload snapshot.
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // FileMeta.times index order
-pub(crate) fn qmeta_from(m: &smb_vfs::FileMeta) -> smb_proto_smb1::query::QueryMeta {
-    smb_proto_smb1::query::QueryMeta {
+pub(crate) fn qmeta_from(m: &smb_server_vfs::FileMeta) -> smb_server_proto_smb1::query::QueryMeta {
+    smb_server_proto_smb1::query::QueryMeta {
         times: [m.times[0].0, m.times[1].0, m.times[2].0, m.times[3].0],
         attrs: m.attrs,
         eof: m.eof,

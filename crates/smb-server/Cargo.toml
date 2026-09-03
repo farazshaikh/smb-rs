@@ -12,8 +12,8 @@ path = "src/main.rs"
 
 [features]
 default = ["lib"]
-lib = ["smb-auth/lib"]
-handrolled = ["smb-auth/handrolled"]
+lib = ["smb-server-auth/lib"]
+handrolled = ["smb-server-auth/handrolled"]
 
 [dependencies]
 async-trait.workspace = true
@@ -24,14 +24,14 @@ tracing-subscriber.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 clap.workspace = true
-smb-proto = { path = "../smb-proto" }
-smb-proto-smb2 = { path = "../smb-proto-smb2" }
-smb-proto-smb1 = { path = "../smb-proto-smb1" }
-smb-transport = { path = "../smb-transport" }
-smb-vfs = { path = "../smb-vfs" }
-smb-backend-posix = { path = "../smb-backend-posix" }
-smb-auth = { path = "../smb-auth", default-features = false }
-smb-handle-store = { path = "../smb-handle-store" }
+smb-server-proto = { path = "../smb-server-proto" }
+smb-server-proto-smb2 = { path = "../smb-server-proto-smb2" }
+smb-server-proto-smb1 = { path = "../smb-server-proto-smb1" }
+smb-server-transport = { path = "../smb-server-transport" }
+smb-server-vfs = { path = "../smb-server-vfs" }
+smb-server-backend-posix = { path = "../smb-server-backend-posix" }
+smb-server-auth = { path = "../smb-server-auth", default-features = false }
+smb-server-handle-store = { path = "../smb-server-handle-store" }
 ms-ndr = "0.1.1"
 inotify.workspace = true
 futures-util.workspace = true
