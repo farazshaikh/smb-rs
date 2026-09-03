@@ -36,7 +36,7 @@ jobs:
           cp site/index.html _site/index.html
           cp test_status.csv _site/test_status.csv
           mkdir -p _site/assets
-          cp assets/logo.jpg _site/assets/logo.jpg
+          cp assets/mascot.png _site/assets/mascot.png
           touch _site/.nojekyll
 
       - uses: actions/upload-pages-artifact@v3

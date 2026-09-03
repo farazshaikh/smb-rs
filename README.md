@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.jpg" alt="smb-server-rs logo" width="600"/>
+  <img src="assets/mascot.png" alt="smb-server-rs mascot" width="400"/>
 </p>
 
 <h1 align="center">smb-server-rs</h1>
