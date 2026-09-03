@@ -18,7 +18,7 @@
 
 use async_trait::async_trait;
 use smb_proto::types::{AttrFlags, Disposition, FileTime};
-use smb_vfs::{map_io, Entry, FileMeta, OpenFile, SetOp, Vfs, VfsError, VfsResult};
+use smb_vfs::{Entry, FileMeta, OpenFile, SetOp, Vfs, VfsError, VfsResult, map_io};
 use tokio_uring::fs::{File, OpenOptions};
 
 /// POSIX backend rooted at a single directory.
@@ -63,7 +63,10 @@ impl PosixVfs {
         // `./share`) the stored `./share/foo` would otherwise be treated as
         // share-relative on stat/set_info and double-prefix the root.
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        PosixVfs { root, sd_cache: std::sync::Mutex::new(std::collections::HashMap::new()) }
+        PosixVfs {
+            root,
+            sd_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     fn resolve(&self, path: &str) -> std::path::PathBuf {
@@ -93,15 +96,24 @@ impl PosixVfs {
 
         // Ensure the base file exists (streams cannot exist without it), never
         // truncating its data stream.
-        let base_is_file = std::fs::symlink_metadata(&path).map(|m| !m.is_dir()).unwrap_or(false);
+        let base_is_file = std::fs::symlink_metadata(&path)
+            .map(|m| !m.is_dir())
+            .unwrap_or(false);
         if !base_is_file {
             match Disposition::from_u32(disposition) {
-                Some(Disposition::Open) | Some(Disposition::Overwrite) => return Err(VfsError::NotFound),
+                Some(Disposition::Open) | Some(Disposition::Overwrite) => {
+                    return Err(VfsError::NotFound);
+                }
                 _ => {
                     if let Some(parent) = path.parent() {
                         let _ = tokio_uring::fs::create_dir_all(parent).await;
                     }
-                    let f = OpenOptions::new().write(true).create(true).open(&path).await.map_err(map_io)?;
+                    let f = OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .open(&path)
+                        .await
+                        .map_err(map_io)?;
                     let _ = f.close().await;
                 }
             }
@@ -124,7 +136,9 @@ impl PosixVfs {
             }
         } else {
             match Disposition::from_u32(disposition) {
-                Some(Disposition::Open) | Some(Disposition::Overwrite) => return Err(VfsError::NotFound),
+                Some(Disposition::Open) | Some(Disposition::Overwrite) => {
+                    return Err(VfsError::NotFound);
+                }
                 _ => {
                     xattr::set(&path, &xname, b"").map_err(map_io)?;
                     2
@@ -132,7 +146,11 @@ impl PosixVfs {
             }
         };
 
-        let size = xattr::get(&path, &xname).ok().flatten().map(|v| v.len() as u64).unwrap_or(0);
+        let size = xattr::get(&path, &xname)
+            .ok()
+            .flatten()
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
         let (read_access, write_access) = access_flags(access);
         let md = std::fs::metadata(&path).map_err(map_io)?;
         let mut m = meta_of(&md);
@@ -146,7 +164,11 @@ impl PosixVfs {
             can_write: write_access,
             delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
             delete_pending: false,
-            inner: Box::new(PosixInner { file: None, pos: 0, stream: Some(sname.to_string()) }),
+            inner: Box::new(PosixInner {
+                file: None,
+                pos: 0,
+                stream: Some(sname.to_string()),
+            }),
         });
         Ok((open, m, action))
     }
@@ -214,7 +236,9 @@ fn symlink_stop(root: &std::path::Path, rel: &str) -> Option<(String, u16, bool)
             continue;
         }
         cur.push(comp);
-        let Ok(m) = std::fs::symlink_metadata(&cur) else { continue };
+        let Ok(m) = std::fs::symlink_metadata(&cur) else {
+            continue;
+        };
         if !m.file_type().is_symlink() {
             continue;
         }
@@ -320,7 +344,10 @@ pub fn wildcard_match(name: &str, pattern: &str) -> bool {
             c => !s.is_empty() && s[0] == c && rec(&s[1..], &p[1..]),
         }
     }
-    rec(&name.chars().collect::<Vec<_>>(), &pattern.chars().collect::<Vec<_>>())
+    rec(
+        &name.chars().collect::<Vec<_>>(),
+        &pattern.chars().collect::<Vec<_>>(),
+    )
 }
 
 #[async_trait(?Send)]
@@ -354,7 +381,11 @@ impl Vfs for PosixVfs {
         const OPT_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         if options & OPT_OPEN_REPARSE_POINT == 0 {
             if let Some((target, unparsed_len, relative)) = symlink_stop(&self.root, rel) {
-                return Err(VfsError::StoppedOnSymlink { target, unparsed_len, relative });
+                return Err(VfsError::StoppedOnSymlink {
+                    target,
+                    unparsed_len,
+                    relative,
+                });
             }
         }
         let want_dir = is_dir || options & OPT_DIRECTORY_FILE != 0;
@@ -370,11 +401,13 @@ impl Vfs for PosixVfs {
             } else {
                 match Disposition::from_u32(disposition) {
                     Some(Disposition::Open) | Some(Disposition::Overwrite) => {
-                        return Err(VfsError::NotFound)
+                        return Err(VfsError::NotFound);
                     }
                     _ => {}
                 }
-                tokio_uring::fs::create_dir_all(&path).await.map_err(map_io)?;
+                tokio_uring::fs::create_dir_all(&path)
+                    .await
+                    .map_err(map_io)?;
                 2
             };
             let md = std::fs::metadata(&path).map_err(map_io)?;
@@ -387,7 +420,11 @@ impl Vfs for PosixVfs {
                 can_write: write_access,
                 delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
                 delete_pending: false,
-                inner: Box::new(PosixInner { file: None, pos: 0, stream: None }),
+                inner: Box::new(PosixInner {
+                    file: None,
+                    pos: 0,
+                    stream: None,
+                }),
             });
             return Ok((open, meta_of(&md), action));
         }
@@ -402,7 +439,7 @@ impl Vfs for PosixVfs {
         } else {
             match Disposition::from_u32(disposition) {
                 Some(Disposition::Open) | Some(Disposition::Overwrite) => {
-                    return Err(VfsError::NotFound)
+                    return Err(VfsError::NotFound);
                 }
                 _ => {}
             }
@@ -434,13 +471,19 @@ impl Vfs for PosixVfs {
             can_write: write_access,
             delete_on_close: options & OPT_DELETE_ON_CLOSE != 0,
             delete_pending: false,
-            inner: Box::new(PosixInner { file: Some(file), pos: 0, stream: None }),
+            inner: Box::new(PosixInner {
+                file: Some(file),
+                pos: 0,
+                stream: None,
+            }),
         });
         Ok((open, meta_of(&md), action))
     }
 
     async fn read(&self, open: &mut OpenFile, offset: u64, len: usize) -> VfsResult<Vec<u8>> {
-        let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
+        let inner = open
+            .inner_as_mut::<PosixInner>()
+            .ok_or(VfsError::NotSupported)?;
         if let Some(sname) = inner.stream.clone() {
             let blob = xattr::get(self.resolve(&open.path), stream_xattr(&sname))
                 .ok()
@@ -465,7 +508,9 @@ impl Vfs for PosixVfs {
         data: &[u8],
         write_through: bool,
     ) -> VfsResult<u64> {
-        let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
+        let inner = open
+            .inner_as_mut::<PosixInner>()
+            .ok_or(VfsError::NotSupported)?;
         if let Some(sname) = inner.stream.clone() {
             // Whole-value xattr: read-modify-write the stream blob at `offset`.
             let p = self.resolve(&open.path);
@@ -493,7 +538,9 @@ impl Vfs for PosixVfs {
     async fn seek(&self, open: &mut OpenFile, mode: u16, offset: i64) -> VfsResult<u64> {
         // Positional I/O needs no lseek; track the cursor for SMB1 SEEK.
         let size = std::fs::metadata(&open.path).map(|m| m.len()).unwrap_or(0);
-        let inner = open.inner_as_mut::<PosixInner>().ok_or(VfsError::NotSupported)?;
+        let inner = open
+            .inner_as_mut::<PosixInner>()
+            .ok_or(VfsError::NotSupported)?;
         let base = match mode & 3 {
             0 => 0i64,
             1 => inner.pos as i64,
@@ -505,7 +552,9 @@ impl Vfs for PosixVfs {
     }
 
     async fn flush(&self, open: &mut OpenFile) -> VfsResult<()> {
-        let inner = open.inner_as_ref::<PosixInner>().ok_or(VfsError::NotSupported)?;
+        let inner = open
+            .inner_as_ref::<PosixInner>()
+            .ok_or(VfsError::NotSupported)?;
         if let Some(f) = inner.file.as_ref() {
             f.sync_all().await.map_err(map_io)?;
         }
@@ -519,7 +568,10 @@ impl Vfs for PosixVfs {
     async fn close(&self, mut open: Box<OpenFile>) -> VfsResult<()> {
         // Stream handles hold no io_uring file; delete-on-close removes the
         // backing extended attribute, never the base file.
-        if let Some(sname) = open.inner_as_ref::<PosixInner>().and_then(|i| i.stream.clone()) {
+        if let Some(sname) = open
+            .inner_as_ref::<PosixInner>()
+            .and_then(|i| i.stream.clone())
+        {
             if open.delete_on_close || open.delete_pending {
                 let _ = xattr::remove(self.resolve(&open.path), stream_xattr(&sname));
             }
@@ -534,9 +586,13 @@ impl Vfs for PosixVfs {
         }
         if open.delete_on_close || open.delete_pending {
             if open.is_dir {
-                tokio_uring::fs::remove_dir(&open.path).await.map_err(map_io)?;
+                tokio_uring::fs::remove_dir(&open.path)
+                    .await
+                    .map_err(map_io)?;
             } else {
-                tokio_uring::fs::remove_file(&open.path).await.map_err(map_io)?;
+                tokio_uring::fs::remove_file(&open.path)
+                    .await
+                    .map_err(map_io)?;
             }
         }
         Ok(())
@@ -544,20 +600,24 @@ impl Vfs for PosixVfs {
 
     async fn mkdir(&self, rel: &str) -> VfsResult<()> {
         let p = self.resolve(rel);
-        tokio_uring::fs::create_dir(&p).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => VfsError::AlreadyExists,
-            std::io::ErrorKind::NotFound => VfsError::NotFound,
-            _ => VfsError::AccessDenied,
-        })
+        tokio_uring::fs::create_dir(&p)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => VfsError::AlreadyExists,
+                std::io::ErrorKind::NotFound => VfsError::NotFound,
+                _ => VfsError::AccessDenied,
+            })
     }
 
     async fn rmdir(&self, rel: &str) -> VfsResult<()> {
         let p = self.resolve(rel);
-        tokio_uring::fs::remove_dir(&p).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::DirectoryNotEmpty => VfsError::DirectoryNotEmpty,
-            std::io::ErrorKind::NotFound => VfsError::NotFound,
-            _ => VfsError::AccessDenied,
-        })
+        tokio_uring::fs::remove_dir(&p)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::DirectoryNotEmpty => VfsError::DirectoryNotEmpty,
+                std::io::ErrorKind::NotFound => VfsError::NotFound,
+                _ => VfsError::AccessDenied,
+            })
     }
 
     async fn check_dir(&self, rel: &str) -> VfsResult<()> {
@@ -584,10 +644,11 @@ impl Vfs for PosixVfs {
         let mut deleted_any = false;
         for entry in names.flatten() {
             let n = entry.file_name().to_string_lossy().into_owned();
-            if wildcard_match(&n.to_lowercase(), &pattern.to_lowercase())
-                && entry.path().is_file()
+            if wildcard_match(&n.to_lowercase(), &pattern.to_lowercase()) && entry.path().is_file()
             {
-                tokio_uring::fs::remove_file(entry.path()).await.map_err(map_io)?;
+                tokio_uring::fs::remove_file(entry.path())
+                    .await
+                    .map_err(map_io)?;
                 deleted_any = true;
             }
         }
@@ -610,7 +671,10 @@ impl Vfs for PosixVfs {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             let md = e.metadata().map_err(map_io)?;
-            out.push(Entry { name, meta: meta_of(&md) });
+            out.push(Entry {
+                name,
+                meta: meta_of(&md),
+            });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
@@ -680,7 +744,10 @@ impl Vfs for PosixVfs {
                     set_file_times(&p, a, w)?;
                 }
             }
-            SetOp::Rename { replace_if_exists: _, name } => {
+            SetOp::Rename {
+                replace_if_exists: _,
+                name,
+            } => {
                 let dest = self.resolve(name);
                 tokio_uring::fs::rename(&p, &dest).await.map_err(map_io)?;
             }
@@ -724,7 +791,11 @@ impl Vfs for PosixVfs {
             for n in names {
                 let n = n.to_string_lossy();
                 if let Some(sname) = n.strip_prefix(STREAM_XATTR_PREFIX) {
-                    let size = xattr::get(&p, n.as_ref()).ok().flatten().map(|v| v.len() as u64).unwrap_or(0);
+                    let size = xattr::get(&p, n.as_ref())
+                        .ok()
+                        .flatten()
+                        .map(|v| v.len() as u64)
+                        .unwrap_or(0);
                     out.push((format!(":{sname}:$DATA"), size));
                 }
             }
@@ -764,7 +835,10 @@ mod tests {
                 .await
                 .expect("open existing file");
             // The exact call that used to fail during getattrib.
-            let meta = vfs.stat(&open.path).await.expect("stat by stored handle path");
+            let meta = vfs
+                .stat(&open.path)
+                .await
+                .expect("stat by stored handle path");
             assert_eq!(meta.eof, 6, "reported size matches file contents");
 
             std::fs::remove_dir_all(&dir).ok();
@@ -784,15 +858,31 @@ mod tests {
             let payload = b"[ZoneTransfer]\r\nZoneId=3\r\n";
             // OVERWRITE_IF (5), GENERIC_WRITE.
             let (mut s, _m, _a) = vfs
-                .create("host.txt:Zone.Identifier:$DATA", false, 0x4000_0000, 5, 0, 0)
+                .create(
+                    "host.txt:Zone.Identifier:$DATA",
+                    false,
+                    0x4000_0000,
+                    5,
+                    0,
+                    0,
+                )
                 .await
                 .expect("create stream");
-            vfs.write(&mut s, 0, payload, false).await.expect("write stream");
+            vfs.write(&mut s, 0, payload, false)
+                .await
+                .expect("write stream");
             vfs.close(s).await.unwrap();
 
             // FILE_OPEN (1), GENERIC_READ.
             let (mut s2, m2, _a) = vfs
-                .create("host.txt:Zone.Identifier:$DATA", false, 0x8000_0000, 1, 0, 0)
+                .create(
+                    "host.txt:Zone.Identifier:$DATA",
+                    false,
+                    0x8000_0000,
+                    1,
+                    0,
+                    0,
+                )
                 .await
                 .expect("open stream");
             assert_eq!(m2.eof, payload.len() as u64, "stream size reported");
@@ -802,7 +892,9 @@ mod tests {
 
             let streams = vfs.list_streams("host.txt").await.expect("list");
             assert!(
-                streams.iter().any(|(n, sz)| n == ":Zone.Identifier:$DATA" && *sz == payload.len() as u64),
+                streams
+                    .iter()
+                    .any(|(n, sz)| n == ":Zone.Identifier:$DATA" && *sz == payload.len() as u64),
                 "ADS enumerated: {streams:?}"
             );
             assert_eq!(

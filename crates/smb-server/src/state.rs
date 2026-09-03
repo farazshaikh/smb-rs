@@ -161,7 +161,12 @@ impl LockManager {
             return false;
         }
         for &(off, len, excl) in ranges {
-            list.push(HeldLock { offset: off, length: len, exclusive: excl, owner });
+            list.push(HeldLock {
+                offset: off,
+                length: len,
+                exclusive: excl,
+                owner,
+            });
         }
         true
     }
@@ -171,16 +176,22 @@ impl LockManager {
     /// exclusive lock held by a different open.
     pub fn write_conflict(&self, path: &str, off: u64, len: u64, owner: LockOwner) -> bool {
         let held = self.held.lock().unwrap();
-        let Some(list) = held.get(path) else { return false };
-        list.iter().any(|h| overlaps(h, off, len) && (!h.exclusive || h.owner != owner))
+        let Some(list) = held.get(path) else {
+            return false;
+        };
+        list.iter()
+            .any(|h| overlaps(h, off, len) && (!h.exclusive || h.owner != owner))
     }
 
     /// A read overlaps a conflicting lock only when another open holds an
     /// exclusive lock on the range.
     pub fn read_conflict(&self, path: &str, off: u64, len: u64, owner: LockOwner) -> bool {
         let held = self.held.lock().unwrap();
-        let Some(list) = held.get(path) else { return false };
-        list.iter().any(|h| overlaps(h, off, len) && h.exclusive && h.owner != owner)
+        let Some(list) = held.get(path) else {
+            return false;
+        };
+        list.iter()
+            .any(|h| overlaps(h, off, len) && h.exclusive && h.owner != owner)
     }
 
     /// Release specific `(offset, length)` ranges held by `owner`.
@@ -249,7 +260,9 @@ pub struct ShareModeTable {
 impl ShareModeTable {
     /// Create an empty table.
     pub fn new() -> Self {
-        Self { opens: std::sync::Mutex::new(HashMap::new()) }
+        Self {
+            opens: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Record a new open if it is compatible with every existing open on the
@@ -263,7 +276,11 @@ impl ShareModeTable {
             }
             return false;
         }
-        list.push(OpenMode { access, share, owner });
+        list.push(OpenMode {
+            access,
+            share,
+            owner,
+        });
         true
     }
 
@@ -466,7 +483,9 @@ pub struct OplockTable {
 impl OplockTable {
     /// Create an empty table.
     pub fn new() -> Self {
-        Self { held: std::sync::Mutex::new(HashMap::new()) }
+        Self {
+            held: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Grant an exclusive oplock on `path` if none is held.
@@ -496,7 +515,10 @@ impl OplockTable {
 
     /// Drop every oplock held by any open of `session_id`.
     pub fn release_session(&self, session_id: u64) {
-        self.held.lock().unwrap().retain(|_, h| h.session_id != session_id);
+        self.held
+            .lock()
+            .unwrap()
+            .retain(|_, h| h.session_id != session_id);
     }
 }
 
@@ -824,14 +846,26 @@ impl DurableEntry {
             share_access: 0,
             create_options: self.options,
             is_dir: self.is_dir,
-            flags: if self.persistent { DHANDLE_FLAG_PERSISTENT } else { 0 },
-            match_guid: if self.create_guid == [0u8; 16] { None } else { Some(self.create_guid) },
+            flags: if self.persistent {
+                DHANDLE_FLAG_PERSISTENT
+            } else {
+                0
+            },
+            match_guid: if self.create_guid == [0u8; 16] {
+                None
+            } else {
+                Some(self.create_guid)
+            },
             owner_node: String::new(),
             lease_key: self.lease_key,
             lease_state: self.lease_state,
             client_guid: self.client_guid,
             timeout_ms: self.timeout as u64,
-            deadline_ms: if self.persistent { 0 } else { now_ms + self.timeout as u64 },
+            deadline_ms: if self.persistent {
+                0
+            } else {
+                now_ms + self.timeout as u64
+            },
             delete_on_close: false,
         }
     }
@@ -868,7 +902,9 @@ pub struct SessionTable {
 impl SessionTable {
     /// Create an empty table.
     pub fn new() -> Self {
-        Self { sessions: std::sync::Mutex::new(HashMap::new()) }
+        Self {
+            sessions: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Register or refresh an established session.
@@ -886,7 +922,6 @@ impl SessionTable {
         self.sessions.lock().unwrap().remove(&id);
     }
 }
-
 
 /// Windows share-mode access bits ([MS-SMB2] §2.2.13).
 mod amask {
@@ -908,10 +943,17 @@ mod share {
 }
 
 fn wants_read(access: u32) -> bool {
-    access & (amask::FILE_READ_DATA | amask::FILE_EXECUTE | amask::GENERIC_READ | amask::GENERIC_ALL) != 0
+    access
+        & (amask::FILE_READ_DATA | amask::FILE_EXECUTE | amask::GENERIC_READ | amask::GENERIC_ALL)
+        != 0
 }
 fn wants_write(access: u32) -> bool {
-    access & (amask::FILE_WRITE_DATA | amask::FILE_APPEND_DATA | amask::GENERIC_WRITE | amask::GENERIC_ALL) != 0
+    access
+        & (amask::FILE_WRITE_DATA
+            | amask::FILE_APPEND_DATA
+            | amask::GENERIC_WRITE
+            | amask::GENERIC_ALL)
+        != 0
 }
 fn wants_delete(access: u32) -> bool {
     access & (amask::DELETE | amask::GENERIC_ALL) != 0
@@ -1071,8 +1113,14 @@ mod lock_tests {
     fn shared_locks_coexist_but_block_exclusive() {
         let m = LockManager::new();
         assert!(m.try_acquire("f", &[(0, 10, false)], owner(1)));
-        assert!(m.try_acquire("f", &[(0, 10, false)], owner(2)), "shared+shared ok");
-        assert!(!m.try_acquire("f", &[(0, 10, true)], owner(3)), "shared blocks exclusive");
+        assert!(
+            m.try_acquire("f", &[(0, 10, false)], owner(2)),
+            "shared+shared ok"
+        );
+        assert!(
+            !m.try_acquire("f", &[(0, 10, true)], owner(3)),
+            "shared blocks exclusive"
+        );
     }
 
     #[test]
@@ -1081,8 +1129,14 @@ mod lock_tests {
         assert!(m.try_acquire("f", &[(0, 10, true)], owner(1)));
         // An exclusive lock conflicts with an overlapping lock held by the same
         // open ([MS-FSA] §2.1.5.9); a non-overlapping range still succeeds.
-        assert!(!m.try_acquire("f", &[(0, 10, true)], owner(1)), "overlapping exclusive conflicts");
-        assert!(m.try_acquire("f", &[(10, 10, true)], owner(1)), "adjacent range ok");
+        assert!(
+            !m.try_acquire("f", &[(0, 10, true)], owner(1)),
+            "overlapping exclusive conflicts"
+        );
+        assert!(
+            m.try_acquire("f", &[(10, 10, true)], owner(1)),
+            "adjacent range ok"
+        );
     }
 
     #[test]
@@ -1091,7 +1145,10 @@ mod lock_tests {
         assert!(m.try_acquire("f", &[(0, 10, true)], owner(1)));
         assert!(!m.try_acquire("f", &[(0, 10, true)], owner(2)));
         m.release("f", &[(0, 10)], owner(1));
-        assert!(m.try_acquire("f", &[(0, 10, true)], owner(2)), "range freed");
+        assert!(
+            m.try_acquire("f", &[(0, 10, true)], owner(2)),
+            "range freed"
+        );
     }
 
     #[test]
@@ -1132,8 +1189,14 @@ mod share_mode_tests {
     #[test]
     fn exclusive_open_blocks_everyone() {
         let t = ShareModeTable::new();
-        assert!(t.try_open("f", GENERIC_READ, 0, (1, [1; 16])), "first open ok");
-        assert!(!t.try_open("f", GENERIC_READ, SHARE_READ, (1, [2; 16])), "no-share open blocks");
+        assert!(
+            t.try_open("f", GENERIC_READ, 0, (1, [1; 16])),
+            "first open ok"
+        );
+        assert!(
+            !t.try_open("f", GENERIC_READ, SHARE_READ, (1, [2; 16])),
+            "no-share open blocks"
+        );
     }
 
     #[test]
@@ -1142,7 +1205,10 @@ mod share_mode_tests {
         assert!(t.try_open("f", GENERIC_WRITE, 0, (1, [1; 16])));
         assert!(!t.try_open("f", GENERIC_READ, SHARE_READ, (1, [2; 16])));
         t.close("f", (1, [1; 16]));
-        assert!(t.try_open("f", GENERIC_READ, SHARE_READ, (1, [2; 16])), "freed after close");
+        assert!(
+            t.try_open("f", GENERIC_READ, SHARE_READ, (1, [2; 16])),
+            "freed after close"
+        );
     }
 
     #[test]
@@ -1163,7 +1229,11 @@ mod share_mode_tests {
             },
         );
         let e = t.get(7).expect("session present for binding");
-        assert_eq!(e.signing_key, Some([8u8; 16]), "bound channel reuses signing key");
+        assert_eq!(
+            e.signing_key,
+            Some([8u8; 16]),
+            "bound channel reuses signing key"
+        );
         assert_eq!(e.dialect, Some(0x0311));
         t.remove(7);
         assert!(t.get(7).is_none(), "forgotten on logoff");

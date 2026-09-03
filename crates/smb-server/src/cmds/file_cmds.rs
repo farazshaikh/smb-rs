@@ -6,10 +6,10 @@ use smb_proto_smb1::consts;
 use smb_proto_smb1::create as create_codec;
 use smb_proto_smb1::header::RespBody;
 use smb_proto_smb1::misc;
-use smb_proto_smb1::rw::{self, WriteReq, ReadReq};
+use smb_proto_smb1::rw::{self, ReadReq, WriteReq};
 use smb_vfs::{OpenFile, SetOp};
 
-use crate::cmds::{share_vfs, IoCtx};
+use crate::cmds::{IoCtx, share_vfs};
 use crate::dispatch::ReqView;
 use crate::state::next_fid;
 
@@ -21,8 +21,17 @@ pub async fn query_disk(
 ) -> Result<Status, Status> {
     let vfs = share_vfs(io, req.hdr.tid);
     let (total, free, bps, spc) = vfs.query_disk().await.map_err(vfs_err)?;
-    let info = misc::QueryDiskInfo { total_units: total, free_units: free, bps, spc };
-    bodies.push(RespBody::new(consts::COM_QUERY_INFORMATION_DISK, info.encode(), Vec::new()));
+    let info = misc::QueryDiskInfo {
+        total_units: total,
+        free_units: free,
+        bps,
+        spc,
+    };
+    bodies.push(RespBody::new(
+        consts::COM_QUERY_INFORMATION_DISK,
+        info.encode(),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -41,9 +50,13 @@ pub async fn nt_create(
     if is_ipc {
         return Err(Status::OBJECT_NAME_NOT_FOUND);
     }
-    let creq =
-        create_codec::NtCreateReq::parse(req.words, req.data, req.unicode(), req.bc_off_abs + smb_proto_smb1::consts::WORD_LEN)
-            .map_err(|_| Status::INVALID_PARAMETER)?;
+    let creq = create_codec::NtCreateReq::parse(
+        req.words,
+        req.data,
+        req.unicode(),
+        req.bc_off_abs + smb_proto_smb1::consts::WORD_LEN,
+    )
+    .map_err(|_| Status::INVALID_PARAMETER)?;
 
     let base_rel = if creq.root_fid != 0 && creq.root_fid <= u16::MAX as u32 {
         io.conn
@@ -56,9 +69,12 @@ pub async fn nt_create(
     };
     let rel = join_rel(&base_rel, &creq.name);
 
-    let want_dir = creq.create_options & smb_proto_smb1::consts::create_options::FILE_DIRECTORY_FILE != 0;
-    let no_dir = creq.create_options & smb_proto_smb1::consts::create_options::FILE_NON_DIRECTORY_FILE != 0;
-    let delete_on_close = creq.create_options & smb_proto_smb1::consts::create_options::FILE_DELETE_ON_CLOSE != 0;
+    let want_dir =
+        creq.create_options & smb_proto_smb1::consts::create_options::FILE_DIRECTORY_FILE != 0;
+    let no_dir =
+        creq.create_options & smb_proto_smb1::consts::create_options::FILE_NON_DIRECTORY_FILE != 0;
+    let delete_on_close =
+        creq.create_options & smb_proto_smb1::consts::create_options::FILE_DELETE_ON_CLOSE != 0;
 
     let vfs = share_vfs(io, req.hdr.tid);
     let (mut open, meta, action) = vfs
@@ -90,7 +106,12 @@ pub async fn nt_create(
         meta.eof,
         meta.is_dir,
     );
-    tracing::debug!(fid = format!("{:#06x}", fid), eof = meta.eof, dir = meta.is_dir, "nt_create");
+    tracing::debug!(
+        fid = format!("{:#06x}", fid),
+        eof = meta.eof,
+        dir = meta.is_dir,
+        "nt_create"
+    );
     metrics::counter!("smb_creates_total").increment(1);
     bodies.push(RespBody::new(consts::COM_NT_CREATE_ANDX, body, Vec::new()));
     Ok(Status::SUCCESS)
@@ -103,7 +124,12 @@ pub async fn read_andx(
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
     let rr = ReadReq::parse(req.words).map_err(|_| Status::INVALID_PARAMETER)?;
-    tracing::trace!(fid = format!("{:#06x}", rr.fid), offset = rr.offset, want = rr.max_count, "read_andx");
+    tracing::trace!(
+        fid = format!("{:#06x}", rr.fid),
+        offset = rr.offset,
+        want = rr.max_count,
+        "read_andx"
+    );
     let vfs = share_vfs(io, req.hdr.tid);
 
     let Some(h) = io.conn.handles.get_mut(&rr.fid).map(|b| &mut **b) else {
@@ -112,7 +138,10 @@ pub async fn read_andx(
     if h.is_dir || !h.can_read {
         return Err(Status::ACCESS_DENIED);
     }
-    let data = vfs.read(h, rr.offset, rr.max_count).await.map_err(vfs_err)?;
+    let data = vfs
+        .read(h, rr.offset, rr.max_count)
+        .await
+        .map_err(vfs_err)?;
     metrics::counter!("smb_bytes_read_total").increment(data.len() as u64);
 
     let (params, bytes) = rw::read_response(&data);
@@ -135,9 +164,16 @@ pub async fn write_andx(
     if h.is_dir || !h.can_write {
         return Err(Status::ACCESS_DENIED);
     }
-    let written = vfs.write(h, wr.offset, &wr.payload, wr.write_through).await.map_err(vfs_err)?;
+    let written = vfs
+        .write(h, wr.offset, &wr.payload, wr.write_through)
+        .await
+        .map_err(vfs_err)?;
 
-    bodies.push(RespBody::new(consts::COM_WRITE_ANDX, rw::write_response(written), Vec::new()));
+    bodies.push(RespBody::new(
+        consts::COM_WRITE_ANDX,
+        rw::write_response(written),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -158,7 +194,13 @@ pub async fn close(
         // Legacy UTIME field: seconds since 1970 in the low word.
         let ft = smb_proto::types::FileTime::from_unix(cr.mtime as i64, 0);
         let _ = vfs
-            .set_info_open(&mut h, &SetOp::Basic { access: None, write: Some(ft) })
+            .set_info_open(
+                &mut h,
+                &SetOp::Basic {
+                    access: None,
+                    write: Some(ft),
+                },
+            )
             .await;
     }
     vfs.close(h).await.map_err(vfs_err)?;
@@ -200,7 +242,11 @@ pub async fn seek(
         return Err(Status::INVALID_HANDLE);
     };
     let pos = vfs.seek(h, sr.mode, sr.offset).await.map_err(vfs_err)?;
-    bodies.push(RespBody::new(consts::COM_SEEK, misc::SeekReq::build_response(pos), Vec::new()));
+    bodies.push(RespBody::new(
+        consts::COM_SEEK,
+        misc::SeekReq::build_response(pos),
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -211,7 +257,11 @@ pub async fn locking(
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
     let cmd = req.hdr.command;
-    bodies.push(RespBody::new(cmd, vec![smb_proto_smb1::consts::ANDX_NONE, 0, 0, 0], Vec::new()));
+    bodies.push(RespBody::new(
+        cmd,
+        vec![smb_proto_smb1::consts::ANDX_NONE, 0, 0, 0],
+        Vec::new(),
+    ));
     Ok(Status::SUCCESS)
 }
 
@@ -230,7 +280,6 @@ pub(crate) fn vfs_err(e: smb_vfs::VfsError) -> Status {
         E::Io(_) => Status::UNSUCCESSFUL,
     }
 }
-
 
 fn join_rel(base: &str, name: &str) -> String {
     let name = name.trim_start_matches(['\\', '/']);

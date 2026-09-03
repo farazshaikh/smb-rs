@@ -54,7 +54,9 @@ fn lz77_compress(data: &[u8]) -> Option<Vec<u8>> {
 fn lz77_decompress(data: &[u8]) -> Option<Vec<u8>> {
     let input = data.to_vec();
     std::panic::catch_unwind(move || {
-        xpress_rs::lz77::LZ77Decompressor::new(input).decompress().ok()
+        xpress_rs::lz77::LZ77Decompressor::new(input)
+            .decompress()
+            .ok()
     })
     .ok()
     .flatten()
@@ -104,7 +106,11 @@ pub fn build_compression_caps(algos: &[u16], chained: bool) -> Vec<u8> {
 /// client's order so the negotiate response echoes the requested CompressionIds
 /// when all are supported ([MS-SMB2] §3.3.5.4).
 pub fn negotiate_algos(client: &[u16]) -> Vec<u16> {
-    client.iter().copied().filter(|a| SUPPORTED.contains(a)).collect()
+    client
+        .iter()
+        .copied()
+        .filter(|a| SUPPORTED.contains(a))
+        .collect()
 }
 
 /// Decompress a whole `\xFCSMB` COMPRESSION_TRANSFORM frame into the original
@@ -170,8 +176,7 @@ fn decompress_chained(frame: &[u8]) -> Option<Vec<u8>> {
             }
             algo::LZNT1 => {
                 // Length includes the leading 4-byte OriginalPayloadSize field.
-                let orig_payload =
-                    u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?) as usize;
+                let orig_payload = u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?) as usize;
                 let before = out.len();
                 lznt1::decompress(&payload[4..], &mut out).ok()?;
                 if out.len() - before != orig_payload {
@@ -180,8 +185,7 @@ fn decompress_chained(frame: &[u8]) -> Option<Vec<u8>> {
             }
             algo::LZ77 => {
                 // Length includes the leading 4-byte OriginalPayloadSize field.
-                let orig_payload =
-                    u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?) as usize;
+                let orig_payload = u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?) as usize;
                 let data = lz77_decompress(payload.get(4..)?)?;
                 if data.len() != orig_payload {
                     return None;
@@ -415,7 +419,10 @@ mod tests {
         let client = [algo::LZ77, algo::LZNT1, algo::LZ77_HUFFMAN];
         assert_eq!(negotiate_algos(&client), vec![algo::LZ77, algo::LZNT1]);
         let caps = build_compression_caps(&[algo::LZNT1, algo::PATTERN_V1], true);
-        assert_eq!(parse_compression_caps(&caps), vec![algo::LZNT1, algo::PATTERN_V1]);
+        assert_eq!(
+            parse_compression_caps(&caps),
+            vec![algo::LZNT1, algo::PATTERN_V1]
+        );
         assert_eq!(parse_compression_flags(&caps), CAP_FLAG_CHAINED);
     }
 

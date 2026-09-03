@@ -6,9 +6,9 @@ use smb_proto_smb1::header::RespBody;
 use smb_proto_smb1::query;
 use smb_proto_smb1::trans2 as t2;
 
-use crate::cmds::{share_vfs, IoCtx};
-use crate::state::SearchCtx;
+use crate::cmds::{IoCtx, share_vfs};
 use crate::dispatch::ReqView;
+use crate::state::SearchCtx;
 
 /// Route a TRANS2 request to its subcommand handler.
 pub async fn dispatch_trans2(
@@ -26,8 +26,11 @@ pub async fn dispatch_trans2(
         return Err(Status::INVALID_PARAMETER);
     };
 
-
-    tracing::trace!(subcmd = format!("{:#06x}", t.subcmd), unicode = t.unicode, "trans2 dispatch");
+    tracing::trace!(
+        subcmd = format!("{:#06x}", t.subcmd),
+        unicode = t.unicode,
+        "trans2 dispatch"
+    );
     let (params, data) = match t.subcmd {
         t2::subcmd::FIND_FIRST2 => find_first2(io, req.hdr.tid, &t).await?,
         t2::subcmd::FIND_NEXT2 => find_next2(io, &t).await?,
@@ -91,8 +94,11 @@ async fn find_first2(
                     is_dir: m.is_dir,
                 },
             };
-            let (data_buf, last) =
-                smb_proto_smb1::find::encode_entries(std::slice::from_ref(&entry), level, t.unicode);
+            let (data_buf, last) = smb_proto_smb1::find::encode_entries(
+                std::slice::from_ref(&entry),
+                level,
+                t.unicode,
+            );
             return Ok(find_params(sid(), 1, true, last, data_buf));
         }
     }
@@ -100,9 +106,7 @@ async fn find_first2(
     let entries = vfs.list(&dir_rel).await.map_err(vfs_err)?;
     let matched: Vec<smb_vfs::Entry> = entries
         .into_iter()
-        .filter(|e| {
-            crate::cmds::wildcard(&e.name.to_lowercase(), &fname_pat.to_lowercase())
-        })
+        .filter(|e| crate::cmds::wildcard(&e.name.to_lowercase(), &fname_pat.to_lowercase()))
         .collect();
     let end_of_search = true; // full result set returned in one batch
 
@@ -122,7 +126,12 @@ async fn find_first2(
         .map(|e| smb_proto_smb1::find::FindEntry {
             name: e.name,
             meta: smb_proto_smb1::query::QueryMeta {
-                times: [e.meta.times[0].0, e.meta.times[1].0, e.meta.times[2].0, e.meta.times[3].0],
+                times: [
+                    e.meta.times[0].0,
+                    e.meta.times[1].0,
+                    e.meta.times[2].0,
+                    e.meta.times[3].0,
+                ],
                 attrs: e.meta.attrs,
                 eof: e.meta.eof,
                 alloc: e.meta.alloc,
@@ -132,7 +141,13 @@ async fn find_first2(
         .collect();
     let (data_buf, last_off) =
         smb_proto_smb1::find::encode_entries(&find_entries, level, t.unicode);
-    Ok(find_params(sid_v, returned.len() as u16, end_of_search, last_off, data_buf))
+    Ok(find_params(
+        sid_v,
+        returned.len() as u16,
+        end_of_search,
+        last_off,
+        data_buf,
+    ))
 }
 
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // TRANS2 param block offsets
@@ -171,7 +186,10 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
     let mut out: Vec<smb_proto_smb1::find::FindEntry> = Vec::new();
     while out.len() < 64 {
         let Some(name) = ctx.queue.next() else { break };
-        let m = match vfs.stat(&format!("{}\\{}", ctx.base_dir.display(), name)).await {
+        let m = match vfs
+            .stat(&format!("{}\\{}", ctx.base_dir.display(), name))
+            .await
+        {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -200,21 +218,22 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
         false
     };
     let _ = eos_final;
-    let (data_buf, last_off) =
-        smb_proto_smb1::find::encode_entries(&out, lvl, t.unicode);
+    let (data_buf, last_off) = smb_proto_smb1::find::encode_entries(&out, lvl, t.unicode);
     let has_more = !io.conn.searches.contains_key(&sid_v);
     let _ = has_more;
-    Ok(find_params(sid_v, out.len() as u16, true, last_off, data_buf))
+    Ok(find_params(
+        sid_v,
+        out.len() as u16,
+        true,
+        last_off,
+        data_buf,
+    ))
 }
 
 // ---------------- QUERY_FS / PATH / FILE ----------------
 
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // QUERY_FS_INFORMATION wire layout
-fn query_fs(
-    io: &IoCtx<'_>,
-    tid: u16,
-    t: &t2::Trans2Req,
-) -> Result<(Vec<u8>, Vec<u8>), Status> {
+fn query_fs(io: &IoCtx<'_>, tid: u16, t: &t2::Trans2Req) -> Result<(Vec<u8>, Vec<u8>), Status> {
     if t.params.len() < 2 {
         return Err(Status::INVALID_PARAMETER);
     }
@@ -317,10 +336,7 @@ pub(crate) async fn query_file(
 
 /// SET_FILE_INFORMATION by FID.
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SET_FILE_INFORMATION param offsets
-async fn set_file(
-    io: &mut IoCtx<'_>,
-    t: &t2::Trans2Req,
-) -> Result<(Vec<u8>, Vec<u8>), Status> {
+async fn set_file(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, Vec<u8>), Status> {
     if t.params.len() < 4 || t.data.is_empty() {
         return Err(Status::INVALID_PARAMETER);
     }
@@ -377,9 +393,9 @@ fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_vfs::SetOp, Status> {
         }
         0x103 | 0x100B => Ok(smb_vfs::SetOp::Allocation(r64(0))),
         0x104 | 0x100C => Ok(smb_vfs::SetOp::EndOfFile(r64(0))),
-        0x102 | 0x100D => {
-            Ok(smb_vfs::SetOp::Disposition { delete: data.first().copied().unwrap_or(0) != 0 })
-        }
+        0x102 | 0x100D => Ok(smb_vfs::SetOp::Disposition {
+            delete: data.first().copied().unwrap_or(0) != 0,
+        }),
         _ => Err(Status::INVALID_PARAMETER),
     }
 }
@@ -387,7 +403,11 @@ fn decode_set_op(level: u16, data: &[u8]) -> Result<smb_vfs::SetOp, Status> {
 // ---- helpers ----
 
 fn share_name<'a>(io: &'a IoCtx<'_>, tid: u16) -> Result<&'a str, Status> {
-    io.conn.trees.get(&tid).map(String::as_str).ok_or(Status::INVALID_HANDLE)
+    io.conn
+        .trees
+        .get(&tid)
+        .map(String::as_str)
+        .ok_or(Status::INVALID_HANDLE)
 }
 
 fn tid_placeholder() -> u16 {
@@ -406,8 +426,6 @@ fn vfs_err(e: smb_vfs::VfsError) -> Status {
         E::Io(_) => Status::UNSUCCESSFUL,
     }
 }
-
-
 
 /// Convert storage metadata into the neutral query-payload snapshot.
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // FileMeta.times index order
