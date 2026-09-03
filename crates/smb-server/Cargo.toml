@@ -1,6 +1,6 @@
 [package]
 name = "smb-server"
-description = "rustsmb — SMB1 file server binary wiring transport, protocol and POSIX backend"
+description = "rustsmb — high-performance SMB1/2/3 file server binary wiring transport, protocol and POSIX backend"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
