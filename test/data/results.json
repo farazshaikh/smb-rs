@@ -1,6 +1,20 @@
 {
-  "generated_epoch": 1788414945,
+  "generated_epoch": 1788415279,
   "runs": [
+    {
+      "run_id": "1788415279-a259ec686c2a",
+      "timestamp_epoch": 1788415279,
+      "commit": "a259ec686c2a",
+      "server_version": "0.2.0",
+      "host": "127.0.0.1",
+      "total": 34,
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0,
+      "errored": 0,
+      "duration_ms": 3444,
+      "pass_rate": 1.0
+    },
     {
       "run_id": "1788414945-355a5e62ec6b",
       "timestamp_epoch": 1788414945,
@@ -87,9 +101,9 @@
     }
   ],
   "latest": {
-    "run_id": "1788414945-355a5e62ec6b",
-    "timestamp_epoch": 1788414945,
-    "commit": "355a5e62ec6b80dfed5049e464b32afa8a7aa6d6",
+    "run_id": "1788415279-a259ec686c2a",
+    "timestamp_epoch": 1788415279,
+    "commit": "a259ec686c2a477a3f0efbb7454d9ee587233129",
     "server_version": "0.2.0",
     "host": "127.0.0.1",
     "total": 34,
@@ -97,7 +111,7 @@
     "failed": 0,
     "skipped": 0,
     "errored": 0,
-    "duration_ms": 3482,
+    "duration_ms": 3444,
     "cases": [
       {
         "id": "negotiate.default",
@@ -105,7 +119,7 @@
         "spec": "MS-SMB2 3.1.1 §2.2.3",
         "about": "Connects with the highest common dialect and reaches the share",
         "status": "pass",
-        "duration_ms": 102,
+        "duration_ms": 97,
         "message": "",
         "metrics": {}
       },
@@ -115,7 +129,7 @@
         "spec": "MS-SMB2 §2.2.3.1.1",
         "about": "Pins dialect 3.1.1 and verifies it is negotiated",
         "status": "pass",
-        "duration_ms": 98,
+        "duration_ms": 102,
         "message": "",
         "metrics": {}
       },
@@ -125,7 +139,7 @@
         "spec": "MS-SMB2 §2.2.3",
         "about": "Pins dialect 2.1.0 and verifies it is negotiated",
         "status": "pass",
-        "duration_ms": 99,
+        "duration_ms": 98,
         "message": "",
         "metrics": {}
       },
@@ -145,7 +159,7 @@
         "spec": "MS-SMB2 §2.2.5 / MS-NLMP",
         "about": "SPNEGO/NTLMSSP session setup reaches the share",
         "status": "pass",
-        "duration_ms": 102,
+        "duration_ms": 100,
         "message": "",
         "metrics": {}
       },
@@ -155,7 +169,7 @@
         "spec": "MS-SMB2 §3.2.5.3",
         "about": "Signed session (require_signing) completes an op",
         "status": "pass",
-        "duration_ms": 102,
+        "duration_ms": 97,
         "message": "",
         "metrics": {}
       },
@@ -175,7 +189,7 @@
         "spec": "MS-SMB2 §2.2.9/10",
         "about": "TREE_CONNECT to the configured share succeeds",
         "status": "pass",
-        "duration_ms": 103,
+        "duration_ms": 98,
         "message": "",
         "metrics": {}
       },
@@ -185,7 +199,7 @@
         "spec": "MS-SMB2 §2.2.13",
         "about": "FILE_CREATE makes a new file (delete-on-close cleans up)",
         "status": "pass",
-        "duration_ms": 102,
+        "duration_ms": 103,
         "message": "",
         "metrics": {}
       },
@@ -225,7 +239,7 @@
         "spec": "MS-SMB2 §2.2.19/21",
         "about": "Small write then read returns identical bytes",
         "status": "pass",
-        "duration_ms": 97,
+        "duration_ms": 102,
         "message": "",
         "metrics": {}
       },
@@ -235,7 +249,7 @@
         "spec": "MS-SMB2 §2.2.19",
         "about": "Write at a non-zero offset reads back at that offset",
         "status": "pass",
-        "duration_ms": 99,
+        "duration_ms": 101,
         "message": "",
         "metrics": {}
       },
@@ -245,7 +259,7 @@
         "spec": "MS-SMB2 §2.2.3.1.1 CAP_LARGE_MTU",
         "about": "256 KiB single-op write+read (multi-credit) preserves data",
         "status": "pass",
-        "duration_ms": 115,
+        "duration_ms": 113,
         "message": "",
         "metrics": {
           "bytes": 524288.0
@@ -257,7 +271,7 @@
         "spec": "MS-SMB2 §2.2.33/34",
         "about": "Created files appear in a directory enumeration",
         "status": "pass",
-        "duration_ms": 106,
+        "duration_ms": 102,
         "message": "",
         "metrics": {}
       },
@@ -267,7 +281,7 @@
         "spec": "MS-SMB2 §2.2.33.1 / MS-CIFS wildcard",
         "about": "A wildcard pattern only returns matching names",
         "status": "pass",
-        "duration_ms": 106,
+        "duration_ms": 103,
         "message": "",
         "metrics": {}
       },
@@ -287,7 +301,7 @@
         "spec": "MS-SMB2 §3.3.5.15.4",
         "about": "FSCTL_QUERY_NETWORK_INTERFACE_INFO returns interface data",
         "status": "pass",
-        "duration_ms": 98,
+        "duration_ms": 101,
         "message": "",
         "metrics": {}
       },
@@ -297,7 +311,7 @@
         "spec": "MS-FSCC §2.4.41 FileStandardInformation",
         "about": "FileStandardInformation reports the written EOF",
         "status": "pass",
-        "duration_ms": 99,
+        "duration_ms": 101,
         "message": "",
         "metrics": {}
       },
@@ -307,7 +321,7 @@
         "spec": "MS-FSCC §2.4.2 FileAllInformation",
         "about": "FileAllInformation returns a populated buffer",
         "status": "pass",
-        "duration_ms": 100,
+        "duration_ms": 97,
         "message": "",
         "metrics": {}
       },
@@ -317,7 +331,7 @@
         "spec": "MS-FSCC §2.4.34 FileNetworkOpenInformation",
         "about": "FileNetworkOpenInformation returns a populated buffer",
         "status": "pass",
-        "duration_ms": 103,
+        "duration_ms": 106,
         "message": "",
         "metrics": {}
       },
@@ -327,7 +341,7 @@
         "spec": "MS-FSCC §2.4.13 FileEndOfFileInformation",
         "about": "Setting EOF resizes the file (verified via query)",
         "status": "pass",
-        "duration_ms": 105,
+        "duration_ms": 100,
         "message": "",
         "metrics": {}
       },
@@ -337,7 +351,7 @@
         "spec": "MS-FSCC §2.4.37 FileRenameInformation",
         "about": "Rename moves the file to the new name",
         "status": "pass",
-        "duration_ms": 106,
+        "duration_ms": 98,
         "message": "",
         "metrics": {}
       },
@@ -347,7 +361,7 @@
         "spec": "MS-FSCC §2.4.11 FileDispositionInformation",
         "about": "Delete-on-close disposition removes the file",
         "status": "pass",
-        "duration_ms": 104,
+        "duration_ms": 103,
         "message": "",
         "metrics": {}
       },
@@ -357,7 +371,7 @@
         "spec": "MS-SMB2 §2.2.26 / §3.3.5.14",
         "about": "An exclusive lock blocks a conflicting lock until released",
         "status": "pass",
-        "duration_ms": 110,
+        "duration_ms": 102,
         "message": "",
         "metrics": {}
       },
@@ -367,7 +381,7 @@
         "spec": "MS-SMB2 §2.2.26",
         "about": "Lock then unlock a range on one handle",
         "status": "pass",
-        "duration_ms": 101,
+        "duration_ms": 100,
         "message": "",
         "metrics": {}
       },
@@ -387,7 +401,7 @@
         "spec": "MS-SMB2 §2.2.26 / MS-FSA §2.1.5.9",
         "about": "Exclusive locks on disjoint ranges of the same file do not conflict",
         "status": "pass",
-        "duration_ms": 105,
+        "duration_ms": 106,
         "message": "",
         "metrics": {}
       },
@@ -397,7 +411,7 @@
         "spec": "MS-FSA §2.1.5.9 (read lock forbids overlapping writes)",
         "about": "A shared (read) lock blocks a conflicting write by another open until released",
         "status": "pass",
-        "duration_ms": 101,
+        "duration_ms": 104,
         "message": "",
         "metrics": {}
       },
@@ -407,7 +421,7 @@
         "spec": "MS-FSA §2.1.5.9 (exclusive lock forbids other reads)",
         "about": "An exclusive lock blocks a read by another open until released",
         "status": "pass",
-        "duration_ms": 102,
+        "duration_ms": 106,
         "message": "",
         "metrics": {}
       },
@@ -417,7 +431,7 @@
         "spec": "MS-FSCC §2.6 named streams",
         "about": "Write and read back a named alternate data stream",
         "status": "pass",
-        "duration_ms": 105,
+        "duration_ms": 100,
         "message": "",
         "metrics": {}
       },
@@ -427,7 +441,7 @@
         "spec": "MS-FSCC §2.4.40 FileStreamInformation",
         "about": "Stream enumeration lists the named stream",
         "status": "pass",
-        "duration_ms": 104,
+        "duration_ms": 98,
         "message": "",
         "metrics": {}
       },
@@ -437,7 +451,7 @@
         "spec": "MS-FSCC §2.4.6 / MS-DTYP §2.4.6",
         "about": "Query owner/group/DACL returns a security descriptor",
         "status": "pass",
-        "duration_ms": 101,
+        "duration_ms": 99,
         "message": "",
         "metrics": {}
       }

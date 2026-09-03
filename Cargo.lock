@@ -1515,6 +1515,7 @@ version = "0.2.0"
 name = "smb-server-testsuite"
 version = "0.2.0"
 dependencies = [
+ "clap",
  "serde",
  "serde_json",
 ]
