@@ -137,7 +137,7 @@ Two ways to satisfy the lint — pick by the literal's nature:
   `--all-features`.
 - Protocol-affecting changes must keep the regression gate: SMB2Basic BVT 27/27,
   the home-grown conformance run 30/30, and the MS-SMB2 protocol sweep count
-  unchanged. See `session_summary_*.txt` and the test dashboard for the baseline.
+  unchanged. See `docs/session_summary_*.txt` and the test dashboard for the baseline.
 - Keep `cargo dylint --all -- --workspace` at **zero** magic-number findings
   (see §3).
 - Commit messages carry **no** model/AI attribution.

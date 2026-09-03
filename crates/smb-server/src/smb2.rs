@@ -767,7 +767,7 @@ fn tf_off_end(original_len: usize) -> usize {
 
 /// Route a request through the typestate pipeline (io::dispatch) and return the
 /// `(status, body)` the legacy framing still wraps. Used by commands migrated
-/// onto `io::Command` (typestate_plan.md Phases 2–3).
+/// onto `io::Command` (docs/typestate_plan.md Phases 2–3).
 /// How a typestate dispatch resolves for `process_single`: a body that still
 /// flows the common signing/sealing tail, a pre-framed async PDU to send
 /// verbatim (the STATUS_PENDING interim), or nothing at all.

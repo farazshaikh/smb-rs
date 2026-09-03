@@ -1,4 +1,4 @@
-//! Typestate request/response pipeline (see `typestate_plan.md`).
+//! Typestate request/response pipeline (see `docs/typestate_plan.md`).
 //!
 //! This is the live dispatch path: every SMB2 command the server answers is
 //! decoded into a typed request ([`SmbRequest`]), moved into its owning

@@ -76,8 +76,8 @@ status codes.
 A command-by-command status table (every SMB1/SMB2 opcode and FSCTL) lives
 in [docs/command_status.md](docs/command_status.md). Per-feature detail
 (spec section, status, unit/system tests, benchmarking, logging, metrics)
-lives in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)'s **Feature
-Matrix**.
+lives in [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)'s
+**Feature Matrix**.
 
 ### Roadmap
 
@@ -304,7 +304,7 @@ crates/
   stamping, chained NextCommand assembly.
 - **Path safety**: client paths are resolved inside the share root; `..`
   traversal and absolute escapes are refused.
-- **Honest status tracking**: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
+- **Honest status tracking**: [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)
   carries a per-feature matrix (spec section, status, unit/system tests,
   benchmarking, logging, metrics) that is kept current.
 
