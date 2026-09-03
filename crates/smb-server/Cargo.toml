@@ -5,6 +5,10 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 readme = "README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "rustsmb"
@@ -25,13 +29,13 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 clap.workspace = true
 smb-server-proto = { path = "../smb-server-proto" }
-smb-server-proto-smb2 = { path = "../smb-server-proto-smb2" }
-smb-server-proto-smb1 = { path = "../smb-server-proto-smb1" }
-smb-server-transport = { path = "../smb-server-transport" }
-smb-server-vfs = { path = "../smb-server-vfs" }
-smb-server-backend-posix = { path = "../smb-server-backend-posix" }
-smb-server-auth = { path = "../smb-server-auth", default-features = false }
-smb-server-handle-store = { path = "../smb-server-handle-store" }
+smb-server-proto-smb2 = { path = "../smb-server-proto-smb2", version = "0.2.0" }
+smb-server-proto-smb1 = { path = "../smb-server-proto-smb1", version = "0.2.0" }
+smb-server-transport = { path = "../smb-server-transport", version = "0.2.0" }
+smb-server-vfs = { path = "../smb-server-vfs", version = "0.2.0" }
+smb-server-backend-posix = { path = "../smb-server-backend-posix", version = "0.2.0" }
+smb-server-auth = { path = "../smb-server-auth", version = "0.2.0", default-features = false }
+smb-server-handle-store = { path = "../smb-server-handle-store", version = "0.2.0" }
 ms-ndr = "0.1.1"
 inotify.workspace = true
 futures-util.workspace = true

@@ -5,10 +5,14 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 readme = "README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-smb-server-proto = { path = "../smb-server-proto" }
-smb-server-vfs = { path = "../smb-server-vfs" }
+smb-server-proto = { path = "../smb-server-proto", version = "0.2.0" }
+smb-server-vfs = { path = "../smb-server-vfs", version = "0.2.0" }
 lznt1 = { workspace = true }
 xpress_rs = { workspace = true }
 

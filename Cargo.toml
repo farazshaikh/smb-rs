@@ -4,6 +4,9 @@ description = "Workspace meta-package for the smb-server-rs project"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [features]
 default = ["lib"]
@@ -39,6 +42,10 @@ members = [
 edition = "2024"
 version = "0.2.0"
 license = "MIT"
+repository = "https://github.com/farazshaikh/smb-server-rs"
+homepage = "https://farazshaikh.github.io/smb-server-rs/"
+keywords = ["smb", "cifs", "server", "protocol"]
+categories = ["network-programming", "filesystem"]
 
 # Workspace-wide lints. Crates opt in with `[lints]\nworkspace = true`.
 # Public items must be documented — an undocumented `pub` item is a hard error.

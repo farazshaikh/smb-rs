@@ -5,6 +5,10 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 readme = "README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["lib"]
@@ -14,8 +18,8 @@ lib = ["smb-server-csp/lib"]
 handrolled = ["smb-server-csp/handrolled"]
 
 [dependencies]
-smb-server-proto = { path = "../smb-server-proto" }
-smb-server-csp = { path = "../smb-server-csp", default-features = false }
+smb-server-proto = { path = "../smb-server-proto", version = "0.2.0" }
+smb-server-csp = { path = "../smb-server-csp", version = "0.2.0", default-features = false }
 
 [lints]
 workspace = true

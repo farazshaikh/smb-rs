@@ -5,6 +5,12 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 readme = "README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# Unused reserved scaffold (see README.md) -- not published.
+publish = false
 
 [dependencies]
 smb-server-proto = { path = "../smb-server-proto" }
