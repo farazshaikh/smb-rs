@@ -81,21 +81,23 @@ Matrix**.
 
 ### Roadmap
 
-Remaining work is outside the core `[MS-SMB2]` request set:
+Every remaining gap below is backed by an actual skip in the `protocol`
+suite ([test_status.csv](test_status.csv)) — nothing here is speculative:
 
-| Milestone | Item | Spec | Status |
-|---|---|---|---|
-| **Core hardening** | Malformed-frame parser fuzzing (`cargo-fuzz`) | — | planned |
-| | Cross-client concurrency / lock-race stress harness | — | planned |
-| | Windows-client soak battery | — | planned |
-| | Criterion throughput benchmarks (sign / encrypt / find) | — | planned |
-| | 8.3 short-name **matching / resolution** (generation done) | [MS-FSCC] §2.1.5 | partial |
-| **Legacy transport** | NetBIOS :139 + datagram browsing | RFC 1001/1002 | planned |
-| **Extended auth** | Kerberos / non-NTLM SPNEGO mechs | [MS-KILE] | planned |
-| **M4 — scale-out** | RDMA transport (SMB Direct) | [MS-SMBD] | planned |
-| | Witness protocol (failover notification) | [MS-SWN] | planned |
-| | Continuous availability (persistent handles + failover) | [MS-SMB2] §3.3.5.9 | planned |
-| | Full DFS namespace (referrals beyond clean reject) | [MS-DFSC] | planned |
+| Item | Spec | Skipped tests |
+|---|---|---|
+| SMB Direct (RDMA transport) | [MS-SMBD] | 3 |
+| SMB-over-QUIC transport (server is TCP-only) | [MS-SMB2] §3.1.4 | 1 |
+| Xpress-Huffman (LZ77+Huffman) compression encoder — decode works, encode needs a Huffman-table encoder (available Rust crates are decode-only) | [MS-XCA] | 3 |
+| Resilient handle reconnect + scavenger timer | [MS-SMB2] §3.3.5.9 | 2 |
+| Previous-version (VSS) snapshot enumeration — `FSCTL_SRV_ENUMERATE_SNAPSHOTS` needs snapshot support in the POSIX backend | [MS-SMB2] §2.2.31.3 | 1 |
+| Session-binding lookup for `SessionId=0` + `SESSION_FLAG_BINDING` + no `PreviousSessionId` | [MS-SMB2] §3.3.5.5.2 | 1 |
+
+The remaining skips are test-environment/harness limitations rather than
+server gaps (a domain-join assumption, an encryption-required test-config
+guard, a client-side SSPI defect in the reauth test harness, an invalid SDDL
+value in ptfconfig) — see the `note` column in
+[test_status.csv](test_status.csv) for each.
 
 Run it on trusted networks; treat it as an interoperability/reference
 implementation that is steadily growing production features.
