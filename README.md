@@ -102,36 +102,44 @@ implementation that is steadily growing production features.
 
 ## Conformance test suite
 
-A Rust integration-test harness under [test/](test/README.md) exercises the
-server and tracks pass/fail plus performance metrics across runs. Its test plan
-mirrors the category structure of Microsoft's
-[WindowsProtocolTestSuites](https://github.com/microsoft/WindowsProtocolTestSuites)
-FileServer family; assertions are native Rust, driven through a Python
-`smbprotocol` actuator.
+Three suites under [test/](test/README.md) exercise the server and track
+pass/fail across runs: in-process Rust `unit` tests, a `system` harness driven
+through a Python `smbprotocol` actuator, and the official `protocol` suite —
+Microsoft's [WindowsProtocolTestSuites](https://github.com/microsoft/WindowsProtocolTestSuites)
+MS-SMB2 Server Test Suite, vendored as the [`test/wpts`](test/wpts) submodule.
+`test/runtest.sh` runs any or all of them, verifying a server is up first, and
+keeps the summary below and [`test_status.csv`](test_status.csv) in sync.
 
 <!-- TEST_STATUS_START -->
 
-**422 tests · 407 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `99a08e4`, 2026-09-02)
+**433 tests · 418 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `e24ab7a`, 2026-09-02)
 
 | Suite | What it runs | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|---|
 | **protocol** | Microsoft's official MS-SMB2 Server Test Suite (Windows Protocol Test Suites) | 271 | 0 | 15 | 286 |
-| **system** | End-to-end interop tests driving a live server through the Python `smbprotocol` client | 30 | 0 | 0 | 30 |
-| **unit** | In-process Rust unit & integration tests (`cargo test --workspace`) | 106 | 0 | 0 | 106 |
+| **system** | End-to-end interop tests driving a live server through the Python `smbprotocol` client | 34 | 0 | 0 | 34 |
+| **unit** | In-process Rust unit & integration tests (`cargo test --workspace`) | 113 | 0 | 0 | 113 |
 
 Generated from [`test_status.csv`](test_status.csv) by [`test/lib/render_readme_status.py`](test/lib/render_readme_status.py) after a test run. Live view: `smb-test-dashboard` (see [test/README.md](test/README.md)).
 
 <!-- TEST_STATUS_END -->
 
 ```sh
-# automated: starts the server, runs every case, records a run under test/data/
-cargo build -p smb-server -p smb-testsuite
-./target/debug/smb-testrunner --start-server --port 4450 --record
+# run everything (unit + system + protocol), health-checking servers first
+test/runtest.sh
+
+# one suite at a time
+test/runtest.sh --suite unit
+test/runtest.sh --suite system
+test/runtest.sh --suite protocol       # needs the .NET SDK; see test/README.md
+
+# one-time prerequisite setup (build, python deps, protocol-suite patching)
+test/runtest.sh --setup
 
 # interactive: point cargo test at a running server (skips cleanly if unset)
 SMB_TEST_HOST=127.0.0.1 SMB_TEST_PORT=4450 cargo test -p smb-testsuite
 
-# containerised build + run
+# containerised build + run (system suite)
 docker build -f test/Dockerfile -t smb-rs-test .
 docker run --rm --security-opt seccomp=unconfined \
     -v "$PWD/test/data:/work/test/data" smb-rs-test

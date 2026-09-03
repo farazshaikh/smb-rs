@@ -8,6 +8,37 @@ category structure of Microsoft's
 we use that suite as the reference catalog of what to cover, and implement the
 checks as native Rust tests.
 
+## Suites
+
+Three independent suites feed one status file, [`../test_status.csv`](../test_status.csv):
+
+| Suite | What it is | Needs a live server |
+|---|---|---|
+| `unit` | `cargo test --workspace` — in-process Rust tests | no |
+| `system` | this crate's harness (`smb-testrunner`), driven by the Python `smbprotocol` client below | yes |
+| `protocol` | Microsoft's official MS-SMB2 Server Test Suite, vendored as the [`wpts`](wpts) submodule | yes |
+
+`../test/runtest.sh` runs them:
+
+```sh
+test/runtest.sh --setup                       # install/patch prerequisites (all suites)
+test/runtest.sh --setup --suite protocol      # just one suite's prerequisites
+
+test/runtest.sh                               # run every suite
+test/runtest.sh --suite unit                  # run one suite (unit|system|protocol|all)
+```
+
+It verifies a server is up before any suite that needs one (starting `rustsmb`
+itself and health-checking the port if nothing is already listening), runs the
+suite, upserts that suite's rows in `test_status.csv` via `test/lib/update_status.py`,
+and regenerates the summary embedded in the top-level [README.md](../README.md).
+
+The `protocol` suite needs the [.NET SDK](https://dotnet.microsoft.com/download)
+(`dotnet test`); `--setup --suite protocol` also idempotently patches the
+submodule so it can point at a local, non-privileged-port SUT instead of a
+Windows box on port 445 (see `test/lib/setup_protocol.py`) — that patch lives
+in `test/wpts`'s own working tree (a separate git checkout), not in this repo.
+
 ## How it fits together
 
 ```
