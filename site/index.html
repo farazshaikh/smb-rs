@@ -63,6 +63,53 @@
   }
   .crate a { font-weight: 600; text-decoration: none; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .crate p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.88rem; }
+  .cards { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 1rem 0; }
+  .card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 1.1rem;
+    background: var(--card);
+    min-width: 100px;
+  }
+  .card .n { font-size: 1.5rem; font-weight: 700; }
+  .card .l { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.02em; }
+  table.suites { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  table.suites th, table.suites td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .badge {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+  }
+  .badge.pass { background: #1a9c4b; }
+  .badge.fail { background: #d13438; }
+  .badge.skip { background: #9a7b1f; }
+  .badge.unknown { background: #6e7681; }
+  .test-controls { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; margin: 1rem 0 0.5rem; }
+  .test-controls input, .test-controls select {
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.85rem;
+  }
+  .test-controls input { flex: 1; min-width: 200px; }
+  .test-count { color: var(--muted); font-size: 0.8rem; margin: 0.4rem 0; }
+  table.tests { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  table.tests th {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 2px solid var(--border);
+  }
+  table.tests td { padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); }
+  table.tests td.name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+  .test-scroll { max-height: 32rem; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
   footer { margin-top: 3rem; text-align: center; color: var(--muted); font-size: 0.85rem; }
   footer a { color: inherit; }
 </style>
@@ -118,9 +165,165 @@
     <div class="crate"><a href="smb_server_test_dashboard/index.html">smb-server-test-dashboard</a><p>REST + web dashboard exposing test pass/fail status from a CSV.</p></div>
   </div>
 
+  <h2>Testing</h2>
+  <p>
+    Live results from the three-suite model (<code>unit</code>, <code>system</code>,
+    the vendored <code>protocol</code> suite) — regenerated from
+    <a href="test_status.csv">test_status.csv</a> on every push. See
+    <a href="https://github.com/farazshaikh/smb-server-rs/blob/main/test/README.md">test/README.md</a>
+    for how to run them locally.
+  </p>
+  <div id="test-summary-cards" class="cards"></div>
+  <table class="suites" id="test-suite-table">
+    <thead><tr><th>Suite</th><th>Passed</th><th>Failed</th><th>Skipped</th><th>Total</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="test-controls">
+    <input id="test-search" type="search" placeholder="Filter by name or category…">
+    <select id="test-suite-filter"><option value="">All suites</option></select>
+    <select id="test-status-filter">
+      <option value="">All statuses</option>
+      <option value="pass">Pass</option>
+      <option value="fail">Fail</option>
+      <option value="skip">Skip</option>
+    </select>
+  </div>
+  <p class="test-count" id="test-count"></p>
+  <div class="test-scroll">
+    <table class="tests">
+      <thead><tr><th>Suite</th><th>Name</th><th>Category</th><th>Status</th></tr></thead>
+      <tbody id="test-rows"></tbody>
+    </table>
+  </div>
+
   <footer>
     Built from <a href="https://github.com/farazshaikh/smb-server-rs">farazshaikh/smb-server-rs</a> by GitHub Actions on every push to <code>main</code>.
   </footer>
 </main>
+<script>
+(async function () {
+  const CSV_URL = "test_status.csv";
+  const STATUS_MAP = {
+    pass: "pass", passed: "pass", ok: "pass",
+    fail: "fail", failed: "fail", error: "fail",
+    skip: "skip", skipped: "skip", notexecuted: "skip", ignored: "skip",
+  };
+  const normalize = (s) => STATUS_MAP[(s || "").trim().toLowerCase()] || "unknown";
+
+  // Minimal RFC-4180 CSV parser: handles quoted fields, embedded commas/
+  // newlines, and "" escaped quotes -- test_status.csv's `note` column uses all three.
+  function parseCsv(text) {
+    const rows = [];
+    let row = [], field = "", inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+        else if (c === '"') { inQuotes = false; }
+        else { field += c; }
+      } else if (c === '"') {
+        inQuotes = true;
+      } else if (c === ',') {
+        row.push(field); field = "";
+      } else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(field); field = "";
+        if (row.length > 1 || row[0] !== "") rows.push(row);
+        row = [];
+      } else {
+        field += c;
+      }
+    }
+    if (field !== "" || row.length) { row.push(field); rows.push(row); }
+    const [header, ...body] = rows;
+    return body.map((r) => Object.fromEntries(header.map((h, i) => [h, r[i] ?? ""])));
+  }
+
+  function summarize(rows) {
+    const bySuite = {};
+    for (const r of rows) {
+      const s = (bySuite[r.suite] ??= { pass: 0, fail: 0, skip: 0, unknown: 0, total: 0 });
+      s[normalize(r.status)]++;
+      s.total++;
+    }
+    return bySuite;
+  }
+
+  function renderCards(bySuite) {
+    const overall = { pass: 0, fail: 0, skip: 0, unknown: 0, total: 0 };
+    for (const s of Object.values(bySuite)) for (const k in overall) overall[k] += s[k];
+    const ran = overall.total - overall.skip;
+    const rate = ran ? ((100 * overall.pass) / ran).toFixed(1) : "0.0";
+    const cards = [
+      ["Total", overall.total], ["Passed", overall.pass],
+      ["Failed", overall.fail], ["Skipped", overall.skip], ["Pass rate", rate + "%"],
+    ];
+    document.getElementById("test-summary-cards").innerHTML = cards
+      .map(([l, n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`)
+      .join("");
+  }
+
+  function renderSuiteTable(bySuite) {
+    const order = ["protocol", "system", "unit"];
+    const names = Object.keys(bySuite).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    document.querySelector("#test-suite-table tbody").innerHTML = names
+      .map((name) => {
+        const s = bySuite[name];
+        return `<tr><td>${name}</td><td>${s.pass}</td><td>${s.fail}</td><td>${s.skip}</td><td>${s.total}</td></tr>`;
+      })
+      .join("");
+  }
+
+  function badge(status) {
+    return `<span class="badge ${status}">${status}</span>`;
+  }
+
+  function renderRows(rows) {
+    const tbody = document.getElementById("test-rows");
+    document.getElementById("test-count").textContent = `${rows.length} test(s) shown`;
+    tbody.innerHTML = rows
+      .map(
+        (r) =>
+          `<tr><td>${r.suite}</td><td class="name">${r.name}</td><td>${r.category}</td><td>${badge(normalize(r.status))}</td></tr>`
+      )
+      .join("");
+  }
+
+  function applyFilters(all) {
+    const q = document.getElementById("test-search").value.trim().toLowerCase();
+    const suite = document.getElementById("test-suite-filter").value;
+    const status = document.getElementById("test-status-filter").value;
+    return all.filter(
+      (r) =>
+        (!suite || r.suite === suite) &&
+        (!status || normalize(r.status) === status) &&
+        (!q || r.name.toLowerCase().includes(q) || r.category.toLowerCase().includes(q))
+    );
+  }
+
+  let rows;
+  try {
+    const text = await fetch(CSV_URL).then((r) => r.text());
+    rows = parseCsv(text);
+  } catch {
+    document.getElementById("test-count").textContent = "Could not load test_status.csv.";
+    return;
+  }
+
+  renderCards(summarize(rows));
+  renderSuiteTable(summarize(rows));
+
+  const suiteFilter = document.getElementById("test-suite-filter");
+  for (const suite of [...new Set(rows.map((r) => r.suite))].sort()) {
+    suiteFilter.insertAdjacentHTML("beforeend", `<option value="${suite}">${suite}</option>`);
+  }
+
+  const refresh = () => renderRows(applyFilters(rows));
+  document.getElementById("test-search").addEventListener("input", refresh);
+  suiteFilter.addEventListener("change", refresh);
+  document.getElementById("test-status-filter").addEventListener("change", refresh);
+  refresh();
+})();
+</script>
 </body>
 </html>

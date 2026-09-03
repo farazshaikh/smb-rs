@@ -34,6 +34,7 @@ jobs:
           mkdir -p _site
           cp -r target/doc/. _site/
           cp site/index.html _site/index.html
+          cp test_status.csv _site/test_status.csv
           mkdir -p _site/assets
           cp assets/logo.jpg _site/assets/logo.jpg
           touch _site/.nojekyll
