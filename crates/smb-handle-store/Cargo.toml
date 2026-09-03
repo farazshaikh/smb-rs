@@ -4,6 +4,7 @@ description = "Pluggable durable/persistent SMB handle store with local and repl
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [features]
 default = ["redb-backend"]

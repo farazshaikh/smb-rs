@@ -4,6 +4,7 @@ description = "SMB1 (MS-SMB/MS-CIFS) wire structures: headers, commands, TRANS2 
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [dependencies]
 smb-proto = { path = "../smb-proto" }

@@ -4,6 +4,7 @@ description = "SMB3 additions over SMB2 (encryption, pre-auth integrity) ([MS-SM
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [dependencies]
 smb-proto = { path = "../smb-proto" }

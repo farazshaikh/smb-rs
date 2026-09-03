@@ -4,6 +4,7 @@ description = "Async SMB message transport abstraction with TCP/NBSS and in-memo
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [dependencies]
 async-trait.workspace = true

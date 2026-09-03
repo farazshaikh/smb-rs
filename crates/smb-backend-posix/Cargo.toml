@@ -4,6 +4,7 @@ description = "Default POSIX async-fs storage backend for the smb-server-rs virt
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [dependencies]
 async-trait.workspace = true

@@ -4,6 +4,7 @@ description = "rustsmb — SMB1 file server binary wiring transport, protocol an
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "rustsmb"

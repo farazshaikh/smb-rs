@@ -4,6 +4,7 @@ description = "Conformance/interoperability test harness for the smb-server-rs s
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 publish = false
 
 [dependencies]

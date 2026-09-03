@@ -4,6 +4,7 @@ description = "Crypto service provider for smb-server-rs: dispatches between mai
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [features]
 default = ["lib"]

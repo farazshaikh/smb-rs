@@ -4,6 +4,7 @@ description = "Dialect-neutral virtual filesystem interface implemented by stora
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [dependencies]
 thiserror.workspace = true

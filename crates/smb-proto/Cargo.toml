@@ -4,6 +4,7 @@ description = "Dialect-neutral SMB protocol primitives: codec trait, NT status c
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [dependencies]
 thiserror.workspace = true
