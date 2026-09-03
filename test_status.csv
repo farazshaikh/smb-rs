@@ -141,7 +141,7 @@ protocol,BVT_OffloadReadWrite,MS_FSA_Clarification,pass,447,2026-09-02T00:03:15-
 protocol,BVT_SetZeroData,MS_FSA_Clarification,pass,195,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,FileLevelTrim_Negative_NonZeroKeyInRequest,MS_FSA_Clarification,pass,50,2026-09-01T09:04:25.327801-07:00,acb3a54,
 protocol,BVT_PersistentHandles,MS_SMB2_Clarification,pass,51,2026-09-01T09:43:00.347295-07:00,c2ac36d,
-protocol,BVT_Resiliency,MS_SMB2_Clarification,skip,64,2026-09-01T00:37:17.753870-07:00,0e8daba,
+protocol,BVT_Resiliency,MS_SMB2_Clarification,pass,333,2026-09-02T20:01:32-07:00,6ea4c02,Stale skip entry; passes against current server
 protocol,BVT_SMBDialect,MS_SMB2_Clarification,pass,53,2026-09-01T00:37:17.753870-07:00,0e8daba,
 protocol,BVT_MultiCredit_OneRequestWithMultiCredit,MultiCredit,pass,319,2026-08-30T13:32:54.6195877-07:00,b6e8e04,
 protocol,BVT_MultipleChannel_NicRedundantOnBoth,MultipleChannelBasic,pass,52,2026-08-30T13:33:43.1700335-07:00,d9db3fa,"Multichannel: per-session shared tree+open tables, binding key derivation, dialect/token validation. Needs SutAlternativeIPAddress=real advertised host IP."
@@ -165,7 +165,7 @@ protocol,BVT_Negotiate_SMB30,Negotiation,pass,52,2026-09-01T01:07:25.186402-07:0
 protocol,BVT_Negotiate_SMB302,Negotiation,pass,52,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,BVT_Negotiate_SMB311,Negotiation,pass,55,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,BVT_Negotiate_SMB311_CompressionEnabled,Negotiation,pass,55,2026-09-01T01:07:25.186402-07:00,4ed532e,
-protocol,BVT_Negotiate_SMB311_Compression_IsChainedCompressionSupported,Negotiation,skip,60,2026-09-01T01:07:25.186402-07:00,4ed532e,Chained compression not implemented (server advertises unchained LZNT1 only)
+protocol,BVT_Negotiate_SMB311_Compression_IsChainedCompressionSupported,Negotiation,pass,123,2026-09-02T20:01:32-07:00,6ea4c02,"Stale skip entry; chained compression implemented in an earlier commit, passes against current server"
 protocol,BVT_Negotiate_SMB311_Preauthentication,Negotiation,pass,54,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_CCM,Negotiation,pass,55,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_GCM,Negotiation,pass,54,2026-09-01T01:07:25.186402-07:00,4ed532e,
@@ -193,7 +193,7 @@ protocol,Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityCo
 protocol,Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext,Negotiation,pass,52,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,Negotiate_SMB311_WithoutAnyContexts,Negotiation,pass,52,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,BVT_NetworkInterfaceInfo_QuerySuccessful,NetworkInterfaceInfo,pass,242,2026-08-31T23:14:01.5258440-07:00,e7757fb,
-protocol,NetworkInterfaceInfo_ChangeConnection_BindCurrentSession,NetworkInterfaceInfo,skip,129,2026-08-31T23:14:03.0728412-07:00,e7757fb,
+protocol,NetworkInterfaceInfo_ChangeConnection_BindCurrentSession,NetworkInterfaceInfo,pass,311,2026-09-02T20:01:32-07:00,6ea4c02,Stale skip entry; passes against current server
 protocol,NetworkInterfaceInfo_Query_ReturnsErrorStatus,NetworkInterfaceInfo,pass,122,2026-08-31T23:14:02.8187246-07:00,e7757fb,
 protocol,NetworkInterfaceInfo_Query_ReturnsIPv4IPv6,NetworkInterfaceInfo,pass,123,2026-08-31T23:14:02.9491717-07:00,e7757fb,
 protocol,BVT_OpLockBreak,OpLock,pass,175,2026-08-30T13:33:49.8578375-07:00,b6e8e04,
@@ -253,7 +253,7 @@ protocol,BVT_SMB2Basic_QueryDir_Reopen_OnFile,SMB2Basic,pass,209,2026-08-30T13:3
 protocol,BVT_SMB2Basic_Query_FileAllInformation,SMB2Basic,pass,196,2026-08-30T13:32:55.4221619-07:00,b6e8e04,
 protocol,BVT_SMB2Basic_Query_FileNormalizedNameInformation_DataFile,SMB2Basic,pass,320,2026-09-01T01:48:36.635170-07:00,283223a,
 protocol,BVT_SMB2Basic_Query_FileNormalizedNameInformation_DirectoryFile,SMB2Basic,pass,199,2026-09-01T01:48:36.635170-07:00,283223a,
-protocol,BVT_SMB2Basic_Query_Quota_Info,SMB2Basic,skip,52,2026-08-30T13:32:55.6193962-07:00,,Quota query (FILE_QUOTA_INFORMATION) not implemented
+protocol,BVT_SMB2Basic_Query_Quota_Info,SMB2Basic,skip,52,2026-09-02T20:00:00-07:00,301dfe2,"FILE_QUOTA_INFORMATION query now implemented (returns an honest empty quota list, was INVALID_DEVICE_REQUEST). Test itself still blocked by an unrelated environment guard: it requires TestConfig.DomainName to look like a real FQDN (Assert.Inconclusive on this workgroup/non-domain SUT); changing that global property risks the other 268 passing tests, so left as an environment limitation"
 protocol,BVT_SMB2Basic_QuicTransport_OpenNamedPipe,SMB2Basic,skip,51,2026-08-30T13:32:55.2147230-07:00,,Requires SMB-over-QUIC transport; server is TCP-only
 protocol,InvalidCreateRequestStructureSize,SMB2Basic,pass,193,2026-08-30T13:32:56.0722500-07:00,b6e8e04,
 protocol,BVT_SessionMgmt_NewSession,SessionMgmt,pass,115,2026-09-01T01:48:36.635170-07:00,283223a,
