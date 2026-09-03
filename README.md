@@ -118,7 +118,7 @@ keeps the summary below and [`test_status.csv`](test_status.csv) in sync.
 
 <!-- TEST_STATUS_START -->
 
-**433 tests · 418 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `9b4e434`, 2026-09-02)
+**433 tests · 418 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `b43f3e2`, 2026-09-02)
 
 | Suite | What it runs | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|---|
