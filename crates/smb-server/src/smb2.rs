@@ -4030,9 +4030,10 @@ pub(crate) async fn query_info(
             }
             Ok(Some(sd))
         }
-        // Disk quotas are not tracked on this volume ([MS-FSCC] §2.4.33):
-        // report the standard "quotas not enabled" status.
-        c::info_type::QUOTA => Err(Status::INVALID_DEVICE_REQUEST),
+        // Disk quotas are not tracked on this volume ([MS-FSCC] §2.4.33): report
+        // an honestly empty FILE_QUOTA_INFORMATION list rather than fabricating
+        // per-user entries.
+        c::info_type::QUOTA => Ok(Some(Vec::new())),
         _ => Ok(None),
     }
 }
