@@ -109,6 +109,20 @@ mirrors the category structure of Microsoft's
 FileServer family; assertions are native Rust, driven through a Python
 `smbprotocol` actuator.
 
+<!-- TEST_STATUS_START -->
+
+**422 tests · 407 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `99a08e4`, 2026-09-02)
+
+| Suite | What it runs | Passed | Failed | Skipped | Total |
+|---|---|---|---|---|---|
+| **protocol** | Microsoft's official MS-SMB2 Server Test Suite (Windows Protocol Test Suites) | 271 | 0 | 15 | 286 |
+| **system** | End-to-end interop tests driving a live server through the Python `smbprotocol` client | 30 | 0 | 0 | 30 |
+| **unit** | In-process Rust unit & integration tests (`cargo test --workspace`) | 106 | 0 | 0 | 106 |
+
+Generated from [`test_status.csv`](test_status.csv) by [`test/lib/render_readme_status.py`](test/lib/render_readme_status.py) after a test run. Live view: `smb-test-dashboard` (see [test/README.md](test/README.md)).
+
+<!-- TEST_STATUS_END -->
+
 ```sh
 # automated: starts the server, runs every case, records a run under test/data/
 cargo build -p smb-server -p smb-testsuite
