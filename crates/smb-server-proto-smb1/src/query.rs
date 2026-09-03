@@ -20,7 +20,7 @@ pub struct QueryMeta {
 }
 
 /// Encode a QUERY_PATH/FILE information payload for `level` from neutral
-/// metadata. Returns `Err(())` for levels this server does not implement —
+/// metadata. Returns `None` for levels this server does not implement —
 /// callers translate that to `INVALID_PARAMETER`.
 ///
 /// `name` is required by the NAME/ALT_NAME levels.
@@ -28,10 +28,10 @@ pub fn encode_payload(
     level: u16,
     m: &QueryMeta,
     name: &str,
-) -> Result<Vec<u8>, ()> {
+) -> Option<Vec<u8>> {
     let times = &m.times;
     let eof = if m.is_dir { 0 } else { m.eof };
-    let alloc = ((eof + 4095) / 4096) * 4096;
+    let alloc = eof.div_ceil(4096) * 4096;
 
     let mut d = Writer::new(0);
     match level {
@@ -128,7 +128,7 @@ pub fn encode_payload(
                 d.push_u16(u);
             }
         }
-        _ => return Err(()),
+        _ => return None,
     }
-    Ok(d.into_inner())
+    Some(d.into_inner())
 }

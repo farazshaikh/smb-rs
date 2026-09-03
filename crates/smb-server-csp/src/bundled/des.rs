@@ -46,6 +46,7 @@ mod tables {
     pub const SHIFTS: [u8; 16] = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES block cipher primitive ([MS-NLMP] NTLMv1)
 fn bytes_to_bits(bytes: &[u8]) -> Vec<bool> {
     let mut bits = Vec::with_capacity(bytes.len() * 8);
     for b in bytes {
@@ -56,6 +57,7 @@ fn bytes_to_bits(bytes: &[u8]) -> Vec<bool> {
     bits
 }
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES block cipher primitive ([MS-NLMP] NTLMv1)
 fn bits_to_bytes8(bits: &[bool; 64]) -> [u8; 8] {
     let mut out = [0u8; 8];
     for (i, o) in out.iter_mut().enumerate() {
@@ -69,6 +71,7 @@ fn bits_to_bytes8(bits: &[bool; 64]) -> [u8; 8] {
 }
 
 /// Encrypt one 8-byte block under the given 56-bit key material.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES block cipher primitive ([MS-NLMP] NTLMv1)
 fn des_block(block: [u8; 8], keys: &[[u8; 6]; 16]) -> [u8; 8] {
     use tables::*;
     let bits = bytes_to_bits(&block);
@@ -77,7 +80,7 @@ fn des_block(block: [u8; 8], keys: &[[u8; 6]; 16]) -> [u8; 8] {
         state[i] = bits[IP[i] as usize - 1];
     }
 
-    for round in 0..16 {
+    for round_key in keys.iter().take(16) {
         let mut left = [false; 32];
         let mut right = [false; 32];
         left.copy_from_slice(&state[..32]);
@@ -89,7 +92,7 @@ fn des_block(block: [u8; 8], keys: &[[u8; 6]; 16]) -> [u8; 8] {
             er[i] = right[E[i] as usize - 1];
         }
         // Key mixing.
-        let kb = bytes_to_bits(&keys[round]);
+        let kb = bytes_to_bits(round_key);
         for i in 0..48 {
             er[i] ^= kb[i];
         }
@@ -132,25 +135,27 @@ fn des_block(block: [u8; 8], keys: &[[u8; 6]; 16]) -> [u8; 8] {
 /// Expand a 56-bit NTLM key chunk into an 8-byte DES key: each 7-bit group
 /// is shifted left once, leaving a zero parity bit in every LSB
 /// ([MS-NLMP] §3.3.1).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES block cipher primitive ([MS-NLMP] NTLMv1)
 fn key7_to_key8(k7: &[u8; 7]) -> [u8; 8] {
     [
         ((k7[0] >> 1) & 0x7f) << 1,
-        (((k7[0] & 0x01) << 6 | (k7[1] >> 2) & 0x3f)) << 1,
-        (((k7[1] & 0x03) << 5 | (k7[2] >> 3) & 0x1f)) << 1,
-        (((k7[2] & 0x07) << 4 | (k7[3] >> 4) & 0x0f)) << 1,
-        (((k7[3] & 0x0f) << 3 | (k7[4] >> 5) & 0x07)) << 1,
-        (((k7[4] & 0x1f) << 2 | (k7[5] >> 6) & 0x03)) << 1,
-        (((k7[5] & 0x3f) << 1 | (k7[6] >> 7) & 0x01)) << 1,
+        ((k7[0] & 0x01) << 6 | (k7[1] >> 2) & 0x3f) << 1,
+        ((k7[1] & 0x03) << 5 | (k7[2] >> 3) & 0x1f) << 1,
+        ((k7[2] & 0x07) << 4 | (k7[3] >> 4) & 0x0f) << 1,
+        ((k7[3] & 0x0f) << 3 | (k7[4] >> 5) & 0x07) << 1,
+        ((k7[4] & 0x1f) << 2 | (k7[5] >> 6) & 0x03) << 1,
+        ((k7[5] & 0x3f) << 1 | (k7[6] >> 7) & 0x01) << 1,
         (k7[6] & 0x7f) << 1,
     ]
 }
 
 /// Build the 16 round keys from a 7-byte (56-bit) key chunk.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES block cipher primitive ([MS-NLMP] NTLMv1)
 fn schedule(key56: [u8; 7]) -> [[u8; 6]; 16] {
     use tables::*;
     let padded = key7_to_key8(&key56);
     let all = bytes_to_bits(&padded);
-    let mut kbits = vec![false; 56];
+    let mut kbits = [false; 56];
     for i in 0..56 {
         kbits[i] = all[PC1[i] as usize - 1];
     }
@@ -173,6 +178,7 @@ fn schedule(key56: [u8; 7]) -> [[u8; 6]; 16] {
 }
 
 /// DES-ECB encrypt `plaintext` (8 bytes) under a 56-bit key given as 7 bytes.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES block cipher primitive ([MS-NLMP] NTLMv1)
 pub fn des_encrypt_key7(key56: [u8; 7], plaintext: [u8; 8]) -> [u8; 8] {
     des_block(plaintext, &schedule(key56))
 }
@@ -181,6 +187,7 @@ pub fn des_encrypt_key7(key56: [u8; 7], plaintext: [u8; 8]) -> [u8; 8] {
 /// successive 7-byte chunks of the 21-byte expanded hash ([MS-NLMP] §3.3.1).
 ///
 /// Returns the concatenated 24-byte response.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // DES block cipher primitive ([MS-NLMP] NTLMv1)
 pub fn ntlmv1_response(hash21: &[u8; 21], challenge: &[u8; 8]) -> [u8; 24] {
     let mut out = [0u8; 24];
     for i in 0..3 {

@@ -27,6 +27,7 @@ const K: [u64; 80] = [
 ];
 
 /// Full-message SHA-512 over `data`, returning the 64-byte digest.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SHA-512 digest primitive ([FIPS 180-4])
 pub fn sha512(data: &[u8]) -> [u8; 64] {
     let mut h: [u64; 8] = [
         0x6a09e667f3bcc908,

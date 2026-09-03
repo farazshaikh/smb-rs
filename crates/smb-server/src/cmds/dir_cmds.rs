@@ -21,9 +21,9 @@ fn read_two_paths(req: &ReqView<'_>) -> (String, String) {
     let data = req.data;
     let mut rd = smb_server_proto::buf::Reader::new(data, 0);
     let base = req.bc_off_abs + consts::BYTE_COUNT_LEN;
-    if !data.is_empty() && data[0] == consts::BUFFER_FORMAT_DATA {
-        rd.skip(1);
-    } else if unicode(req) && base % consts::WORD_LEN != 0 && !data.is_empty() {
+    if (!data.is_empty() && data[0] == consts::BUFFER_FORMAT_DATA)
+        || (unicode(req) && !base.is_multiple_of(consts::WORD_LEN) && !data.is_empty())
+    {
         rd.skip(1);
     }
     let a = rd.zstring(unicode(req), base);
@@ -156,7 +156,7 @@ pub async fn query_info_legacy(
     let minutes = (tod % 3600) / 60;
     let seconds = tod % 60 / 2 * 2;
     let dos_time = ((hours as u32) << 11) | ((minutes as u32) << 5) | (seconds as u32);
-    let dos_date = (((year - 1980).clamp(0, 127) as u32) << 9) | ((month as u32) << 5) | day as u32;
+    let dos_date = (((year - 1980).clamp(0, 127) as u32) << 9) | (month << 5) | day;
 
     let attrs = if m.is_dir {
         0x10u16

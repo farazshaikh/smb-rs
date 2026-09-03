@@ -1,7 +1,7 @@
 //! Negotiate / session setup / tree connect / echo handlers.
 
 use smb_server_proto::types::{FileTime, Status};
-use smb_server_proto_smb1::consts::{self, caps, flags2};
+use smb_server_proto_smb1::consts::{self, caps};
 use smb_server_proto_smb1::header::RespBody;
 use smb_server_proto_smb1::negotiate;
 use smb_server_proto_smb1::session_setup as ss;
@@ -60,13 +60,13 @@ pub fn setup(
     // WC=12 → extended security (opaque blob); WC=13 → legacy passwords.
     let ext = wct == 12;
     let (blob, _legacy) = if ext {
-        let e = ss::SessionSetupExtReq::parse(req.words, &req.data.to_vec())
+        let e = ss::SessionSetupExtReq::parse(req.words, req.data)
             .map_err(|_| Status::LOGON_FAILURE)?;
         (e.blob, None)
     } else {
         let l = ss::SessionSetupLegacyReq::parse(
             req.words,
-            &req.data.to_vec(),
+            req.data,
             req.unicode(),
             req.bc_off_abs + 2,
         )
@@ -194,7 +194,7 @@ pub fn echo(req: &ReqView, bodies: &mut Vec<RespBody>) -> Result<Status, Status>
     };
     bodies.clear();
     for seq in 0..count {
-        bodies.push(ss_echo_body(seq, &req.data));
+        bodies.push(ss_echo_body(seq, req.data));
     }
     Ok(Status::SUCCESS)
 }

@@ -118,7 +118,7 @@ keeps the summary below and [`test_status.csv`](test_status.csv) in sync.
 
 <!-- TEST_STATUS_START -->
 
-**433 tests · 418 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `a259ec6`, 2026-09-02)
+**433 tests · 418 passed · 0 failed · 15 skipped · 100.0% pass rate** (commit `9b4e434`, 2026-09-02)
 
 | Suite | What it runs | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|---|
@@ -162,8 +162,12 @@ renders pass-rate trends and the latest run without a server.
 ```sh
 git clone https://github.com/farazshaikh/smb-server-rs.git
 cd smb-server-rs
+git config core.hooksPath .githooks   # one-time: enable the pre-commit check below
 cargo build --release --workspace   # → target/release/rustsmb
 ```
+
+Commits run [`.githooks/pre-commit`](.githooks/pre-commit), which blocks the
+commit unless `cargo check --workspace` passes.
 
 ### Crypto backend selection
 

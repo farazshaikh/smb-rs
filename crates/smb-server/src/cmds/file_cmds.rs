@@ -7,7 +7,7 @@ use smb_server_proto_smb1::create as create_codec;
 use smb_server_proto_smb1::header::RespBody;
 use smb_server_proto_smb1::misc;
 use smb_server_proto_smb1::rw::{self, ReadReq, WriteReq};
-use smb_server_vfs::{OpenFile, SetOp};
+use smb_server_vfs::SetOp;
 
 use crate::cmds::{IoCtx, share_vfs};
 use crate::dispatch::ReqView;
@@ -155,7 +155,7 @@ pub async fn write_andx(
     req: &ReqView<'_>,
     bodies: &mut Vec<RespBody>,
 ) -> Result<Status, Status> {
-    let wr = WriteReq::parse(req.words, req.frame).map_err(|s| s)?;
+    let wr = WriteReq::parse(req.words, req.frame)?;
     let vfs = share_vfs(io, req.hdr.tid);
 
     let Some(h) = io.conn.handles.get_mut(&wr.fid).map(|b| &mut **b) else {

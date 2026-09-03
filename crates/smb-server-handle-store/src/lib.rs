@@ -180,11 +180,10 @@ impl HandleStore for MemStore {
             map.remove(create_guid);
             return Ok(None);
         }
-        if let Some(g) = match_guid {
-            if record.match_guid != Some(g) {
+        if let Some(g) = match_guid
+            && record.match_guid != Some(g) {
                 return Ok(None);
             }
-        }
         Ok(map.remove(create_guid))
     }
 

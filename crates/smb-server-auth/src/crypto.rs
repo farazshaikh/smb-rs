@@ -15,6 +15,7 @@ pub use smb_server_csp::{aes128ccm_open, aes128ccm_seal, aes128gcm_open, aes128g
 /// empty plaintext and the message supplied as additional authenticated data;
 /// the 16-byte GCM tag is the signature.
 #[cfg(feature = "lib")]
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AEAD tag length
 pub fn aes128_gmac(key: &[u8; 16], nonce: &[u8; 12], msg: &[u8]) -> [u8; 16] {
     let out = aes128gcm_seal(key, nonce, msg, &[]);
     let mut tag = [0u8; 16];

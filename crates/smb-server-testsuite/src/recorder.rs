@@ -184,11 +184,10 @@ fn rebuild_aggregate(runs_dir: &Path, out: &Path) -> std::io::Result<()> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(bytes) = fs::read(&path) {
-            if let Ok(r) = serde_json::from_slice::<RunReport>(&bytes) {
+        if let Ok(bytes) = fs::read(&path)
+            && let Ok(r) = serde_json::from_slice::<RunReport>(&bytes) {
                 reports.push(r);
             }
-        }
     }
     reports.sort_by(|a, b| b.timestamp_epoch.cmp(&a.timestamp_epoch));
 

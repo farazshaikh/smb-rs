@@ -28,11 +28,10 @@ impl NegotiateReq {
     }
 
     /// Pick the highest dialect we support; returns `(index, name)`.
-    pub fn select(&self) -> Option<(usize)> {
+    pub fn select(&self) -> Option<usize> {
         self.dialects
             .iter()
             .position(|d| d.eq_ignore_ascii_case("NT LM 0.12"))
-            .map(|i| (i))
     }
 }
 
@@ -45,7 +44,7 @@ pub const WORD_COUNT: u8 = 17;
 /// Build response parameter words (34 bytes incl. ChallengeLength).
 pub fn build_params(dialect_index: u16, caps: u32, now: smb_server_proto::types::FileTime) -> Vec<u8> {
     let mut p = Vec::with_capacity(34);
-    p.extend_from_slice(&(dialect_index as u16).to_le_bytes()); // [0-1]
+    p.extend_from_slice(&dialect_index.to_le_bytes()); // [0-1]
     p.push(0x03); //                                            [2] USER|ENCRYPT
     p.extend_from_slice(&16u16.to_le_bytes()); //                [3-4] MaxMpx
     p.extend_from_slice(&1u16.to_le_bytes()); //                 [5-6] VCs

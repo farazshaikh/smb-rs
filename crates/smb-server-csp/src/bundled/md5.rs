@@ -27,6 +27,7 @@ struct Ctx {
 }
 
 impl Ctx {
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // MD5 digest primitive ([RFC 1321])
     fn new() -> Self {
         Ctx {
             state: [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476],
@@ -36,6 +37,7 @@ impl Ctx {
         }
     }
 
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // MD5 digest primitive ([RFC 1321])
     fn block(&mut self, chunk: &[u8]) {
         let mut m = [0u32; 16];
         for (i, mi) in m.iter_mut().enumerate() {
@@ -61,6 +63,7 @@ impl Ctx {
         }
     }
 
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // MD5 digest primitive ([RFC 1321])
     fn update(&mut self, mut data: &[u8]) {
         self.total += data.len() as u64;
         if self.buflen > 0 {
@@ -86,6 +89,7 @@ impl Ctx {
         }
     }
 
+    #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // MD5 digest primitive ([RFC 1321])
     fn finish(mut self) -> [u8; 16] {
         let bitlen = self.total.wrapping_mul(8);
         self.update(&[0x80]);
@@ -103,6 +107,7 @@ impl Ctx {
 }
 
 /// Compute the MD5 digest of `data`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // MD5 digest primitive ([RFC 1321])
 pub fn md5(data: &[u8]) -> [u8; 16] {
     let mut ctx = Ctx::new();
     ctx.update(data);

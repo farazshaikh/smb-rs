@@ -22,11 +22,13 @@ const SBOX: [u8; 256] = [
     0x16,
 ];
 
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-128 block cipher primitive
 fn xtime(x: u8) -> u8 {
     (x << 1) ^ if x & 0x80 != 0 { 0x1b } else { 0 }
 }
 
 /// Expand a 16-byte AES-128 key into the 11 round keys (176 bytes).
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-128 block cipher primitive
 fn expand_key(key: &[u8; 16]) -> Vec<[u8; 16]> {
     let mut w = [[0u8; 4]; 44];
     for i in 0..4 {
@@ -56,6 +58,7 @@ fn expand_key(key: &[u8; 16]) -> Vec<[u8; 16]> {
 }
 
 /// Encrypt one 16-byte block under `key`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-128 block cipher primitive
 pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     let round_keys = expand_key(key);
     // State column-major as FIPS 197: state[r][c] = block[c*4+r].
@@ -95,11 +98,11 @@ pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     }
 
     add_round_key(&mut s, &round_keys[0]);
-    for round in 1..10 {
+    for rk in round_keys.iter().take(10).skip(1) {
         sub_bytes(&mut s);
         shift_rows(&mut s);
         mix_columns(&mut s);
-        add_round_key(&mut s, &round_keys[round]);
+        add_round_key(&mut s, rk);
     }
     sub_bytes(&mut s);
     shift_rows(&mut s);
@@ -108,6 +111,7 @@ pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
 }
 
 /// AES-CMAC over `data` under `key` ([RFC 4493]); returns the 16-byte tag.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // AES-128 block cipher primitive
 pub fn aes128_cmac(key: &[u8; 16], data: &[u8]) -> [u8; 16] {
     const ZERO: [u8; 16] = [0; 16];
     let l = aes128_encrypt_block(key, &ZERO);
@@ -134,7 +138,7 @@ pub fn aes128_cmac(key: &[u8; 16], data: &[u8]) -> [u8; 16] {
     // An empty message counts as one all-zero complete block ([RFC 4493]
     // step 3), so it uses K1 like any other whole final block.
     let n = data.len().div_ceil(16).max(1);
-    let complete = data.len() % 16 == 0;
+    let complete = data.len().is_multiple_of(16);
 
     let mut last_block = [0u8; 16];
     if complete && !data.is_empty() {

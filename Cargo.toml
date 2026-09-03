@@ -8,14 +8,6 @@ repository.workspace = true
 homepage.workspace = true
 publish = false
 
-[features]
-default = ["lib"]
-lib = ["smb-server/lib"]
-handrolled = ["smb-server/handrolled"]
-
-[dependencies]
-smb-server = { path = "crates/smb-server", default-features = false }
-
 [lints]
 workspace = true
 

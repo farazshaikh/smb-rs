@@ -7,7 +7,7 @@ pub mod trans2_cmds;
 
 use smb_server_proto::types::Status;
 use smb_server_proto_smb1::consts;
-use smb_server_proto_smb1::header::{Header, RespBody};
+use smb_server_proto_smb1::header::RespBody;
 
 pub use crate::dispatch::IoCtx;
 use crate::dispatch::{IoContext, ReqView};
@@ -64,7 +64,7 @@ pub async fn dispatch_one<'a>(
             for fid in io.conn.handles.keys().copied().collect::<Vec<_>>() {
                 if let Some(h) = io.conn.handles.remove(&fid) {
                     let vfs = share_vfs(io, req.hdr.tid);
-                    let _ = vfs.close(h);
+                    let _ = vfs.close(h).await;
                 }
             }
             io.conn.session = None;
@@ -95,7 +95,7 @@ pub async fn dispatch_one<'a>(
         consts::COM_PROCESS_EXIT => {
             for (_, h) in std::mem::take(&mut io.conn.handles) {
                 let vfs = share_vfs_any(io);
-                let _ = vfs.close(h);
+                let _ = vfs.close(h).await;
             }
             *bodies = vec![RespBody::new(consts::COM_PROCESS_EXIT, Vec::new(), Vec::new())];
             Ok(Status::SUCCESS)

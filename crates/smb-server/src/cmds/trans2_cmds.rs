@@ -67,7 +67,7 @@ async fn find_first2(
             None => 0,
         }
     };
-    let count = g16(2) as usize;
+    let _count = g16(2) as usize;
     let level = g16(6);
 
     // Fixed params: SearchAttributes(2) SearchCount(2) OpenFlags(2)
@@ -76,13 +76,13 @@ async fn find_first2(
     let pattern = rd.zstring(t.unicode, t.param_base);
     tracing::trace!(level = format!("{:#06x}", level), pattern = %pattern, "find_first2");
 
-    let share = share_name(io, tid)?;
+    let _share = share_name(io, tid)?;
     let vfs = share_vfs(io, tid);
     let (dir_rel, fname_pat) = crate::cmds::dir_cmds_split(&pattern);
 
     // Pattern naming an existing file returns that single entry.
-    if !pattern.contains('*') && !pattern.contains('?') {
-        if let Ok(m) = vfs.stat(pattern.trim_start_matches(['\\', '/'])).await {
+    if !pattern.contains('*') && !pattern.contains('?')
+        && let Ok(m) = vfs.stat(pattern.trim_start_matches(['\\', '/'])).await {
             let name = pattern.rsplit(['\\', '/']).next().unwrap_or("").to_string();
             let entry = smb_server_proto_smb1::find::FindEntry {
                 name,
@@ -101,7 +101,6 @@ async fn find_first2(
             );
             return Ok(find_params(sid(), 1, true, last, data_buf));
         }
-    }
 
     let entries = vfs.list(&dir_rel).await.map_err(vfs_err)?;
     let matched: Vec<smb_server_vfs::Entry> = entries
@@ -210,10 +209,10 @@ async fn find_next2(io: &mut IoCtx<'_>, t: &t2::Trans2Req) -> Result<(Vec<u8>, V
     } else {
         ctx.level
     };
-    let eos = ctx.queue.as_slice().is_empty();
+    let _eos = ctx.queue.as_slice().is_empty();
     let _ = drained;
     io.conn.searches.insert(sid_v, ctx);
-    let eos_final = io.conn.searches.contains_key(&sid_v) == false || {
+    let eos_final = !io.conn.searches.contains_key(&sid_v) || {
         // still entries pending?
         false
     };
@@ -297,7 +296,7 @@ async fn query_path(
     let qm = qmeta_from(&m);
     query::encode_payload(level, &qm, &short)
         .map(|d| (Vec::new(), d))
-        .map_err(|_| Status::INVALID_PARAMETER)
+        .ok_or(Status::INVALID_PARAMETER)
 }
 
 /// QUERY_FILE_INFORMATION by FID.
@@ -327,10 +326,8 @@ pub(crate) async fn query_file(
     };
     query::encode_payload(level, &qm, &name)
         .map(|d| (Vec::new(), d))
-        .map_err(|_| Status::INVALID_PARAMETER)
+        .ok_or(Status::INVALID_PARAMETER)
 }
-
-/// Metadata snapshot of an open handle (path re-statted when possible).
 
 // ---------------- SET_FILE / SET_PATH ----------------
 

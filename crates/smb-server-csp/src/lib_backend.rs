@@ -6,7 +6,6 @@
 //!
 //! [RustCrypto]: https://github.com/RustCrypto
 
-use digest::KeyInit as _;
 use hmac::Mac as _;
 use sha2::Digest as _;
 
@@ -118,7 +117,7 @@ pub fn des_encrypt_key7(key56: [u8; 7], plaintext: [u8; 8]) -> [u8; 8] {
     let key8 = key7_to_key8(&key56);
     let cipher = <des::Des as des::cipher::KeyInit>::new_from_slice(&key8)
         .expect("DES key is exactly 8 bytes");
-    let mut block = des::cipher::Array::clone_from_slice(&plaintext);
+    let mut block = des::cipher::Array::from(plaintext);
     use des::cipher::BlockCipherEncrypt as _;
     cipher.encrypt_block(&mut block);
     block.into()
@@ -141,7 +140,7 @@ pub fn ntlmv1_response(hash21: &[u8; 21], challenge: &[u8; 8]) -> [u8; 24] {
 pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     let cipher =
         <aes::Aes128 as aes::cipher::KeyInit>::new_from_slice(key).expect("AES-128 key is 16 bytes");
-    let mut b = aes::cipher::Array::clone_from_slice(block);
+    let mut b = aes::cipher::Array::from(*block);
     use aes::cipher::BlockCipherEncrypt as _;
     cipher.encrypt_block(&mut b);
     b.into()
@@ -162,12 +161,12 @@ pub fn aes128_cmac(key: &[u8; 16], data: &[u8]) -> [u8; 16] {
 /// `nonce` = 12 bytes from the transform header's Nonce field;
 /// `aad`   = the 32-byte header tail (MsgSize..SessionId end).
 pub fn aes128gcm_seal(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::aead::AeadInOut;
     let c = <aes_gcm::Aes128Gcm as aes_gcm::KeyInit>::new_from_slice(key)
         .expect("AES-GCM key is exactly 16 bytes");
-    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let nonce = aes_gcm::Nonce::from(*nonce);
     let mut buf = plaintext.to_vec();
-    c.encrypt_in_place(nonce, aad, &mut buf).expect("GCM seal");
+    c.encrypt_in_place(&nonce, aad, &mut buf).expect("GCM seal");
     buf
 }
 
@@ -179,25 +178,25 @@ pub fn aes128gcm_open(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> Option<Vec<u8>> {
-    use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::aead::AeadInOut;
     if ciphertext.len() < 16 {
         return None;
     }
     let c = <aes_gcm::Aes128Gcm as aes_gcm::KeyInit>::new_from_slice(key).ok()?;
-    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let nonce = aes_gcm::Nonce::from(*nonce);
     let mut buf = ciphertext.to_vec();
-    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    c.decrypt_in_place(&nonce, aad, &mut buf).ok()?;
     Some(buf)
 }
 
 /// AES-128-CCM seal with an 11-byte nonce ([MS-SMB2] CCM variant).
 pub fn aes128ccm_seal(key: &[u8; 16], nonce: &[u8; 11], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    use ccm::aead::AeadInPlace;
+    use ccm::aead::AeadInOut;
     type AesCcm = ccm::Ccm<aes::Aes128, typenum::U16, typenum::U11>;
     let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).expect("key is 16 bytes");
-    let nonce = ccm::Nonce::from_slice(nonce);
+    let nonce = ccm::Nonce::from(*nonce);
     let mut buf = plaintext.to_vec();
-    c.encrypt_in_place(nonce, aad, &mut buf).expect("CCM seal");
+    c.encrypt_in_place(&nonce, aad, &mut buf).expect("CCM seal");
     buf
 }
 
@@ -209,26 +208,26 @@ pub fn aes128ccm_open(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> Option<Vec<u8>> {
-    use ccm::aead::AeadInPlace;
+    use ccm::aead::AeadInOut;
     if ciphertext.len() < 16 {
         return None;
     }
     type AesCcm = ccm::Ccm<aes::Aes128, typenum::U16, typenum::U11>;
     let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).ok()?;
-    let nonce = ccm::Nonce::from_slice(nonce);
+    let nonce = ccm::Nonce::from(*nonce);
     let mut buf = ciphertext.to_vec();
-    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    c.decrypt_in_place(&nonce, aad, &mut buf).ok()?;
     Some(buf)
 }
 
 /// AES-256-GCM seal ([MS-SMB2] AES-256-GCM cipher); appends the 16-byte tag.
 pub fn aes256gcm_seal(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::aead::AeadInOut;
     let c = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key)
         .expect("AES-256-GCM key is exactly 32 bytes");
-    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let nonce = aes_gcm::Nonce::from(*nonce);
     let mut buf = plaintext.to_vec();
-    c.encrypt_in_place(nonce, aad, &mut buf).expect("GCM seal");
+    c.encrypt_in_place(&nonce, aad, &mut buf).expect("GCM seal");
     buf
 }
 
@@ -240,25 +239,25 @@ pub fn aes256gcm_open(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> Option<Vec<u8>> {
-    use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::aead::AeadInOut;
     if ciphertext.len() < 16 {
         return None;
     }
     let c = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key).ok()?;
-    let nonce = aes_gcm::Nonce::from_slice(nonce);
+    let nonce = aes_gcm::Nonce::from(*nonce);
     let mut buf = ciphertext.to_vec();
-    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    c.decrypt_in_place(&nonce, aad, &mut buf).ok()?;
     Some(buf)
 }
 
 /// AES-256-CCM seal with an 11-byte nonce ([MS-SMB2] CCM variant).
 pub fn aes256ccm_seal(key: &[u8; 32], nonce: &[u8; 11], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    use ccm::aead::AeadInPlace;
+    use ccm::aead::AeadInOut;
     type AesCcm = ccm::Ccm<aes::Aes256, typenum::U16, typenum::U11>;
     let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).expect("key is 32 bytes");
-    let nonce = ccm::Nonce::from_slice(nonce);
+    let nonce = ccm::Nonce::from(*nonce);
     let mut buf = plaintext.to_vec();
-    c.encrypt_in_place(nonce, aad, &mut buf).expect("CCM seal");
+    c.encrypt_in_place(&nonce, aad, &mut buf).expect("CCM seal");
     buf
 }
 
@@ -270,15 +269,15 @@ pub fn aes256ccm_open(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> Option<Vec<u8>> {
-    use ccm::aead::AeadInPlace;
+    use ccm::aead::AeadInOut;
     if ciphertext.len() < 16 {
         return None;
     }
     type AesCcm = ccm::Ccm<aes::Aes256, typenum::U16, typenum::U11>;
     let c = <AesCcm as ccm::KeyInit>::new_from_slice(key).ok()?;
-    let nonce = ccm::Nonce::from_slice(nonce);
+    let nonce = ccm::Nonce::from(*nonce);
     let mut buf = ciphertext.to_vec();
-    c.decrypt_in_place(nonce, aad, &mut buf).ok()?;
+    c.decrypt_in_place(&nonce, aad, &mut buf).ok()?;
     Some(buf)
 }
 

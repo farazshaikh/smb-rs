@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::{Frame, FrameSink, FrameSource, Transport, TransportError};
 
 /// One end of an in-memory transport pair.
+#[derive(Debug)]
 pub struct MemTransport {
     rx: mpsc::Receiver<Vec<u8>>,
     tx: mpsc::Sender<Vec<u8>>,

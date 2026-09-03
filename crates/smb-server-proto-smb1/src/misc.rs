@@ -1,7 +1,6 @@
 //! Small commands: CLOSE, FLUSH, SEEK, ECHO, LOGOFF_ANDX, TREE_DISCONNECT,
 //! QUERY_INFORMATION_DISK, PROCESS_EXIT and LOCKING_ANDX.
 
-use smb_server_proto::types::Status;
 
 fn u16le(w: &[u8], off: usize) -> u16 {
     w.get(off..off + 2)
@@ -10,6 +9,7 @@ fn u16le(w: &[u8], off: usize) -> u16 {
 }
 
 /// CLOSE request (WC=3): FID plus optional mtime.
+#[derive(Debug)]
 pub struct CloseReq {
     /// Handle to close.
     pub fid: u16,
@@ -31,7 +31,7 @@ impl CloseReq {
 }
 
 /// Empty WC=0 response body.
-pub fn empty_response(command: u8) -> (Vec<u8>, Vec<u8>) {
+pub fn empty_response(_command: u8) -> (Vec<u8>, Vec<u8>) {
     (Vec::new(), Vec::new())
 }
 
@@ -41,6 +41,7 @@ pub fn flush_fid(words: &[u8]) -> Option<u16> {
 }
 
 /// ECHO request: repeat count plus echo data.
+#[derive(Debug)]
 pub struct EchoReq {
     /// Number of responses requested.
     pub count: u16,
@@ -66,6 +67,7 @@ impl EchoReq {
 }
 
 /// LOGOFF_ANDX response (AndX triple only).
+#[derive(Debug)]
 pub struct LogoffResp;
 impl LogoffResp {
     /// Build WC=2 terminal AndX body.
@@ -75,6 +77,7 @@ impl LogoffResp {
 }
 
 /// TREE_DISCONNECT response (WC=0).
+#[derive(Debug)]
 pub struct TreeDisconnectResp;
 impl TreeDisconnectResp {
     /// Build WC=0 body.
@@ -84,6 +87,7 @@ impl TreeDisconnectResp {
 }
 
 /// QUERY_INFORMATION_DISK response (WC=5).
+#[derive(Debug)]
 pub struct QueryDiskInfo {
     /// Total allocation units.
     pub total_units: u32,
@@ -109,6 +113,7 @@ impl QueryDiskInfo {
 }
 
 /// SEEK request ([MS-CIFS] §2.2.4.x): FID, mode, offset.
+#[derive(Debug)]
 pub struct SeekReq {
     /// Open file identifier.
     pub fid: u16,
@@ -138,6 +143,7 @@ impl SeekReq {
 }
 
 /// LOCKING_ANDX request — accepted but not enforced ([MS-CIFS] §2.2.4.32).
+#[derive(Debug)]
 pub struct LockingAndxReq;
 
 impl LockingAndxReq {
@@ -148,6 +154,7 @@ impl LockingAndxReq {
 }
 
 /// NT_CANCEL has no dedicated response beyond a CANCELLED status echo.
+#[derive(Debug)]
 pub struct NtCancel;
 
 fn u32le(w: &[u8], off: usize) -> u32 {

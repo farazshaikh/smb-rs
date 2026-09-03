@@ -224,6 +224,14 @@ pub fn read_response(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     params.extend_from_slice(&[0u8; 6]); // reserved tail (total = 24B)
 
     debug_assert_eq!(params.len(), PARAMS_LEN);
+    debug_assert_eq!(
+        u16::from_le_bytes(params[DATA_LEN_OFF..DATA_LEN_OFF + 2].try_into().unwrap()),
+        data.len() as u16
+    );
+    debug_assert_eq!(
+        u16::from_le_bytes(params[DATA_OFFS_OFF..DATA_OFFS_OFF + 2].try_into().unwrap()),
+        doff as u16
+    );
 
     let pad = doff - bc_end;
     let mut bytes = vec![0u8; pad];

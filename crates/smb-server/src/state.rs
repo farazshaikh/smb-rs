@@ -462,6 +462,10 @@ pub struct BreakCrypto {
     pub signed: bool,
 }
 
+/// One lease-break notification: `(key, old_state, new_state, epoch,
+/// outbound, crypto)` for a holder that must be broken ([MS-SMB2] §3.3.4.7).
+pub type LeaseBreak = ([u8; 16], u32, u32, u16, tokio::sync::mpsc::Sender<Vec<u8>>, BreakCrypto);
+
 /// A granted exclusive oplock and the means to break it.
 pub struct OplockHolder {
     /// Session that holds the oplock.
@@ -632,14 +636,7 @@ impl LeaseTable {
         owner: LockOwner,
         req_key: Option<[u8; 16]>,
         clear: u32,
-    ) -> Vec<(
-        [u8; 16],
-        u32,
-        u32,
-        u16,
-        tokio::sync::mpsc::Sender<Vec<u8>>,
-        BreakCrypto,
-    )> {
+    ) -> Vec<LeaseBreak> {
         let mut held = self.held.lock().unwrap();
         let mut breaks = Vec::new();
         let Some(holders) = held.get_mut(path) else {
@@ -680,14 +677,7 @@ impl LeaseTable {
         dir: &str,
         owner: LockOwner,
         clear: u32,
-    ) -> Vec<(
-        [u8; 16],
-        u32,
-        u32,
-        u16,
-        tokio::sync::mpsc::Sender<Vec<u8>>,
-        BreakCrypto,
-    )> {
+    ) -> Vec<LeaseBreak> {
         let prefix = format!("{dir}/");
         let mut held = self.held.lock().unwrap();
         let mut breaks = Vec::new();

@@ -42,21 +42,18 @@ pub fn query_security(stored: Option<&[u8]>, additional: u32) -> Option<Vec<u8>>
         None => default_descriptor(),
     };
     let mut out = SecurityDescriptor::new();
-    if additional & sec_info::OWNER != 0 {
-        if let Some(o) = src.owner() {
+    if additional & sec_info::OWNER != 0
+        && let Some(o) = src.owner() {
             out.set_owner(o.clone());
         }
-    }
-    if additional & sec_info::GROUP != 0 {
-        if let Some(g) = src.group() {
+    if additional & sec_info::GROUP != 0
+        && let Some(g) = src.group() {
             out.set_group(g.clone());
         }
-    }
-    if additional & sec_info::DACL != 0 {
-        if let Some(d) = src.dacl() {
+    if additional & sec_info::DACL != 0
+        && let Some(d) = src.dacl() {
             out.set_dacl(d.clone());
         }
-    }
     out.to_bytes().ok()
 }
 

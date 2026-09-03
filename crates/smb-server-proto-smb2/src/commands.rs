@@ -989,7 +989,7 @@ pub fn build_info_resp(buffer: &[u8]) -> Vec<u8> {
     b.extend_from_slice(&9u16.to_le_bytes()); // StructureSize
     b.extend_from_slice(&(BUF_OFF as u16).to_le_bytes()); // OutputBufferOffset
     b.extend_from_slice(&(buffer.len() as u32).to_le_bytes()); // OutputBufferLength
-    while (BODY + b.len()) % 8 != 0 || BODY + b.len() < BUF_OFF {
+    while !(BODY + b.len()).is_multiple_of(8) || BODY + b.len() < BUF_OFF {
         b.push(0);
     }
     b.extend_from_slice(buffer);
@@ -1496,12 +1496,6 @@ mod ioctl_off {
     pub const INPUT_OFFSET: usize = BODY + 24;
     /// InputBufferLength.
     pub const INPUT_COUNT: usize = BODY + 28;
-    /// MaxInputResponse.
-    pub const MAX_INPUT: usize = BODY + 32;
-    /// OutputBufferOffset (absolute).
-    pub const OUTPUT_OFFSET: usize = BODY + 36;
-    /// OutputBufferLength.
-    pub const OUTPUT_COUNT: usize = BODY + 40;
     /// MaxOutputResponse.
     pub const MAX_OUTPUT: usize = BODY + 44;
     /// Flags.
@@ -1607,7 +1601,7 @@ pub fn build_ioctl_resp(file_id: FileId, ctl_code: u32, output: &[u8]) -> Vec<u8
     b.extend_from_slice(&(output.len() as u32).to_le_bytes()); // OutputCount
     b.extend_from_slice(&0u32.to_le_bytes()); // Flags
     b.extend_from_slice(&0u32.to_le_bytes()); // Reserved2
-    while (BODY + b.len()) % 8 != 0 || BODY + b.len() < out_off {
+    while !(BODY + b.len()).is_multiple_of(8) || BODY + b.len() < out_off {
         b.push(0);
     }
     b.extend_from_slice(output);

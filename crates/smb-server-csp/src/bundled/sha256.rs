@@ -15,6 +15,7 @@ const K: [u32; 64] = [
 ];
 
 /// Full-message SHA-256 over `data`, returning the 32-byte digest.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // SHA-256 digest primitive ([FIPS 180-4])
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
         0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e_527f, 0x9b05_688c, 0x1f83_d9ab,

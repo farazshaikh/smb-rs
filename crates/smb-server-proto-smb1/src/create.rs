@@ -64,7 +64,7 @@ impl NtCreateReq {
 
         // Skip one pad byte when the data area starts at an odd offset.
         let mut start = 0;
-        if bc_off_abs % 2 != 0 && !data.is_empty() {
+        if !bc_off_abs.is_multiple_of(2) && !data.is_empty() {
             start = 1;
         }
         let mut rd = Reader::new(data, start);

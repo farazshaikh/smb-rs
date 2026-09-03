@@ -1,7 +1,7 @@
 //! Credential verification against the configured user database using the
 //! NTLM family of schemes ([MS-NLMP] §3.3).
 
-use smb_server_auth::crypto::{hmac_md5, md4, nt_hash, ntlmv1_response, rc4};
+use smb_server_auth::crypto::{hmac_md5, nt_hash, ntlmv1_response};
 use smb_server_auth::ntlm::Type3;
 use std::collections::HashMap;
 

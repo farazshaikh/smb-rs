@@ -119,7 +119,7 @@ impl NbssReader {
 /// SMB-over-TCP uses the full 24-bit length ([MS-SMB2] §2.1), so all of byte 1
 /// participates. Masking to the RFC 1002 17-bit limit would truncate any frame
 /// >= 128 KiB (multi-credit reads/writes, sealed transforms) and desync the
-/// stream; the length must decode symmetrically with [`encode_nbss_len`].
+/// > stream; the length must decode symmetrically with [`encode_nbss_len`].
 #[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))]
 fn decode_nbss_len(hdr: &[u8]) -> usize {
     ((hdr[1] as usize) << 16) | ((hdr[2] as usize) << 8) | hdr[3] as usize

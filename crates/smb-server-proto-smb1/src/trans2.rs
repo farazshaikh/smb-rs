@@ -100,10 +100,10 @@ impl Trans2Req {
     /// * SetupCount≥1 — the subcommand rides in `Setup[0]`; the buffer holds
     ///   only the fixed fields (Impacket style).
     pub fn parse(
-        wct: u8,
+        _wct: u8,
         words: &[u8],
         buf: &[u8],
-        bc_off_abs: usize,
+        _bc_off_abs: usize,
         unicode: bool,
     ) -> Option<Trans2Req> {
         if words.len() < 30 {
@@ -209,7 +209,7 @@ pub fn trans2_resp(params: Vec<u8>, data: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
 /// using `param_base` as parity base.
 pub fn read_param_zstring<'a>(
     rd: &mut Reader<'a>,
-    pos: usize,
+    _pos: usize,
     param_base: usize,
     unicode: bool,
 ) -> String {

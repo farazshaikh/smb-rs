@@ -18,9 +18,9 @@ pub fn read_path(req_data: &[u8], unicode: bool, data_base: usize) -> String {
 /// Read the two NUL-terminated strings of a RENAME request.
 pub fn read_two_paths(req_data: &[u8], unicode: bool, data_base: usize) -> (String, String) {
     let mut rd = Reader::new(req_data, 0);
-    if !req_data.is_empty() && req_data[0] == 0x04 {
-        rd.skip(1);
-    } else if unicode && data_base % 2 != 0 && !req_data.is_empty() {
+    if (!req_data.is_empty() && req_data[0] == 0x04)
+        || (unicode && !data_base.is_multiple_of(2) && !req_data.is_empty())
+    {
         rd.skip(1);
     }
     let a = rd.zstring(unicode, data_base);
@@ -63,7 +63,7 @@ impl QueryInfoResp {
 /// Parse a legacy DOS-encoded UTC time into Unix seconds
 /// ([MS-DTYP] DOSDATE/TIME packing used by core protocol fields).
 pub fn dos_time_to_unix(dos: u32) -> u64 {
-    let date = (dos >> 16) as u32;
+    let date = dos >> 16;
     let time = dos & 0xffff;
     let year = 1980 + ((date >> 9) & 0x7f) as i64;
     let month = (date >> 5) & 0xf;

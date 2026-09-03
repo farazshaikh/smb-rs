@@ -1269,9 +1269,6 @@ dependencies = [
 [[package]]
 name = "rustsmb-meta"
 version = "0.2.0"
-dependencies = [
- "smb-server",
-]
 
 [[package]]
 name = "rustversion"

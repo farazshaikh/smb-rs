@@ -4,6 +4,7 @@
 use super::sha256::sha256;
 
 /// HMAC-SHA256 of `data` under `key`; output is a 32-byte tag.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // HMAC-SHA256 primitive ([RFC 2104])
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut key = key.to_vec();
     if key.len() > 64 {

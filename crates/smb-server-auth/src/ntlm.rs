@@ -118,7 +118,7 @@ pub fn build_type2(challenge: &[u8; 8], domain: &str, hostname: &str) -> Vec<u8>
     // TargetInfo AV pairs — required input for client-side NTLMv2.
     let mut ti = Vec::new();
     {
-        let mut put_av = |ti: &mut Vec<u8>, typ: u16, val: &[u16]| {
+        let put_av = |ti: &mut Vec<u8>, typ: u16, val: &[u16]| {
             ti.extend_from_slice(&typ.to_le_bytes());
             ti.extend_from_slice(&((val.len() * 2) as u16).to_le_bytes());
             for u in val {

@@ -14,6 +14,7 @@ pub struct FindEntry {
 }
 
 /// Fixed portion size per level, matching the fields written below.
+#[cfg(test)]
 const fn fixed_size(level: u16) -> usize {
     match level {
         // NextEntryOffset + FileIndex + 4×FILETIME + EOF + Alloc + Attrs

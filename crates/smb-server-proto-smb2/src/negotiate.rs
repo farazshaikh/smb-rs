@@ -251,13 +251,13 @@ pub fn build_response_full(
 
     let mut ctx = Vec::new();
     if dialect == DIALECT_311 {
-        let mut push_ctx = |ctx: &mut Vec<u8>, kind: u16, data: &[u8]| {
+        let push_ctx = |ctx: &mut Vec<u8>, kind: u16, data: &[u8]| {
             // Each context begins 8-byte aligned; pad BEFORE it, never after,
             // so no trailing pad follows the final context. Clients (and the
             // MS-SMB2 test SDK) recompute the pre-auth hash over the canonical
             // unpadded tail, so a spurious trailing pad breaks 3.1.1 signing
             // and encryption key derivation ([MS-SMB2] §3.3.4.1 / §3.3.5.4).
-            while ctx.len() % 8 != 0 {
+            while !ctx.len().is_multiple_of(8) {
                 ctx.push(0);
             }
             ctx.extend_from_slice(&kind.to_le_bytes());

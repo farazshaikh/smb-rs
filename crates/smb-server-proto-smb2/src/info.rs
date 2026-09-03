@@ -262,10 +262,16 @@ pub fn encode_fs_info(class: u8) -> Option<Vec<u8>> {
 
 // ---------------- SET_INFO decoding ----------------
 
+/// Marker error for [`decode_set_file_op`]: the class/buffer was malformed or
+/// unsupported. Carries no detail -- callers uniformly map it to
+/// `STATUS_INVALID_PARAMETER`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeSetInfoError;
+
 /// Decode SET_INFO `buffer` into a neutral [`smb_server_vfs::SetOp`] where the
 /// operation maps onto one; `Ok(None)` means accepted-but-ignored (e.g.
 /// position), and errors mean an unsupported/malformed class.
-pub fn decode_set_file_op(class: u8, buf: &[u8]) -> Result<Option<smb_server_vfs::SetOp>, ()> {
+pub fn decode_set_file_op(class: u8, buf: &[u8]) -> Result<Option<smb_server_vfs::SetOp>, DecodeSetInfoError> {
     let r64 = |o: usize| -> u64 {
         buf.get(o..o + 8)
             .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
@@ -290,12 +296,12 @@ pub fn decode_set_file_op(class: u8, buf: &[u8]) -> Result<Option<smb_server_vfs
             // ReplaceIfExists(1)+Reserved(3) RootDirectory(8) NameLen(4) then
             // UTF-16LE name ([MS-FSCC] §2.4.34.1).
             if buf.len() < 20 {
-                return Err(());
+                return Err(DecodeSetInfoError);
             }
             let replace = buf.first().copied().unwrap_or(0) != 0;
             let len =
-                u32::from_le_bytes(buf[16..20].try_into().map_err(|_| ())?) as usize;
-            let raw = buf.get(20..(20 + len).min(buf.len())).ok_or(())?;
+                u32::from_le_bytes(buf[16..20].try_into().map_err(|_| DecodeSetInfoError)?) as usize;
+            let raw = buf.get(20..(20 + len).min(buf.len())).ok_or(DecodeSetInfoError)?;
             let units: Vec<u16> = raw
                 .chunks_exact(2)
                 .map(|c| c[0] as u16 | ((c[1] as u16) << 8))
@@ -309,7 +315,7 @@ pub fn decode_set_file_op(class: u8, buf: &[u8]) -> Result<Option<smb_server_vfs
             // Flags(1) EaNameLength(1) EaValueLength(2) then the ASCII name
             // (null-terminated) and the value bytes.
             if buf.len() < 8 {
-                return Err(());
+                return Err(DecodeSetInfoError);
             }
             let name_len = buf[5] as usize;
             let val_len = u16::from_le_bytes([buf[6], buf[7]]) as usize;
@@ -317,13 +323,13 @@ pub fn decode_set_file_op(class: u8, buf: &[u8]) -> Result<Option<smb_server_vfs
             let val_start = name_start + name_len + 1; // skip the null terminator
             let val_end = val_start + val_len;
             if buf.len() < val_end {
-                return Err(());
+                return Err(DecodeSetInfoError);
             }
             let name = String::from_utf8_lossy(&buf[name_start..name_start + name_len]).into_owned();
             let value = buf[val_start..val_end].to_vec();
             Ok(Some(smb_server_vfs::SetOp::Ea { name, value }))
         }
-        _ => Err(()),
+        _ => Err(DecodeSetInfoError),
     }
 }
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use smb_server_proto::types::Status;
 use smb_server_proto_smb1::consts;
-use smb_server_proto_smb1::header::{HDR_LEN, Header, RespBody, build_response, parse_header};
+use smb_server_proto_smb1::header::{Header, RespBody, build_response, parse_header};
 
 use smb_server_proto_smb1::consts::flags2;
 use smb_server_proto_smb2::{PROTO_ID_COMPRESSED, PROTO_ID_ENCRYPTED, PROTO_ID_SMB2};
@@ -17,7 +17,7 @@ use smb_server_transport::{FrameSink, Transport};
 use metrics::{counter, histogram};
 use tokio::sync::mpsc;
 
-use crate::state::{ConnState, ServerShared, Session, next_uid};
+use crate::state::{ConnState, ServerShared};
 
 /// Depth of the per-connection outbound frame queue.
 const OUTBOUND_QUEUE_DEPTH: usize = 64;
@@ -167,8 +167,8 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                     // does not compress responses opportunistically, and doing
                     // so breaks peers that reject a chained payload filling the
                     // buffer. compress_message* wraps only when it shrinks.
-                    if let Some(algo) = c2.compress_algo {
-                        if c2.compress_response
+                    if let Some(algo) = c2.compress_algo
+                        && c2.compress_response
                             && resp.first() != Some(&PROTO_ID_ENCRYPTED)
                         {
                             let packed = if c2.compress_chained {
@@ -180,7 +180,6 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
                                 resp = packed;
                             }
                         }
-                    }
                     histogram!("smb_frame_duration_us").record(start.elapsed().as_micros() as f64);
                     counter!("smb_responses_total").increment(1);
                     if out_tx.send(resp).await.is_err() {
@@ -197,11 +196,10 @@ pub async fn serve_client(server: Arc<crate::state::ServerShared>, transport: Bo
             }
 
             // SMB1 frames.
-            if let Some(resp) = process_frame(&server, &mut conn, &frame.0).await {
-                if out_tx.send(resp).await.is_err() {
+            if let Some(resp) = process_frame(&server, &mut conn, &frame.0).await
+                && out_tx.send(resp).await.is_err() {
                     break;
                 }
-            }
         }
 
         // Connection closing: drop any byte-range locks this session held.
@@ -237,11 +235,10 @@ pub fn rand_challenge_pub() -> [u8; 8] {
 pub fn rand_bytes(n: usize) -> Vec<u8> {
     use std::io::Read;
     let mut buf = vec![0u8; n];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut buf).is_ok() {
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom")
+        && f.read_exact(&mut buf).is_ok() {
             return buf;
         }
-    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -257,11 +254,10 @@ pub fn rand_bytes(n: usize) -> Vec<u8> {
 fn rand_challenge() -> [u8; 8] {
     use std::io::Read;
     let mut b = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut b).is_ok() {
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom")
+        && f.read_exact(&mut b).is_ok() {
             return b;
         }
-    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -295,21 +291,19 @@ pub(crate) async fn process_frame(
             .windows(smb_server_proto_smb2::SMB2_MAGIC.len())
             .any(|w| w == smb_server_proto_smb2::SMB2_MAGIC)
             || buf.windows(b"SMB 2.".len()).any(|w| w == b"SMB 2."))
-    {
-        if let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {
+        && let Some(resp) = crate::smb2::handle_multiprotocol_negotiate(buf, &server.guid) {
             conn.upgraded_smb2 = true;
             tracing::info!("client upgraded to SMB2 via multi-protocol negotiate");
             return Some(resp);
         }
-    }
 
     let wct = buf[wc_off] as usize;
-    let bc_off_abs = wc_off + 1 + wct * consts::WORD_LEN;
+    let _bc_off_abs = wc_off + 1 + wct * consts::WORD_LEN;
 
     // Build the AndX chain view over this single frame buffer.
     let mut views: Vec<ReqView> = Vec::new();
     let mut off = wc_off;
-    while off + 1 <= buf.len() {
+    while off < buf.len() {
         let cwct = buf[off] as usize;
         let cbc = off + 1 + cwct * consts::WORD_LEN;
         if cbc + consts::BYTE_COUNT_LEN > buf.len() {
@@ -365,13 +359,4 @@ pub(crate) async fn process_frame(
     }
 
     Some(build_response(&final_hdr, last_status, bodies))
-}
-
-/// Record the authenticated session on the SMB1-side connection state.
-fn io_conn_set_session(conn: &mut ConnState, user: String, guest: bool) {
-    conn.session = Some(Session {
-        user,
-        guest,
-        trees: Vec::new(),
-    });
 }

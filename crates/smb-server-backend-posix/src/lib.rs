@@ -304,7 +304,7 @@ fn meta_of(md: &std::fs::Metadata) -> FileMeta {
             FileTime::from_unix(md.mtime(), md.mtime_nsec() as u32),
             FileTime::from_unix(md.ctime(), md.ctime_nsec() as u32),
         ],
-        alloc: ((eof + 4095) / 4096) * 4096,
+        alloc: eof.div_ceil(4096) * 4096,
         eof,
         attrs,
         is_dir: md.is_dir(),
@@ -379,15 +379,14 @@ impl Vfs for PosixVfs {
         // STATUS_STOPPED_ON_SYMLINK unless FILE_OPEN_REPARSE_POINT is set
         // ([MS-SMB2] §3.3.5.9).
         const OPT_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        if options & OPT_OPEN_REPARSE_POINT == 0 {
-            if let Some((target, unparsed_len, relative)) = symlink_stop(&self.root, rel) {
+        if options & OPT_OPEN_REPARSE_POINT == 0
+            && let Some((target, unparsed_len, relative)) = symlink_stop(&self.root, rel) {
                 return Err(VfsError::StoppedOnSymlink {
                     target,
                     unparsed_len,
                     relative,
                 });
             }
-        }
         let want_dir = is_dir || options & OPT_DIRECTORY_FILE != 0;
         let existing = std::fs::symlink_metadata(&path).ok();
         let exists = existing.is_some();
@@ -579,11 +578,10 @@ impl Vfs for PosixVfs {
         }
         // Close the io_uring file explicitly (async close), then honor
         // delete-on-close.
-        if let Some(inner) = open.inner_as_mut::<PosixInner>() {
-            if let Some(f) = inner.file.take() {
+        if let Some(inner) = open.inner_as_mut::<PosixInner>()
+            && let Some(f) = inner.file.take() {
                 let _ = f.close().await;
             }
-        }
         if open.delete_on_close || open.delete_pending {
             if open.is_dir {
                 tokio_uring::fs::remove_dir(&open.path)
@@ -754,7 +752,7 @@ impl Vfs for PosixVfs {
             SetOp::Ea { name, value } => {
                 // Persist the EA as an extended attribute; the write also
                 // raises an IN_ATTRIB inotify event for CHANGE_NOTIFY.
-                xattr::set(&p, &format!("user.smbea.{name}"), value).map_err(map_io)?;
+                xattr::set(&p, format!("user.smbea.{name}"), value).map_err(map_io)?;
             }
         }
         Ok(())

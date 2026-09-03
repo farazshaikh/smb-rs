@@ -1,6 +1,7 @@
 //! MD4 message digest ([RFC 1320]).
 
 /// Compute the MD4 digest of `data`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // MD4 digest primitive ([RFC 1320])
 pub fn md4(data: &[u8]) -> [u8; 16] {
     // Round functions per RFC 1320 §3.3.x.
     fn round1(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, x: u32, s: u32) {

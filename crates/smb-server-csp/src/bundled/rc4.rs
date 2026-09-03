@@ -3,6 +3,7 @@
 //! ([MS-NLMP] §3.2.5.1.2).
 
 /// XOR `data` with the RC4 keystream generated from `key`.
+#[cfg_attr(dylint_lib = "no_magic_numbers", allow(no_magic_numbers))] // RC4 stream cipher primitive ([MS-NLMP] key exchange)
 pub fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     // KSA
     let mut s: [u8; 256] = [0; 256];

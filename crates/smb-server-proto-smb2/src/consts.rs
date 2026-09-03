@@ -67,4 +67,13 @@ pub mod aead {
     pub const CCM_NONCE_LEN: usize = 11;
     /// AEAD authentication tag length (lands in the transform Signature field).
     pub const TAG_LEN: usize = 16;
+    /// Key length for the AES-128 cipher variants ([MS-SMB2] §2.2.3.1.2).
+    pub const AES128_KEY_LEN: usize = 16;
+    /// Key length for the AES-256 cipher variants ([MS-SMB2] §2.2.3.1.2).
+    pub const AES256_KEY_LEN: usize = 32;
 }
+
+/// ChannelSequence replay-window half-range: the maximum forward distance
+/// (mod 2^16) still accepted as "newer" before it is treated as a replay
+/// ([MS-SMB2] §3.3.5.2.10).
+pub const CHANNEL_SEQUENCE_WINDOW: u16 = 0x7FFF;
