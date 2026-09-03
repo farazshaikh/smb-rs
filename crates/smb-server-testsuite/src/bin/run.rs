@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Duration;
 
+use clap::Parser;
 use smb_server_testsuite::recorder::{self, RunReport};
 use smb_server_testsuite::{cases, run_case, Ctx, Driver, Endpoint, Status, DEFAULT_PORT};
 
@@ -21,98 +22,74 @@ const EXIT_USAGE: i32 = 2;
 /// Grace period for a freshly spawned server to bind its port.
 const SERVER_BIND_DELAY_MS: u64 = 1500;
 
+/// Command-line interface.
+#[derive(Debug, Parser)]
+#[command(
+    name = "smb-testrunner",
+    version,
+    about = "smb-server-rs conformance suite runner",
+    long_about = None
+)]
 struct Args {
+    /// List cases and exit.
+    #[arg(long = "list")]
     list: bool,
+
+    /// Run only cases whose id/category contains this substring.
+    #[arg(long = "filter", value_name = "SUBSTR")]
     filter: Option<String>,
+
+    /// Write results under --data-dir.
+    #[arg(long = "record")]
     record: bool,
+
+    /// Results directory.
+    #[arg(long = "data-dir", default_value = "test/data")]
     data_dir: PathBuf,
+
+    /// Server host (default env or 127.0.0.1).
+    #[arg(long = "host")]
     host: Option<String>,
+
+    /// Server port (default env or 445).
+    #[arg(long = "port")]
     port: Option<u16>,
+
+    /// Username (default env or faraz).
+    #[arg(long = "user")]
     user: Option<String>,
+
+    /// Password (default env or pass).
+    #[arg(long = "pass")]
     pass: Option<String>,
+
+    /// Share name (default env or public).
+    #[arg(long = "share")]
     share: Option<String>,
+
+    /// Python interpreter override.
+    #[arg(long = "python")]
     python: Option<String>,
+
+    /// Driver script override.
+    #[arg(long = "driver")]
     driver: Option<String>,
+
+    /// Spawn --server-bin on --port before running.
+    #[arg(long = "start-server")]
     start_server: bool,
+
+    /// Server binary to spawn with --start-server.
+    #[arg(long = "server-bin", default_value = "target/debug/rustsmb")]
     server_bin: String,
+
+    /// Directory to publish when starting the server.
+    #[arg(long = "share-dir", value_name = "PATH")]
     share_dir: Option<String>,
+
+    /// Always exit 0 (do not fail CI on test failures).
+    #[arg(long = "no-fail")]
     no_fail: bool,
-}
-
-impl Args {
-    fn parse() -> Args {
-        let mut a = Args {
-            list: false,
-            filter: None,
-            record: false,
-            data_dir: PathBuf::from("test/data"),
-            host: None,
-            port: None,
-            user: None,
-            pass: None,
-            share: None,
-            python: None,
-            driver: None,
-            start_server: false,
-            server_bin: "target/debug/rustsmb".into(),
-            share_dir: None,
-            no_fail: false,
-        };
-        let mut it = std::env::args().skip(1);
-        while let Some(arg) = it.next() {
-            match arg.as_str() {
-                "--list" => a.list = true,
-                "--record" => a.record = true,
-                "--start-server" => a.start_server = true,
-                "--no-fail" => a.no_fail = true,
-                "--filter" => a.filter = it.next(),
-                "--data-dir" => a.data_dir = PathBuf::from(next(&mut it, "--data-dir")),
-                "--host" => a.host = it.next(),
-                "--port" => a.port = it.next().and_then(|p| p.parse().ok()),
-                "--user" => a.user = it.next(),
-                "--pass" => a.pass = it.next(),
-                "--share" => a.share = it.next(),
-                "--python" => a.python = it.next(),
-                "--driver" => a.driver = it.next(),
-                "--server-bin" => a.server_bin = next(&mut it, "--server-bin"),
-                "--share-dir" => a.share_dir = it.next(),
-                "-h" | "--help" => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                other => {
-                    eprintln!("unknown argument: {other}");
-                    print_help();
-                    std::process::exit(EXIT_USAGE);
-                }
-            }
-        }
-        a
-    }
-}
-
-fn next(it: &mut impl Iterator<Item = String>, flag: &str) -> String {
-    it.next().unwrap_or_else(|| {
-        eprintln!("{flag} requires a value");
-        std::process::exit(EXIT_USAGE);
-    })
-}
-
-fn print_help() {
-    eprintln!(
-        "smb-testrunner — smb-server-rs conformance suite\n\n\
-         --list                 list cases and exit\n\
-         --filter <substr>      run only cases whose id/category contains substr\n\
-         --record               write results under --data-dir\n\
-         --data-dir <path>      results directory (default test/data)\n\
-         --host/--port          server endpoint (default env or 127.0.0.1:445)\n\
-         --user/--pass/--share  credentials and share (default faraz/pass/public)\n\
-         --python/--driver      python interpreter and driver script overrides\n\
-         --start-server         spawn --server-bin on --port before running\n\
-         --server-bin <path>    server binary (default target/debug/rustsmb)\n\
-         --share-dir <path>     directory to publish when starting the server\n\
-         --no-fail              always exit 0 (do not fail CI on test failures)"
-    );
 }
 
 fn main() {
