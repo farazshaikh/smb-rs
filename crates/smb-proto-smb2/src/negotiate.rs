@@ -35,6 +35,8 @@ pub mod caps {
     pub const DIRECTORY_LEASING: u32 = 0x0000_0020;
     /// Encryption (dialects 3.0/3.0.2; 3.1.1 negotiates via context).
     pub const ENCRYPTION: u32 = 0x0000_0040;
+    /// Server-to-client notifications (dialect 3.1.1).
+    pub const NOTIFICATIONS: u32 = 0x0000_0080;
 }
 
 /// Negotiate context types (§2.2.3.1.2).
@@ -205,6 +207,7 @@ pub fn build_response_full(
     compression: &[u16],
     compression_chained: bool,
     require_signing: bool,
+    notifications: bool,
 ) -> Vec<u8> {
     let mut b = Vec::with_capacity(128);
     b.extend_from_slice(&65u16.to_le_bytes()); // StructureSize
@@ -230,6 +233,10 @@ pub fn build_response_full(
     } else {
         0
     };
+    // NOTIFICATIONS is set only when the client requested it and the server
+    // declares support ([MS-SMB2] §3.3.5.4); the caller has already applied
+    // both conditions plus the dialect==3.1.1 requirement.
+    let caps = caps | if notifications { caps::NOTIFICATIONS } else { 0 };
     b.extend_from_slice(&caps.to_le_bytes()); // Capabilities
     b.extend_from_slice(&(1024 * 1024u32).to_le_bytes()); // MaxTransactionSize
     b.extend_from_slice(&(1024 * 1024u32).to_le_bytes()); // MaxReadSize
@@ -307,5 +314,5 @@ const BODY_START_FIXED: usize = 64 + 64;
 /// pre-3.1.1 dialects (where the spec marks it Reserved); every real-world
 /// parser expects the field's presence.
 pub fn build_response(dialect: u16, guid: &[u8; 16], now: u64) -> Vec<u8> {
-    build_response_full(dialect, guid, now, &[0u8; 32], None, None, &[], false, false)
+    build_response_full(dialect, guid, now, &[0u8; 32], None, None, &[], false, false, false)
 }

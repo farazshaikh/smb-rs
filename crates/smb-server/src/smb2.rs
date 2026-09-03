@@ -81,6 +81,11 @@ pub struct Smb2Conn {
     pub ntlm_blobs: Option<(Vec<u8>, Vec<u8>)>,
     /// Challenge token sent during leg 1 (for the mechListMIC input).
     pub ntlm_targ: Option<Vec<u8>>,
+    /// True when the client's SESSION_SETUP carries bare NTLMSSP messages with
+    /// no SPNEGO envelope (leg 1's blob starts with the NTLMSSP signature
+    /// directly, not a negTokenInit/negTokenResp tag); the response must then
+    /// echo bare NTLMSSP too, with no mechListMIC (an SPNEGO-only concept).
+    pub raw_ntlm: bool,
     /// Raw challenge token sent during leg 1 (for mechListMIC).
     /// Lease key each open handle joined, so a write/open from a co-holder of
     /// the same lease does not break it ([MS-SMB2] §3.3.4.7).
@@ -138,6 +143,10 @@ pub struct Smb2Conn {
     pub client_security_mode: u16,
     /// Client Capabilities flags from NEGOTIATE.
     pub client_capabilities: u32,
+    /// Connection.SupportsNotifications ([MS-SMB2] §3.3.5.4): true once the
+    /// server has echoed GLOBAL_CAP_NOTIFICATIONS in the NEGOTIATE response
+    /// (dialect 3.1.1 and the client requested it too).
+    pub supports_notifications: bool,
     /// Dialects the client offered in NEGOTIATE.
     pub client_dialects: Vec<u16>,
     /// Set to terminate the transport connection after the current frame
@@ -195,6 +204,7 @@ impl Smb2Conn {
             peer_encrypts: false,
             ntlm_blobs: None,
             ntlm_targ: None,
+            raw_ntlm: false,
             lease_keys: HashMap::new(),
             pipes: HashMap::new(),
             searches: HashMap::new(),
@@ -213,6 +223,7 @@ impl Smb2Conn {
             client_guid: [0u8; 16],
             client_security_mode: 0,
             client_capabilities: 0,
+            supports_notifications: false,
             client_dialects: Vec::new(),
             disconnect: false,
             chain_fid: None,
@@ -1884,12 +1895,26 @@ pub(crate) fn negotiate(
     }
     // Must match the Capabilities word written by build_response_full below so
     // VALIDATE_NEGOTIATE_INFO echoes it.
+    // Server-to-client notifications ([MS-SMB2] §3.3.5.4): the server declares
+    // IsServerToClientNotificationsSupported = TRUE (it can format and send an
+    // SMB2_SERVER_TO_CLIENT_NOTIFICATION), so the bit is echoed whenever the
+    // client requests it on a 3.1.1 connection.
+    let notifications = dialect == smb_proto_smb2::negotiate::DIALECT_311
+        && conn.client_capabilities & smb_proto_smb2::negotiate::caps::NOTIFICATIONS != 0;
+    conn.supports_notifications = notifications;
     conn.advertised_caps = if dialect >= smb_proto_smb2::negotiate::DIALECT_300 {
         smb_proto_smb2::negotiate::caps::LARGE_MTU
             | smb_proto_smb2::negotiate::caps::MULTI_CHANNEL
             | smb_proto_smb2::negotiate::caps::LEASING
+            | smb_proto_smb2::negotiate::caps::DIRECTORY_LEASING
+            | smb_proto_smb2::negotiate::caps::PERSISTENT_HANDLES
     } else if dialect >= smb_proto_smb2::negotiate::DIALECT_210 {
         smb_proto_smb2::negotiate::caps::LARGE_MTU | smb_proto_smb2::negotiate::caps::LEASING
+    } else {
+        0
+    };
+    conn.advertised_caps |= if notifications {
+        smb_proto_smb2::negotiate::caps::NOTIFICATIONS
     } else {
         0
     };
@@ -2002,6 +2027,7 @@ pub(crate) fn negotiate(
             &comp_algos,
             compression_chained,
             server.require_signing,
+            notifications,
         ),
     )
 }
@@ -2052,6 +2078,12 @@ pub(crate) fn session_setup(
     );
     match smb_auth::ntlm::msg_type(inner) {
         Some(smb_auth::ntlm::MSG_TYPE1) | None => {
+            // A client using a raw NTLM security package (no SPNEGO) sends the
+            // NTLMSSP signature directly with no negTokenInit/negTokenResp
+            // envelope; the response must then also be bare NTLMSSP, or a
+            // strict NTLM-only client fails to parse our SPNEGO framing as an
+            // NTLM CHALLENGE_MESSAGE.
+            conn.raw_ntlm = req.blob.first() != Some(&0x60) && req.blob.first() != Some(&0xA1);
             // Leg 1: issue CHALLENGE under MORE_PROCESSING_REQUIRED. A binding
             // channel and a reauthentication keep the existing session id
             // instead of allocating one ([MS-SMB2] §3.3.5.5.2/§3.3.5.5.3).
@@ -2079,7 +2111,11 @@ pub(crate) fn session_setup(
                 let cur = u32::from_le_bytes(t2[FLAGS_OFF..FLAGS_OFF + 4].try_into().unwrap());
                 t2[FLAGS_OFF..FLAGS_OFF + 4].copy_from_slice(&(cur | extra).to_le_bytes());
             }
-            let wrapped = smb_auth::ntlm::wrap_negtoken_targ(&t2);
+            let wrapped = if conn.raw_ntlm {
+                t2
+            } else {
+                smb_auth::ntlm::wrap_negtoken_targ(&t2)
+            };
             conn.ntlm_targ = Some(wrapped.clone());
             conn.ntlm_blobs = Some((req.blob.clone(), Vec::new()));
             Ok((
@@ -2174,6 +2210,9 @@ pub(crate) fn session_setup(
             // MechTypes DER, computed with the server signing key and RC4
             // checksum-sealed when KEY_EXCH was negotiated ([MS-NLMP]
             // §3.4.6, samba ntlmssp_make_packet_signature RECEIVE path).
+            // A raw-NTLM exchange (no SPNEGO) has no mechListMIC/accept-complete
+            // concept at all: the AUTHENTICATE is the last client message, and
+            // the server's SUCCESS response carries no security buffer.
             const MIC_OFFSET: usize = 60;
             const MIC_SIZE: usize = 16;
             let mic_field_present = req.blob.len() > MIC_OFFSET + MIC_SIZE;
@@ -2181,10 +2220,13 @@ pub(crate) fn session_setup(
                 && req.blob[MIC_OFFSET..MIC_OFFSET + MIC_SIZE]
                     .iter()
                     .any(|&b| b != 0);
-            // A guest/anonymous session has no session key, so it cannot echo a
-            // mechListMIC; it completes with a plain accept-complete instead of
-            // failing ([MS-SMB2] §3.3.5.5: anonymous/guest sessions are unsigned).
-            let wrapped = if client_mic_nonzero && conn.session_key.is_some() {
+            let wrapped = if conn.raw_ntlm {
+                Vec::new()
+            } else if client_mic_nonzero && conn.session_key.is_some() {
+                // A guest/anonymous session has no session key, so it cannot
+                // echo a mechListMIC; it completes with a plain accept-complete
+                // instead of failing ([MS-SMB2] §3.3.5.5: anonymous/guest
+                // sessions are unsigned).
                 let key = conn.session_key.unwrap();
                 let init = conn
                     .ntlm_blobs
