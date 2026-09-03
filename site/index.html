@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smb-rs — an SMB1/SMB2/SMB3 file server in Rust</title>
+<meta name="description" content="A from-scratch SMB1/SMB2/SMB3 file server implementation in Rust, built directly against the MS-CIFS/MS-SMB/MS-SMB2/MS-NLMP specifications.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1b1f23;
+    --muted: #57606a;
+    --bg: #ffffff;
+    --card: #f6f8fa;
+    --border: #d0d7de;
+    --accent: #0969da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --bg: #0d1117;
+      --card: #161b22;
+      --border: #30363d;
+      --accent: #4493f8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.5;
+  }
+  main {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 5rem;
+  }
+  header { text-align: center; margin-bottom: 2.5rem; }
+  header img { width: 220px; max-width: 60vw; }
+  h1 { margin: 0.5rem 0 0.25rem; font-size: 2.2rem; }
+  .tagline { color: var(--muted); font-size: 1.15rem; margin: 0; }
+  .links { margin-top: 1.25rem; display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+  .links a {
+    display: inline-block;
+    padding: 0.4rem 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    text-decoration: none;
+    color: var(--fg);
+    font-size: 0.9rem;
+  }
+  .links a:hover { border-color: var(--accent); color: var(--accent); }
+  h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; margin-top: 2.5rem; }
+  .crates { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }
+  .crate {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    background: var(--card);
+  }
+  .crate a { font-weight: 600; text-decoration: none; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .crate p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.88rem; }
+  footer { margin-top: 3rem; text-align: center; color: var(--muted); font-size: 0.85rem; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="assets/logo.jpg" alt="smb-rs logo">
+    <h1>smb-rs</h1>
+    <p class="tagline">An SMB1 / SMB2 / SMB3 file server written in Rust.</p>
+    <div class="links">
+      <a href="https://github.com/farazshaikh/smb-rs">GitHub</a>
+      <a href="https://github.com/farazshaikh/smb-rs#readme">README</a>
+      <a href="https://github.com/farazshaikh/smb-rs/blob/main/docs/command_status.md">Command status</a>
+      <a href="https://github.com/farazshaikh/smb-rs/blob/main/docs/IMPLEMENTATION_PLAN.md">Implementation plan</a>
+    </div>
+  </header>
+
+  <p>
+    <code>smb-rs</code> is a from-scratch implementation of the SMB family of
+    protocols, built directly against the public Microsoft Open Specifications —
+    <a href="https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs/">MS-CIFS</a>,
+    <a href="https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb/">MS-SMB</a>,
+    <a href="https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/">MS-SMB2</a> and
+    <a href="https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/">MS-NLMP</a>.
+    It serves files and directories over the network to standard clients
+    (<code>smbclient</code>, Windows Explorer, macOS, the Linux kernel CIFS
+    upcall) with real NTLMv2 challenge/response authentication, message
+    signing on every dialect, and SMB 3.x negotiate contexts including
+    pre-authentication integrity and applied AES-GCM/CCM encryption.
+  </p>
+  <p>
+    It's organised as a focused cargo workspace — protocol codecs, transport,
+    VFS abstraction, POSIX backend, auth, crypto service provider, server —
+    so each layer stays readable and independently testable. The API docs
+    below are generated straight from that workspace's doc comments.
+  </p>
+
+  <h2>API documentation</h2>
+  <div class="crates">
+    <div class="crate"><a href="rustsmb/index.html">rustsmb</a><p>The server binary: CLI, accept loop, observability wiring.</p></div>
+    <div class="crate"><a href="smb_proto/index.html">smb-proto</a><p>Dialect-neutral protocol primitives: codec trait, NT status codes, FILETIME, buffer helpers.</p></div>
+    <div class="crate"><a href="smb_proto_smb1/index.html">smb-proto-smb1</a><p>SMB1 (MS-SMB/MS-CIFS) wire structures: headers, commands, TRANS2 information levels.</p></div>
+    <div class="crate"><a href="smb_proto_smb2/index.html">smb-proto-smb2</a><p>SMB2 wire structures (MS-SMB2).</p></div>
+    <div class="crate"><a href="smb_proto_smb3/index.html">smb-proto-smb3</a><p>SMB3 additions over SMB2: encryption, pre-authentication integrity.</p></div>
+    <div class="crate"><a href="smb_transport/index.html">smb-transport</a><p>Async SMB message transport abstraction: TCP/NBSS and in-memory implementations.</p></div>
+    <div class="crate"><a href="smb_vfs/index.html">smb-vfs</a><p>Dialect-neutral virtual filesystem interface implemented by storage backends.</p></div>
+    <div class="crate"><a href="smb_backend_posix/index.html">smb-backend-posix</a><p>Default POSIX async-fs storage backend for the VFS.</p></div>
+    <div class="crate"><a href="smb_auth/index.html">smb-auth</a><p>NTLMSSP messages, SPNEGO wrapping, NTLMv1/v2 verification.</p></div>
+    <div class="crate"><a href="smb_csp/index.html">smb-csp</a><p>Crypto service provider: RustCrypto-backed with bundled fallbacks.</p></div>
+    <div class="crate"><a href="smb_handle_store/index.html">smb-handle-store</a><p>Pluggable durable/persistent SMB handle store (local and replicated backends).</p></div>
+    <div class="crate"><a href="smb_testsuite/index.html">smb-testsuite</a><p>Conformance/interoperability test harness for the server.</p></div>
+    <div class="crate"><a href="smb_test_dashboard/index.html">smb-test-dashboard</a><p>REST + web dashboard exposing test pass/fail status from a CSV.</p></div>
+  </div>
+
+  <footer>
+    Built from <a href="https://github.com/farazshaikh/smb-rs">farazshaikh/smb-rs</a> by GitHub Actions on every push to <code>main</code>.
+  </footer>
+</main>
+</body>
+</html>

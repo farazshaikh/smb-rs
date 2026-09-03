@@ -8,6 +8,10 @@
   <strong>An SMB1 / SMB2 / SMB3 file server written in Rust.</strong>
 </p>
 
+<p align="center">
+  <a href="https://farazshaikh.github.io/smb-rs/">Project page &amp; API docs</a>
+</p>
+
 ---
 
 `smb-rs` is a from-scratch implementation of the SMB family of protocols,

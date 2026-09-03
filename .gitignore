@@ -2,6 +2,7 @@
 server.log
 share/
 *.log
+/_site
 
 # .NET build artifacts under the test/wpts submodule (microsoft/WindowsProtocolTestSuites).
 test/wpts/**/bin/
