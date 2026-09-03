@@ -182,7 +182,7 @@ protocol,Negotiate_SMB311_Compression_InvalidSmbDialect,Negotiation,pass,52,2026
 protocol,Negotiate_SMB311_ContextID_NetName,Negotiation,pass,56,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,Negotiate_SMB311_InvalidCipher,Negotiation,pass,54,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,Negotiate_SMB311_InvalidHashAlgorithm,Negotiation,pass,56,2026-09-01T01:07:25.186402-07:00,4ed532e,
-protocol,Negotiate_SMB311_IsServerToClientNotificationsSupported,Negotiation,skip,52,2026-09-01T01:07:25.186402-07:00,4ed532e,Server-to-client notifications capability not implemented
+protocol,Negotiate_SMB311_IsServerToClientNotificationsSupported,Negotiation,pass,52,2026-09-03T00:00:00-07:00,6ea4c02,GLOBAL_CAP_NOTIFICATIONS echoed on 3.1.1 when the client requests it (Connection.SupportsNotifications)
 protocol,Negotiate_SMB311_IsTransportCapabilitiesSupported,Negotiation,pass,55,2026-09-01T01:07:25.186402-07:00,4ed532e,
 protocol,Negotiate_SMB311_RdmaTransformCapabilities_EmptyTransformIds,Negotiation,skip,51,2026-09-01T01:07:25.186402-07:00,4ed532e,Requires RDMA transport; not implemented
 protocol,Negotiate_SMB311_RdmaTransformCapabilities_InvalidDataLength,Negotiation,skip,51,2026-09-01T01:07:25.186402-07:00,4ed532e,Requires RDMA transport; not implemented
@@ -260,7 +260,7 @@ protocol,BVT_SessionMgmt_NewSession,SessionMgmt,pass,115,2026-09-01T01:48:36.635
 protocol,BVT_SessionMgmt_Reauthentication,SessionMgmt,skip,0,2026-09-02T00:00:00-07:00,3474507,"Server now supports reauth correctly (keeps session id, re-derives signing/encryption keys, MS-SMB2 3.3.5.5.2); verified against the identical byte-for-byte first-handshake challenge. Hangs in this harness: the native-SSPI (secur32) client seeds a brand-new context with the stale completed token from the prior exchange and re-emits fresh NTLM Type1 forever regardless of server response -- a client-side SSPI defect, not a server issue"
 protocol,BVT_SessionMgmt_ReconnectSessionSetup,SessionMgmt,pass,178,2026-09-01T01:48:36.635170-07:00,283223a,
 protocol,SessionMgmt_ReconnectWithDifferentDialect,SessionMgmt,pass,1,2026-09-01T09:04:25.327801-07:00,acb3a54,
-protocol,SessionMgmt_SupportsNotificationsMismatch,SessionMgmt,skip,0,2026-09-01T09:04:25.327801-07:00,acb3a54,Needs GLOBAL_CAP_NOTIFICATIONS (server-to-client notifications) + session binding
+protocol,SessionMgmt_SupportsNotificationsMismatch,SessionMgmt,skip,0,2026-09-03T00:00:00-07:00,6ea4c02,"Raw-NTLM SPNEGO-wrapping bug fixed (client no longer crashes), but the mismatch check itself is unresolved: request has SessionId=0 + SESSION_FLAG_BINDING + no PreviousSessionId, which does not cleanly match the spec's documented session-lookup paths"
 protocol,BVT_SetGetIntegrityInfo,SetGetIntegrityInformation,pass,88,2026-08-30T13:33:40.5918232-07:00,d877de6,FSCTL_GET/SET_INTEGRITY_INFORMATION with per-open state.
 protocol,BVT_Signing,Signing,pass,90,2026-08-31T19:01:48.0622424-07:00,d877de6,3.1.1 SIGNING_CAPABILITIES negotiation + AES-GMAC; zero inner sig when encrypted.
 protocol,Signing_VerifyAesGmacSigning,Signing,pass,91,2026-08-31T19:01:56.2825541-07:00,d877de6,3.1.1 SIGNING_CAPABILITIES negotiation + AES-GMAC; zero inner sig when encrypted.
