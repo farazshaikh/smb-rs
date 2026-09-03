@@ -1,0 +1,4 @@
+[submodule "test/wpts"]
+	path = test/wpts
+	url = https://github.com/microsoft/WindowsProtocolTestSuites.git
+	branch = 4.26.8.1
