@@ -1,12 +1,12 @@
-# Conformance test image for smb-rs: builds the workspace and runs the
+# Conformance test image for smb-server-rs: builds the workspace and runs the
 # Rust integration suite against a locally-started rustsmb, recording results.
 #
 # Build:
-#   docker build -f test/Dockerfile -t smb-rs-test .
+#   docker build -f test/Dockerfile -t smb-server-rs-test .
 #
 # Run (io_uring needs a permissive seccomp profile inside containers):
 #   docker run --rm --security-opt seccomp=unconfined \
-#     -v "$PWD/test/data:/work/test/data" smb-rs-test
+#     -v "$PWD/test/data:/work/test/data" smb-server-rs-test
 #
 # Results are written to the mounted test/data/ so history persists on the host.
 

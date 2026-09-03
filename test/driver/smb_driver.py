@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JSON-driven SMB actuator for the smb-rs conformance suite.
+"""JSON-driven SMB actuator for the smb-server-rs conformance suite.
 
 Reads one JSON request from stdin and writes one JSON response to stdout. The
 Rust test harness owns the assertions; this driver only performs the SMB

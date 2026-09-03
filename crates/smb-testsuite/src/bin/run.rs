@@ -100,7 +100,7 @@ fn next(it: &mut impl Iterator<Item = String>, flag: &str) -> String {
 
 fn print_help() {
     eprintln!(
-        "smb-testrunner — smb-rs conformance suite\n\n\
+        "smb-testrunner — smb-server-rs conformance suite\n\n\
          --list                 list cases and exit\n\
          --filter <substr>      run only cases whose id/category contains substr\n\
          --record               write results under --data-dir\n\

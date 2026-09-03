@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Orchestrates the three smb-rs test suites (unit/system/protocol): verifies a
+# Orchestrates the three smb-server-rs test suites (unit/system/protocol): verifies a
 # live server before any suite that needs one, runs the suite, folds results
 # into test_status.csv, and refreshes the README summary.
 #

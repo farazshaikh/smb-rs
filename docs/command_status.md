@@ -1,6 +1,6 @@
 # Command implementation status
 
-Per-command coverage for `smb-rs`, keyed to the on-the-wire opcodes in
+Per-command coverage for `smb-server-rs`, keyed to the on-the-wire opcodes in
 [MS-SMB2] and [MS-CIFS]/[MS-SMB]. This is a command-level view; the granular
 per-feature tracker (tests, benchmarks, metrics) lives in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).

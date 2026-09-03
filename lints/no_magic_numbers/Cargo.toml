@@ -1,12 +1,12 @@
 [package]
 name = "no_magic_numbers"
 version = "0.1.0"
-authors = ["smb-rs"]
+authors = ["smb-server-rs"]
 description = "Dylint lint: flag magic-number integer literals that should be named constants in the smb-proto* crates"
 edition = "2024"
 publish = false
 
-# Standalone: not part of the main smb-rs workspace (uses rustc_private + a
+# Standalone: not part of the main smb-server-rs workspace (uses rustc_private + a
 # pinned nightly).
 [workspace]
 

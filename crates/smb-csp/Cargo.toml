@@ -1,6 +1,6 @@
 [package]
 name = "smb-csp"
-description = "Crypto service provider for smb-rs: dispatches between maintained RustCrypto crates and the bundled hand-rolled implementations"
+description = "Crypto service provider for smb-server-rs: dispatches between maintained RustCrypto crates and the bundled hand-rolled implementations"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

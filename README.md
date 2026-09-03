@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="assets/logo.jpg" alt="smb-rs logo" width="600"/>
+  <img src="assets/logo.jpg" alt="smb-server-rs logo" width="600"/>
 </p>
 
-<h1 align="center">smb-rs</h1>
+<h1 align="center">smb-server-rs</h1>
 
 <p align="center">
   <strong>An SMB1 / SMB2 / SMB3 file server written in Rust.</strong>
 </p>
 
 <p align="center">
-  <a href="https://farazshaikh.github.io/smb-rs/">Project page &amp; API docs</a>
+  <a href="https://farazshaikh.github.io/smb-server-rs/">Project page &amp; API docs</a>
 </p>
 
 ---
 
-`smb-rs` is a from-scratch implementation of the SMB family of protocols,
+`smb-server-rs` is a from-scratch implementation of the SMB family of protocols,
 built directly against the public Microsoft Open Specifications — [MS-CIFS],
 [MS-SMB], [MS-SMB2] and [MS-NLMP]. It serves files and directories over the
 network to standard clients (`smbclient`, Windows Explorer, macOS, the Linux
@@ -146,9 +146,9 @@ test/runtest.sh --setup
 SMB_TEST_HOST=127.0.0.1 SMB_TEST_PORT=4450 cargo test -p smb-testsuite
 
 # containerised build + run (system suite)
-docker build -f test/Dockerfile -t smb-rs-test .
+docker build -f test/Dockerfile -t smb-server-rs-test .
 docker run --rm --security-opt seccomp=unconfined \
-    -v "$PWD/test/data:/work/test/data" smb-rs-test
+    -v "$PWD/test/data:/work/test/data" smb-server-rs-test
 ```
 
 Results are committed under [test/data/](test/data/) — per-run JSON, `summary.csv`,
@@ -160,8 +160,8 @@ renders pass-rate trends and the latest run without a server.
 ## Building
 
 ```sh
-git clone https://github.com/farazshaikh/smb-rs.git
-cd smb-rs
+git clone https://github.com/farazshaikh/smb-server-rs.git
+cd smb-server-rs
 cargo build --release --workspace   # → target/release/rustsmb
 ```
 

@@ -1,6 +1,6 @@
 [package]
 name = "smb-testsuite"
-description = "Conformance/interoperability test harness for the smb-rs server"
+description = "Conformance/interoperability test harness for the smb-server-rs server"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

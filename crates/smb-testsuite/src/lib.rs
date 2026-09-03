@@ -1,4 +1,4 @@
-//! Conformance/interoperability test harness for the smb-rs server.
+//! Conformance/interoperability test harness for the smb-server-rs server.
 //!
 //! The test *plan* mirrors Microsoft's WindowsProtocolTestSuites FileServer
 //! family (MS-SMB2, MS-FSCC, MS-FSA, MS-DFSC, MS-SWN) at the category level.

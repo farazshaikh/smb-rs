@@ -1,11 +1,11 @@
 ---
-name: smb-rs-conventions
-description: 'Coding conventions for the smb-rs pure-Rust SMB1/SMB2/SMB3 server workspace. USE WHEN writing, reviewing, or refactoring Rust in this repo — especially: implementing a protocol feature faithfully from the [MS-SMB2]/[MS-CIFS] spec PDFs instead of just making a test pass; documenting public items (the workspace denies `missing_docs`); and replacing hardcoded protocol magic numbers / wire offsets / command codes / NT status values with named constants defined in the `smb-proto*` crates. Triggers: "smb-rs convention", "implement from spec", "reward hacking", "make the test pass", "MS-SMB2 pdf", "missing docs", "why does this compile without docs", "hardcoded constant", "magic number", "magic byte", "0xFE 0xFD 0xFC", "define constant in protocol", "clippy lint for literals", "disallow literals", "adding a command", "code review smb".'
+name: smb-server-rs-conventions
+description: 'Coding conventions for the smb-server-rs pure-Rust SMB1/SMB2/SMB3 server workspace. USE WHEN writing, reviewing, or refactoring Rust in this repo — especially: implementing a protocol feature faithfully from the [MS-SMB2]/[MS-CIFS] spec PDFs instead of just making a test pass; documenting public items (the workspace denies `missing_docs`); and replacing hardcoded protocol magic numbers / wire offsets / command codes / NT status values with named constants defined in the `smb-proto*` crates. Triggers: "smb-server-rs convention", "implement from spec", "reward hacking", "make the test pass", "MS-SMB2 pdf", "missing docs", "why does this compile without docs", "hardcoded constant", "magic number", "magic byte", "0xFE 0xFD 0xFC", "define constant in protocol", "clippy lint for literals", "disallow literals", "adding a command", "code review smb".'
 ---
 
-# smb-rs conventions
+# smb-server-rs conventions
 
-Conventions for the `smb-rs` workspace (a pure-Rust SMB1/2/3 file server). Apply
+Conventions for the `smb-server-rs` workspace (a pure-Rust SMB1/2/3 file server). Apply
 these when adding or reviewing code. Some are enforced by the compiler; the rest
 are enforced by review.
 

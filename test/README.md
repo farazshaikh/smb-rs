@@ -1,4 +1,4 @@
-# smb-rs conformance & interoperability test suite
+# smb-server-rs conformance & interoperability test suite
 
 A Rust integration-test harness that exercises the `rustsmb` server and tracks
 pass/fail and performance metrics across runs. The **test plan** mirrors the
@@ -94,9 +94,9 @@ cargo build -p smb-server -p smb-testsuite
 ### Docker
 
 ```sh
-docker build -f test/Dockerfile -t smb-rs-test .
+docker build -f test/Dockerfile -t smb-server-rs-test .
 docker run --rm --security-opt seccomp=unconfined \
-    -v "$PWD/test/data:/work/test/data" smb-rs-test
+    -v "$PWD/test/data:/work/test/data" smb-server-rs-test
 ```
 
 > `--security-opt seccomp=unconfined` is required because the server uses

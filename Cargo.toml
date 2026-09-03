@@ -1,6 +1,6 @@
 [package]
 name = "rustsmb-meta"
-description = "Workspace meta-package for the smb-rs project"
+description = "Workspace meta-package for the smb-server-rs project"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

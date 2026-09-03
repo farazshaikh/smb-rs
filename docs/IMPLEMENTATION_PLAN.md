@@ -1,4 +1,4 @@
-# smb-rs Implementation Plan
+# smb-server-rs Implementation Plan
 
 ## Legend
 - ✅ DONE — implemented, tested, verified

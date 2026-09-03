@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Entrypoint for the smb-rs conformance image: starts the server, runs the
+# Entrypoint for the smb-server-rs conformance image: starts the server, runs the
 # suite, records results to $DATA_DIR, and exits non-zero on any failure.
 set -euo pipefail
 
 PORT="${PORT:-4450}"
 DATA_DIR="${DATA_DIR:-/work/test/data}"
-SHARE_DIR="${SHARE_DIR:-/tmp/smb-rs-share}"
+SHARE_DIR="${SHARE_DIR:-/tmp/smb-server-rs-share}"
 PYTHON="${SMB_TEST_PYTHON:-python3}"
 DRIVER="${SMB_TEST_DRIVER:-/work/test/driver/smb_driver.py}"
 

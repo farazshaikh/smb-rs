@@ -1,6 +1,6 @@
 [package]
 name = "smb-backend-posix"
-description = "Default POSIX async-fs storage backend for the smb-rs virtual filesystem"
+description = "Default POSIX async-fs storage backend for the smb-server-rs virtual filesystem"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

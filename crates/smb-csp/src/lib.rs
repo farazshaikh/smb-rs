@@ -1,4 +1,4 @@
-//! Crypto service provider for smb-rs.
+//! Crypto service provider for smb-server-rs.
 //!
 //! One stable API surface, two interchangeable backends selected at compile
 //! time:
