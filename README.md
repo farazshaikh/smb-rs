@@ -2,10 +2,9 @@
   <img src="assets/mascot.png" alt="smb-server-rs mascot" width="400"/>
 </p>
 
-<h1 align="center">smb-server-rs</h1>
 
 <p align="center">
-  <strong>An SMB1 / SMB2 / SMB3 file server written in Rust.</strong>
+  <strong>High performance Rust SMB1/2/3 Server</strong>
 </p>
 
 <p align="center">
